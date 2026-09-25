@@ -11,6 +11,7 @@ brush-dataset.path = "../brush-dataset"
 brush-vfs.path = "../brush-vfs"
 brush-serde.path = "../brush-serde"
 brush-cube.path = "../brush-cube"
+brush-async.path = "../brush-async"
 clap.workspace = true
 burn = { workspace = true, features = ["autodiff"] }
 glam.workspace = true

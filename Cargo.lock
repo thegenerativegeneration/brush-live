@@ -1082,6 +1082,7 @@ name = "brush-guide"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "brush-async",
  "brush-cube",
  "brush-dataset",
  "brush-render",
