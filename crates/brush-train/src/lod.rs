@@ -41,7 +41,7 @@ pub async fn decimate_to_count(mut splats: Splats, scores: &[f32], target_count:
 
 /// Log-determinant of a 6x6 positive semi-definite matrix via Cholesky decomposition.
 /// Returns `f32::NEG_INFINITY` if the matrix is not positive definite.
-fn log_det_6x6(m: &[f32; 36]) -> f32 {
+pub fn log_det_6x6(m: &[f32; 36]) -> f32 {
     let mut l = [0.0f32; 36];
     for j in 0..6 {
         let mut sum = 0.0;
