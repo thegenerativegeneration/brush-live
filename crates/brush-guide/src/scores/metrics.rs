@@ -2,6 +2,7 @@ use super::pass::PassOutput;
 use glam::Vec3;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct CoverageParams {
     /// Views needed for full credit.
     pub n_target: f32,

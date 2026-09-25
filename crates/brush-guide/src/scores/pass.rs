@@ -11,6 +11,7 @@ pub struct PassView {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PassConfig {
     /// Random-sign probes per view. One is enough when summing over many views.
     pub hutchinson_samples: u32,
