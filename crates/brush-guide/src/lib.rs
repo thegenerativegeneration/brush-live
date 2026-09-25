@@ -3,3 +3,5 @@
 
 pub mod keyframe;
 pub mod protocol;
+
+pub mod scores;
