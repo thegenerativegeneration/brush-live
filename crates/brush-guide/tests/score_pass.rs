@@ -140,3 +140,40 @@ async fn empty_views_give_zeros() {
     assert_eq!(out.weight, vec![0.0]);
     assert_eq!(out.fisher[0], [0.0; 36]);
 }
+
+#[tokio::test]
+async fn px_per_m_uses_capture_resolution() {
+    let device = device().await.autodiff();
+    let splats = splats_from(&[[0.0, 0.0, 2.0]], -2.0, 0.6, &device);
+    let camera = camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0));
+    let expected = camera.focal(SIZE).x / 2.0;
+    for render_scale in [1.0, 0.5] {
+        let view = PassView {
+            camera,
+            img_size: SIZE,
+        };
+        let cfg = PassConfig {
+            render_scale,
+            ..Default::default()
+        };
+        let out = score_pass(&splats, &[view], &cfg).await;
+        let rel = (out.max_px_per_m[0] - expected).abs() / expected;
+        assert!(
+            rel < 1e-3,
+            "render_scale {render_scale}: {} vs {expected}",
+            out.max_px_per_m[0]
+        );
+    }
+}
+
+#[tokio::test]
+async fn inner_device_splats_are_scored() {
+    let device = device().await;
+    let splats = splats_from(&[[0.0, 0.0, 2.0]], -2.0, 0.6, &device);
+    let view = PassView {
+        camera: camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)),
+        img_size: SIZE,
+    };
+    let out = score_pass(&splats, &[view], &PassConfig::default()).await;
+    assert_eq!(out.weight, vec![1.0]);
+}

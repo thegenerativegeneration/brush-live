@@ -102,7 +102,7 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
         let dir = to_g / dist.clone();
         dir_sum = dir_sum + dir * observed.clone().unsqueeze_dim::<2>(1);
         weight = weight + observed.clone();
-        let focal = view.camera.focal(size).x;
+        let focal = view.camera.focal(view.img_size).x;
         let ppm = dist.squeeze_dim::<1>(1).recip() * focal * observed;
         max_ppm = max_ppm.max_pair(ppm);
     }
