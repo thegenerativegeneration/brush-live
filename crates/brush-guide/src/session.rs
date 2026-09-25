@@ -105,6 +105,12 @@ impl GuideSession {
         rx.await.map_err(stopped)?
     }
 
+    /// True while the worker's command channel is open. A panicked worker
+    /// closes its receiver, so this goes false without waiting for a reply.
+    pub fn is_alive(&self) -> bool {
+        !self.tx.is_closed()
+    }
+
     pub fn scores(&self) -> watch::Receiver<Option<Arc<ScoreSetMsg>>> {
         self.scores.clone()
     }
@@ -277,5 +283,29 @@ async fn worker(
             publish_counts(&status_tx, &live);
         }
         brush_async::yield_now().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Exercises the channel-closed check directly, without spinning up the
+    /// GPU-backed worker: a real "panicked worker" is covered by the
+    /// server's Hello-reuse behaviour instead.
+    #[tokio::test]
+    async fn is_alive_reflects_worker_channel() {
+        let (tx, rx) = mpsc::channel(1);
+        let (_scores_tx, scores) = watch::channel(None);
+        let (_status_tx, status) = watch::channel(StatusMsg::default());
+        let session = GuideSession {
+            tx,
+            scores,
+            status,
+            _actor: Actor::new("test"),
+        };
+        assert!(session.is_alive());
+        drop(rx);
+        assert!(!session.is_alive());
     }
 }

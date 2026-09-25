@@ -1,0 +1,29 @@
+[package]
+name = "brush-guide-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+brush-guide.path = "../brush-guide"
+brush-process.path = "../brush-process"
+brush-dataset.path = "../brush-dataset"
+burn.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+glam.workspace = true
+image = { workspace = true, features = ["jpeg", "png"] }
+log.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time", "fs"] }
+tokio-tungstenite = "0.26"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rerun.workspace = true
+env_logger = "0.11"
+
+[dev-dependencies]
+brush-cube.path = "../brush-cube"
+
+[lints]
+workspace = true
