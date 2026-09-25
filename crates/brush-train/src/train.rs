@@ -211,19 +211,30 @@ impl SplatTrainer {
     }
 
     /// Add `new` splats to `splats`, keeping optimizer and refine state aligned.
-    /// Both must be on the inner backend and share the SH degree. The Mip
-    /// floor is baked in; the next refine recomputes it for all splats.
+    /// Both must be on the inner backend and share the SH degree. If `splats`
+    /// already carries a Mip-Splatting floor it is kept (not baked): the
+    /// existing floor values are reused as-is and extended for the new
+    /// splats via [`compute_min_scale`], so the filter stays live between
+    /// refines instead of silently switching off until the next one.
+    /// Otherwise the (absent) floor is a no-op as before. `new`'s own floor,
+    /// if any, is always baked into its raw params before concatenation.
     pub fn append_splats(&mut self, splats: Splats, new: Splats) -> Splats {
         let n = new.num_splats() as usize;
         if n == 0 {
             return splats;
         }
-        let splats = splats.bake_min_scale();
-        let new = new.bake_min_scale();
         let opt_device = splats.device().inner();
+        let existing_floor = splats.min_scale.clone();
+        let splats = if existing_floor.is_some() {
+            splats
+        } else {
+            splats.bake_min_scale()
+        };
+        let new_means = new.means().inner();
+        let new = new.bake_min_scale();
         let (nt, ns, no) = (new.transforms.val(), new.sh_coeffs.val(), new.raw_opacities.val());
 
-        let splats = if let Some(optim) = self.optim.as_mut() {
+        let mut splats = if let Some(optim) = self.optim.as_mut() {
             map_splats_and_opt(
                 splats,
                 optim,
@@ -247,6 +258,14 @@ impl SplatTrainer {
             s.raw_opacities = s.raw_opacities.map(|x| Tensor::cat(vec![x, no], 0));
             s
         };
+
+        if let Some(existing_floor) = existing_floor {
+            let new_floor =
+                compute_min_scale(&new_means, &self.view_cams, self.config.min_scale_factor)
+                    .unwrap_or_else(|| Tensor::zeros([n], &opt_device));
+            splats = splats.with_min_scale(Tensor::cat(vec![existing_floor, new_floor], 0));
+        }
+
         if let Some(record) = self.refine_record.take() {
             self.refine_record = Some(record.pad(n));
         }
@@ -976,5 +995,48 @@ mod append_tests {
         assert_eq!(s.num_splats(), 15);
         let (s, _) = trainer.step(batch(), s.train()).await;
         assert_eq!(s.num_splats(), 15);
+    }
+
+    #[tokio::test]
+    async fn append_keeps_mip_floor() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let device = device.autodiff();
+        let config = TrainConfig::parse_from(["test"]);
+        let base = splats(50, 2.0, &device);
+        let bounds = get_splat_bounds(base.clone(), BOUND_PERCENTILE).await;
+        let mut trainer = SplatTrainer::new(&config, &device, bounds);
+        trainer.set_view_cams(vec![(glam::Vec3::ZERO, 30.0)]);
+
+        let (s, _) = trainer.step(batch(), base.train()).await;
+        let (s, _) = trainer.refine(1, s.valid()).await;
+        let pre_count = s.num_splats() as usize;
+        let pre_floor = s
+            .min_scale
+            .clone()
+            .expect("refine with view cams should attach a Mip floor")
+            .into_data_async()
+            .await
+            .expect("floor readback")
+            .try_into_vec::<f32>()
+            .expect("floor readback");
+
+        let s = trainer.append_splats(s, splats(20, 2.5, &device).valid());
+        assert_eq!(s.num_splats() as usize, pre_count + 20);
+
+        let floor = s
+            .min_scale
+            .clone()
+            .expect("Mip floor should survive append_splats");
+        assert_eq!(floor.dims()[0], pre_count + 20);
+        let floor_vals = floor
+            .into_data_async()
+            .await
+            .expect("floor readback")
+            .try_into_vec::<f32>()
+            .expect("floor readback");
+        assert_eq!(&floor_vals[..pre_count], &pre_floor[..]);
+
+        let (s, _) = trainer.step(batch(), s.train()).await;
+        assert_eq!(s.num_splats() as usize, pre_count + 20);
     }
 }
