@@ -60,4 +60,16 @@ impl RefineRecord {
             max_screen_size: self.max_screen_size.select(0, indices),
         }
     }
+
+    /// Zero-pad the per-splat stats with `n` fresh (never-observed) entries,
+    /// for splats appended after this record was created.
+    pub(crate) fn pad(self, n: usize) -> Self {
+        let device = self.vis_weight.device();
+        let pad = |t: Tensor<1>| Tensor::cat(vec![t, Tensor::zeros([n], &device)], 0);
+        Self {
+            refine_weight_norm: pad(self.refine_weight_norm),
+            vis_weight: pad(self.vis_weight),
+            max_screen_size: pad(self.max_screen_size),
+        }
+    }
 }

@@ -210,6 +210,49 @@ impl SplatTrainer {
         self.view_cams = view_cams;
     }
 
+    /// Add `new` splats to `splats`, keeping optimizer and refine state aligned.
+    /// Both must be on the inner backend and share the SH degree. The Mip
+    /// floor is baked in; the next refine recomputes it for all splats.
+    pub fn append_splats(&mut self, splats: Splats, new: Splats) -> Splats {
+        let n = new.num_splats() as usize;
+        if n == 0 {
+            return splats;
+        }
+        let splats = splats.bake_min_scale();
+        let new = new.bake_min_scale();
+        let opt_device = splats.device().inner();
+        let (nt, ns, no) = (new.transforms.val(), new.sh_coeffs.val(), new.raw_opacities.val());
+
+        let splats = if let Some(optim) = self.optim.as_mut() {
+            map_splats_and_opt(
+                splats,
+                optim,
+                |x| Tensor::cat(vec![x, nt], 0),
+                |x| Tensor::cat(vec![x, ns], 0),
+                |x| Tensor::cat(vec![x, no], 0),
+                |x: Tensor<2>| {
+                    let d1 = x.dims()[1];
+                    Tensor::cat(vec![x, Tensor::zeros([n, d1], &opt_device)], 0)
+                },
+                |x: Tensor<3>| {
+                    let [_, d1, d2] = x.dims();
+                    Tensor::cat(vec![x, Tensor::zeros([n, d1, d2], &opt_device)], 0)
+                },
+                |x: Tensor<1>| Tensor::cat(vec![x, Tensor::zeros([n], &opt_device)], 0),
+            )
+        } else {
+            let mut s = splats;
+            s.transforms = s.transforms.map(|x| Tensor::cat(vec![x, nt], 0));
+            s.sh_coeffs = s.sh_coeffs.map(|x| Tensor::cat(vec![x, ns], 0));
+            s.raw_opacities = s.raw_opacities.map(|x| Tensor::cat(vec![x, no], 0));
+            s
+        };
+        if let Some(record) = self.refine_record.take() {
+            self.refine_record = Some(record.pad(n));
+        }
+        splats
+    }
+
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
         let mut splats = splats;
 
@@ -865,4 +908,73 @@ fn sample_background_color<R: rand::Rng + ?Sized>(
         rng.random_range(-strength..strength),
     );
     (base + noise).clamp(glam::Vec3::ZERO, glam::Vec3::ONE)
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod append_tests {
+    use super::*;
+    use brush_dataset::scene::{SceneBatch, view_to_packed_data};
+    use brush_render::AlphaMode;
+    use brush_render::camera::Camera;
+    use brush_render::gaussian_splats::{SplatRenderMode, inverse_sigmoid};
+    use brush_render::kernels::camera_model::CameraModel;
+    use burn::module::Module;
+    use clap::Parser;
+
+    fn splats(n: usize, z: f32, device: &Device) -> Splats {
+        Splats::from_raw(
+            (0..n).flat_map(|i| [i as f32 * 0.01, 0.0, z]).collect(),
+            [1.0, 0.0, 0.0, 0.0].repeat(n),
+            vec![-3.0; n * 3],
+            vec![0.5; n * 3],
+            vec![inverse_sigmoid(0.5); n],
+            SplatRenderMode::Default,
+            device,
+        )
+    }
+
+    fn batch() -> SceneBatch {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(32, 32, image::Rgb([255, 0, 0])));
+        let (img_packed, has_alpha) = view_to_packed_data(img, AlphaMode::Transparent);
+        let fov = 60f64.to_radians();
+        SceneBatch {
+            img_packed,
+            has_alpha,
+            alpha_mode: AlphaMode::Transparent,
+            camera: Camera::new(glam::Vec3::ZERO, glam::Quat::IDENTITY, fov, fov, glam::vec2(0.5, 0.5), CameraModel::Pinhole),
+        }
+    }
+
+    #[tokio::test]
+    async fn append_then_step_and_refine() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let device = device.autodiff();
+        let config = TrainConfig::parse_from(["test"]);
+        let base = splats(50, 2.0, &device);
+        let bounds = get_splat_bounds(base.clone(), BOUND_PERCENTILE).await;
+        let mut trainer = SplatTrainer::new(&config, &device, bounds);
+
+        let (s, _) = trainer.step(batch(), base.train()).await;
+        let s = s.valid();
+        let s = trainer.append_splats(s, splats(20, 2.5, &device).valid());
+        assert_eq!(s.num_splats(), 70);
+
+        let (s, _) = trainer.step(batch(), s.train()).await;
+        let (s, _) = trainer.refine(1, s.valid()).await;
+        assert!(s.num_splats() >= 1);
+    }
+
+    #[tokio::test]
+    async fn append_before_first_step() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let device = device.autodiff();
+        let config = TrainConfig::parse_from(["test"]);
+        let base = splats(10, 2.0, &device).valid();
+        let bounds = get_splat_bounds(base.clone(), BOUND_PERCENTILE).await;
+        let mut trainer = SplatTrainer::new(&config, &device, bounds);
+        let s = trainer.append_splats(base, splats(5, 2.0, &device).valid());
+        assert_eq!(s.num_splats(), 15);
+        let (s, _) = trainer.step(batch(), s.train()).await;
+        assert_eq!(s.num_splats(), 15);
+    }
 }
