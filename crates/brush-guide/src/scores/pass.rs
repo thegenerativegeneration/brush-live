@@ -25,7 +25,7 @@ impl Default for PassConfig {
         Self {
             hutchinson_samples: 1,
             observed_eps: 1e-12,
-            render_scale: 1.0,
+            render_scale: 0.5,
         }
     }
 }
