@@ -1,0 +1,31 @@
+[package]
+name = "brush-guide"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+brush-render.path = "../brush-render"
+brush-train.path = "../brush-train"
+brush-dataset.path = "../brush-dataset"
+brush-vfs.path = "../brush-vfs"
+brush-serde.path = "../brush-serde"
+brush-cube.path = "../brush-cube"
+burn = { workspace = true, features = ["autodiff"] }
+glam.workspace = true
+image = { workspace = true, features = ["jpeg"] }
+rand.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = "2"
+half = "2"
+anyhow.workspace = true
+log.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "macros"] }
+web-time.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+
+[lints]
+workspace = true

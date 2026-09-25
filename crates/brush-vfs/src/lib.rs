@@ -263,6 +263,19 @@ impl BrushVfs {
         }
     }
 
+    /// A directory-backed VFS that only knows the given files (relative to
+    /// `base_path`). Unlike `from_path` it doesn't walk the directory, so it
+    /// can be created for files that are written after other VFSes exist.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn from_directory_files(base_path: &Path, files: Vec<PathBuf>) -> Self {
+        Self {
+            lookup: lookup_from_paths(&files),
+            container: VfsContainer::Directory {
+                base_path: base_path.to_path_buf(),
+            },
+        }
+    }
+
     #[cfg(target_family = "wasm")]
     pub async fn from_directory_handle(
         dir_handle: rrfd::wasm::DirectoryHandle,
@@ -590,5 +603,32 @@ mod tests {
             BrushVfs::from_reader(Cursor::new(b"<!DOCTYPE html>"), None).await,
             Err(VfsConstructError::ReceivedHTML(_))
         ));
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod directory_files_tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn reads_only_listed_files() {
+        let dir = std::env::temp_dir().join(format!("brush-vfs-df-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("images")).unwrap();
+        std::fs::write(dir.join("images/1.jpg"), b"one").unwrap();
+        std::fs::write(dir.join("images/2.jpg"), b"two").unwrap();
+
+        let vfs = BrushVfs::from_directory_files(&dir, vec![PathBuf::from("images/1.jpg")]);
+        let mut buf = Vec::new();
+        vfs.reader_at_path(Path::new("images/1.jpg"))
+            .await
+            .unwrap()
+            .read_to_end(&mut buf)
+            .await
+            .unwrap();
+        assert_eq!(buf, b"one");
+        assert!(vfs.reader_at_path(Path::new("images/2.jpg")).await.is_err());
+        assert_eq!(vfs.base_path(), Some(dir.clone()));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
