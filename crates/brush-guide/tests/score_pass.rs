@@ -63,6 +63,9 @@ async fn hutchinson_matches_exact_fisher() {
     let exact = exact_fisher(&splats, &view).await;
     let cfg = PassConfig {
         hutchinson_samples: 4000,
+        // exact_fisher renders at the fixed SIZE above; pin the estimate
+        // to the same resolution so the comparison is apples-to-apples.
+        render_scale: 1.0,
         ..Default::default()
     };
     let est = score_pass(&splats, &[view], &cfg).await;
