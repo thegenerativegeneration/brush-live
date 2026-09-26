@@ -13,6 +13,8 @@ pub enum KeyframeError {
     InvalidPose,
     #[error("invalid intrinsics")]
     InvalidIntrinsics,
+    #[error("depth size must be 1..=1024 per side")]
+    InvalidDepth,
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
     #[error("jpeg decode failed: {0}")]
@@ -22,6 +24,9 @@ pub enum KeyframeError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
+
+/// Largest accepted depth map side; `ARKit` scene depth is 256×192.
+pub const MAX_DEPTH_SIDE: u32 = 1024;
 
 pub struct DepthMap {
     pub width: u32,
@@ -78,6 +83,11 @@ pub async fn decode_keyframe(
     session_dir: &Path,
 ) -> Result<DecodedKeyframe, KeyframeError> {
     let camera = arkit_to_camera(h)?;
+    if let Some(size) = h.depth_size
+        && !size.iter().all(|d| (1..=MAX_DEPTH_SIDE).contains(d))
+    {
+        return Err(KeyframeError::InvalidDepth);
+    }
     let parts = split_keyframe_payload(h, payload)?;
     let image = image::load_from_memory_with_format(parts.jpeg, image::ImageFormat::Jpeg)?.into_rgb8();
     if image.dimensions() != (h.width, h.height) {
@@ -164,6 +174,18 @@ mod tests {
         let d = DepthMap { width: 2, height: 1, values: vec![1.0, 0.0] };
         assert_eq!(d.sample_uv(0.1, 0.5), Some(1.0));
         assert_eq!(d.sample_uv(0.9, 0.5), None);
+    }
+
+    #[tokio::test]
+    async fn bad_depth_sizes_are_rejected() {
+        let dir = std::env::temp_dir().join(format!("brush-guide-kf-depth-{}", std::process::id()));
+        for size in [[0, 0], [0, 10], [100_000, 100_000], [1025, 1]] {
+            let mut h = header(Mat4::IDENTITY, 8, 6);
+            h.depth_size = Some(size);
+            let err = decode_keyframe(&h, &[], &dir).await.err();
+            assert!(matches!(err, Some(KeyframeError::InvalidDepth)), "{size:?}: {err:?}");
+        }
+        assert!(!dir.exists(), "nothing written for rejected keyframes");
     }
 
     #[tokio::test]

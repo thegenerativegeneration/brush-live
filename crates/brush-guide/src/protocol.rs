@@ -10,6 +10,8 @@ pub enum ProtocolError {
     Json(#[from] serde_json::Error),
     #[error("payload size mismatch: expected {expected}, got {actual}")]
     PayloadSize { expected: usize, actual: usize },
+    #[error("declared payload size overflows")]
+    SizeOverflow,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -106,14 +108,25 @@ pub struct KeyframePayload<'a> {
     pub points: Vec<[f32; 3]>,
 }
 
+/// (depth bytes, total payload bytes) declared by the header, `None` on overflow.
+fn payload_sizes(h: &KeyframeHeader) -> Option<(usize, usize)> {
+    let depth_len = match h.depth_size {
+        None => 0,
+        Some([w, d]) => (w as usize).checked_mul(d as usize)?.checked_mul(2)?,
+    };
+    let points_len = (h.num_points as usize).checked_mul(12)?;
+    let total = (h.jpeg_len as usize)
+        .checked_add(depth_len)?
+        .checked_add(points_len)?;
+    Some((depth_len, total))
+}
+
 pub fn split_keyframe_payload<'a>(
     h: &KeyframeHeader,
     payload: &'a [u8],
 ) -> Result<KeyframePayload<'a>, ProtocolError> {
     let jpeg_len = h.jpeg_len as usize;
-    let depth_len = h.depth_size.map_or(0, |[w, d]| (w * d) as usize * 2);
-    let points_len = h.num_points as usize * 12;
-    let expected = jpeg_len + depth_len + points_len;
+    let (depth_len, expected) = payload_sizes(h).ok_or(ProtocolError::SizeOverflow)?;
     if payload.len() != expected {
         return Err(ProtocolError::PayloadSize { expected, actual: payload.len() });
     }
@@ -210,6 +223,17 @@ mod tests {
         assert_eq!(p.depth.unwrap(), vec![1.5, 2.0]);
         assert_eq!(p.points, vec![[0.1, 0.2, 0.3]]);
         assert!(split_keyframe_payload(&h, &payload[..payload.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn oversized_payload_sizes_are_errors_not_panics() {
+        let mut h = kf_header();
+        h.depth_size = Some([100_000, 100_000]);
+        assert!(split_keyframe_payload(&h, b"jpg").is_err());
+        h.depth_size = Some([u32::MAX, u32::MAX]);
+        h.jpeg_len = u32::MAX;
+        h.num_points = u32::MAX;
+        assert!(split_keyframe_payload(&h, b"jpg").is_err());
     }
 
     /// `WRITE_FIXTURES=/abs/path cargo test -p brush-guide write_golden_fixtures`
