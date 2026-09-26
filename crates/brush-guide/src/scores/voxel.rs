@@ -42,8 +42,8 @@ impl VoxelAggregator {
     pub fn aggregate(&mut self, gaussians: &[GaussianScore], now_s: f64) -> Vec<Cell> {
         let mut acc: HashMap<IVec3, Acc> = HashMap::new();
         for g in gaussians {
-            // `!(>=)` also drops NaN opacity, which would poison the cell weight.
-            if !(g.opacity >= self.min_opacity) || !g.opacity.is_finite() || !g.pos.is_finite() {
+            let visible = g.opacity.is_finite() && g.opacity >= self.min_opacity;
+            if !visible || !g.pos.is_finite() {
                 continue;
             }
             let coverage = if g.coverage.is_finite() { g.coverage } else { 0.0 };

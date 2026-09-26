@@ -9,7 +9,7 @@ use crate::scores::voxel::{GaussianScore, VoxelAggregator};
 use brush_async::Actor;
 use burn::tensor::{Device, Tensor};
 use glam::{UVec2, Vec3};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
 use web_time::Instant;
@@ -55,9 +55,21 @@ impl StatusMsg {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    /// The worker is gone (panicked or shut down); the session is unusable.
+    #[error("session stopped")]
+    Stopped,
+    #[error("{0}")]
+    Rejected(String),
+    #[error("writing splat: {0}")]
+    Io(#[from] std::io::Error),
+}
+
 enum Command {
     Keyframe(KeyframeHeader, Vec<u8>, oneshot::Sender<Result<(), String>>),
-    Export(oneshot::Sender<Result<Vec<u8>, String>>),
+    /// Export the splats; `true` also pauses training until the next new keyframe.
+    Export(bool, oneshot::Sender<Result<Vec<u8>, String>>),
     Reset(oneshot::Sender<()>),
 }
 
@@ -96,13 +108,15 @@ impl GuideSession {
         &self,
         header: KeyframeHeader,
         payload: Vec<u8>,
-    ) -> Result<(), String> {
+    ) -> Result<(), SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::Keyframe(header, payload, tx))
             .await
-            .map_err(stopped)?;
-        rx.await.map_err(stopped)?
+            .map_err(|_closed| SessionError::Stopped)?;
+        rx.await
+            .map_err(|_closed| SessionError::Stopped)?
+            .map_err(SessionError::Rejected)
     }
 
     /// True while the worker's command channel is open. A panicked worker
@@ -120,10 +134,30 @@ impl GuideSession {
     }
 
     /// The current splats as PLY bytes.
-    pub async fn export_splat(&self) -> Result<Vec<u8>, String> {
+    pub async fn export_splat(&self) -> Result<Vec<u8>, SessionError> {
+        self.export(false).await
+    }
+
+    /// Writes the current splats as PLY to `path` and returns its size. The
+    /// worker stops training until a new keyframe arrives or the session resets.
+    pub async fn finish(&self, path: &Path) -> Result<u64, SessionError> {
+        let ply = self.export(true).await?;
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        tokio::fs::write(path, &ply).await?;
+        Ok(ply.len() as u64)
+    }
+
+    async fn export(&self, finish: bool) -> Result<Vec<u8>, SessionError> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Command::Export(tx)).await.map_err(stopped)?;
-        rx.await.map_err(stopped)?
+        self.tx
+            .send(Command::Export(finish, tx))
+            .await
+            .map_err(|_closed| SessionError::Stopped)?;
+        rx.await
+            .map_err(|_closed| SessionError::Stopped)?
+            .map_err(SessionError::Rejected)
     }
 
     pub async fn reset(&self) {
@@ -132,10 +166,6 @@ impl GuideSession {
             let _ = rx.await;
         }
     }
-}
-
-fn stopped(e: impl std::fmt::Display) -> String {
-    format!("session stopped: {e}")
 }
 
 async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
@@ -174,10 +204,12 @@ async fn worker(
     let mut rate_window = (clock.elapsed().as_secs_f64(), live.iter());
     // Sent JPEG size per view, in the same order as `live.views()`.
     let mut sizes: Vec<UVec2> = Vec::new();
+    // Set by Finish: no training or scoring until a new keyframe or Reset.
+    let mut finished = false;
 
     loop {
         // With nothing to train, block for the next command; otherwise just drain.
-        let cmd = if live.views().is_empty() {
+        let cmd = if live.views().is_empty() || finished {
             match rx.recv().await {
                 Some(c) => Some(c),
                 None => return,
@@ -201,6 +233,11 @@ async fn worker(
                         Ok(kf) => {
                             if live.add_keyframe(kf).await {
                                 sizes.push(size);
+                                if finished {
+                                    finished = false;
+                                    rate_window =
+                                        (clock.elapsed().as_secs_f64(), live.iter());
+                                }
                             }
                             Ok(())
                         }
@@ -211,13 +248,17 @@ async fn worker(
                 publish_counts(&status_tx, &live);
                 let _ = reply.send(result);
             }
-            Some(Command::Export(reply)) => {
+            Some(Command::Export(finish, reply)) => {
                 let result = match live.splats() {
                     Some(s) => brush_serde::splat_to_ply(s.clone(), None)
                         .await
                         .map_err(|e| e.to_string()),
                     None => Err("no splats yet".to_owned()),
                 };
+                if finish && result.is_ok() {
+                    finished = true;
+                    status_tx.send_modify(|s| s.train_iters_per_s = 0.0);
+                }
                 let _ = reply.send(result);
             }
             Some(Command::Reset(reply)) => {
@@ -225,6 +266,7 @@ async fn worker(
                 voxels.reset();
                 scheduler = ScoreScheduler::new(config.score_budget, config.min_score_interval_s);
                 sizes.clear();
+                finished = false;
                 last_score_ms = 0;
                 // `live.iter()` restarts at 0; an old window would underflow.
                 rate_window = (clock.elapsed().as_secs_f64(), live.iter());
@@ -235,7 +277,7 @@ async fn worker(
             None => {}
         }
 
-        if live.views().is_empty() {
+        if live.views().is_empty() || finished {
             continue;
         }
         live.train_step().await;
