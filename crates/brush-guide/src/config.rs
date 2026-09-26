@@ -13,6 +13,8 @@ pub struct GuideConfig {
     pub recent_fraction: f32,
     pub refine_every: u32,
     pub all_loader_rebuild_every: usize,
+    /// Decoded-frame cache per scene loader, in bytes.
+    pub loader_cache_bytes: u64,
     pub score_budget: f32,
     pub min_score_interval_s: f32,
     /// Views per scoring round: the newest 40 plus a stratified sample of the rest.
@@ -40,6 +42,7 @@ impl Default for GuideConfig {
             recent_fraction: 0.7,
             refine_every: 100,
             all_loader_rebuild_every: 10,
+            loader_cache_bytes: 1 << 30,
             score_budget: 0.25,
             min_score_interval_s: 2.0,
             max_score_views: 120,

@@ -24,6 +24,10 @@ struct LoadArgs {
     load: LoadDatasetConfig,
 }
 
+/// Recent-window loader is rebuilt every this many new keyframes (and for each
+/// of the first ones): every rebuild spawns a fresh set of loader threads.
+const RECENT_LOADER_REBUILD_EVERY: usize = 3;
+
 /// Splats trained incrementally as keyframes arrive. Splats are kept on the
 /// inner (non-autodiff) device between steps.
 pub struct LiveModel {
@@ -40,6 +44,7 @@ pub struct LiveModel {
     last_id: Option<u64>,
     recent: Option<SceneLoader>,
     all: Option<SceneLoader>,
+    views_in_recent: usize,
     views_in_all: usize,
     iter: u32,
     rng: rand::rngs::StdRng,
@@ -54,7 +59,8 @@ impl LiveModel {
         train_config.growth_stop_iter = 1_000_000_000;
         train_config.max_splats = config.max_splats;
         train_config.refine_every = config.refine_every;
-        let load_config = LoadArgs::parse_from(["brush-guide"]).load;
+        let mut load_config = LoadArgs::parse_from(["brush-guide"]).load;
+        load_config.max_scene_batch_cache_size = config.loader_cache_bytes;
         let rng = rand::rngs::StdRng::seed_from_u64(config.seed);
         Self {
             config,
@@ -69,6 +75,7 @@ impl LiveModel {
             last_id: None,
             recent: None,
             all: None,
+            views_in_recent: 0,
             views_in_all: 0,
             iter: 0,
             rng,
@@ -140,13 +147,19 @@ impl LiveModel {
     }
 
     fn rebuild_loaders(&mut self) {
-        let start = self.views.len().saturating_sub(self.config.recent_window);
-        let recent = Scene::new(self.views[start..].to_vec());
-        self.recent = Some(SceneLoader::new(
-            &recent,
-            self.config.seed + self.views.len() as u64,
-            &self.load_config,
-        ));
+        let n = self.views.len();
+        if n <= RECENT_LOADER_REBUILD_EVERY
+            || n >= self.views_in_recent + RECENT_LOADER_REBUILD_EVERY
+        {
+            let start = n.saturating_sub(self.config.recent_window);
+            let recent = Scene::new(self.views[start..].to_vec());
+            self.recent = Some(SceneLoader::new(
+                &recent,
+                self.config.seed + n as u64,
+                &self.load_config,
+            ));
+            self.views_in_recent = n;
+        }
         if self.all.is_none()
             || self.views.len() >= self.views_in_all + self.config.all_loader_rebuild_every
         {
