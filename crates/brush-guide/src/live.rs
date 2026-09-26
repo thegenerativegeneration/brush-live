@@ -1,6 +1,6 @@
 use crate::config::GuideConfig;
 use crate::keyframe::DecodedKeyframe;
-use crate::seed::{SeedInput, seed_points};
+use crate::seed::{SeedInput, Seeds, seed_points};
 use brush_dataset::config::LoadDatasetConfig;
 use brush_dataset::scene::{Scene, SceneView};
 use brush_dataset::scene_loader::SceneLoader;
@@ -156,6 +156,24 @@ impl LiveModel {
         }
     }
 
+    /// Keeps a seeded random subset of `seeds` that fits under `max_splats`
+    /// next to `current` existing splats.
+    fn cap_seeds(&mut self, seeds: Seeds, current: u32) -> Seeds {
+        let room = self.config.max_splats.saturating_sub(current) as usize;
+        if seeds.colors.len() <= room {
+            return seeds;
+        }
+        let mut keep = rand::seq::index::sample(&mut self.rng, seeds.colors.len(), room).into_vec();
+        keep.sort_unstable();
+        Seeds {
+            means: keep
+                .iter()
+                .flat_map(|&i| seeds.means[i * 3..i * 3 + 3].iter().copied())
+                .collect(),
+            colors: keep.iter().map(|&i| seeds.colors[i]).collect(),
+        }
+    }
+
     fn initial_splats(&mut self, kf: &DecodedKeyframe, size: UVec2) -> Splats {
         let seeds = seed_points(&SeedInput {
             camera: &kf.camera,
@@ -167,10 +185,15 @@ impl LiveModel {
             stride: self.config.seed_stride_px,
             alpha_threshold: self.config.seed_alpha_threshold,
         });
+        let seeds = self.cap_seeds(seeds, 0);
         let splats = if seeds.colors.len() >= 3 {
             self.seeds_to_splats(seeds.means, &seeds.colors)
         } else {
-            let cfg = RandomSplatsConfig::new().with_init_count(self.config.init_random_count);
+            let count = self
+                .config
+                .init_random_count
+                .min(self.config.max_splats as usize);
+            let cfg = RandomSplatsConfig::new().with_init_count(count);
             create_random_splats(
                 &cfg,
                 &[kf.camera],
@@ -184,11 +207,12 @@ impl LiveModel {
     }
 
     async fn seed_from_mask(
-        &self,
+        &mut self,
         splats: Splats,
         kf: &DecodedKeyframe,
         size: UVec2,
     ) -> Option<Splats> {
+        let current = splats.num_splats();
         let small = (size / 4).max(UVec2::ONE);
         let (img, _) = render_splats(
             splats,
@@ -216,6 +240,7 @@ impl LiveModel {
             stride: (self.config.seed_stride_px / 4).max(1),
             alpha_threshold: self.config.seed_alpha_threshold,
         });
+        let seeds = self.cap_seeds(seeds, current);
         (seeds.colors.len() >= 3).then(|| {
             self.seeds_to_splats(seeds.means, &seeds.colors)
                 .with_sh_degree(self.config.sh_degree)

@@ -87,3 +87,22 @@ async fn new_views_add_splats_and_training_continues() {
     assert!(live.splats().unwrap().num_splats() > 0);
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[tokio::test]
+async fn seeding_respects_max_splats() {
+    let device = test_scene::device().await.autodiff();
+    let dir = tmp("cap");
+    let config = GuideConfig {
+        max_splats: 20,
+        ..GuideConfig::default()
+    };
+    let mut live = LiveModel::new(config, device);
+    for (i, a) in [0.0f32, 1.2, 2.4].iter().enumerate() {
+        let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
+        live.add_keyframe(decode_keyframe(&h, &p, &dir).await.unwrap())
+            .await;
+        let n = live.splats().unwrap().num_splats();
+        assert!((1..=20).contains(&n), "keyframe {i}: {n} splats");
+    }
+    std::fs::remove_dir_all(dir).ok();
+}
