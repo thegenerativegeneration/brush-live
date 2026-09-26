@@ -14,11 +14,27 @@ use tokio_tungstenite::tungstenite::Message;
 
 type Sessions = Arc<Mutex<HashMap<String, GuideSession>>>;
 
-/// A connection that receives no frame (pings included) for this long is closed.
-const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a connection may stay silent, and how often the server pings it. A client that is
+/// alive answers pings (WebSocket libraries do this on their own), so only dead peers time out,
+/// not a phone that is standing still and sending no keyframes.
+#[derive(Clone, Copy, Debug)]
+pub struct Timeouts {
+    pub read_idle: Duration,
+    pub ping_every: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            read_idle: Duration::from_secs(60),
+            ping_every: Duration::from_secs(20),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Shared {
+    timeouts: Timeouts,
     config: GuideConfig,
     device: Device,
     root: PathBuf,
@@ -31,7 +47,18 @@ pub async fn serve(
     device: Device,
     root: PathBuf,
 ) -> anyhow::Result<()> {
+    serve_with(listener, config, device, root, Timeouts::default()).await
+}
+
+pub async fn serve_with(
+    listener: TcpListener,
+    config: GuideConfig,
+    device: Device,
+    root: PathBuf,
+    timeouts: Timeouts,
+) -> anyhow::Result<()> {
     let shared = Shared {
+        timeouts,
         config,
         device,
         root,
@@ -148,13 +175,33 @@ async fn handle(stream: TcpStream, shared: Shared) -> anyhow::Result<()> {
             }
         }
     });
+    let ping_tx = out_tx.clone();
+    let ping_every = shared.timeouts.ping_every;
+    let pinger = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(ping_every);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if ping_tx
+                .send(Message::Ping(Vec::new().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
     let mut greeted: Option<Greeted> = None;
     let result = loop {
-        let msg = match tokio::time::timeout(READ_IDLE_TIMEOUT, source.next()).await {
+        let msg = match tokio::time::timeout(shared.timeouts.read_idle, source.next()).await {
             Err(_) => {
-                log::info!("closing idle connection");
-                let _ = out_tx.send(Message::Close(None)).await;
+                log::info!(
+                    "closing connection: no frames or pongs within {:?}",
+                    shared.timeouts.read_idle
+                );
+                // The peer is presumably gone, so don't wait on a writer that may be stuck on it.
+                let _ = out_tx.try_send(Message::Close(None));
                 break Ok(());
             }
             Ok(None) => break Ok(()),
@@ -230,8 +277,16 @@ async fn handle(stream: TcpStream, shared: Shared) -> anyhow::Result<()> {
     if let Some(g) = greeted {
         g.pusher.abort();
     }
+    pinger.abort();
     drop(out_tx);
-    let _ = writer.await;
+    // Let queued frames (e.g. a final error) go out, but don't hang on a dead peer.
+    let abort = writer.abort_handle();
+    if tokio::time::timeout(Duration::from_secs(2), writer)
+        .await
+        .is_err()
+    {
+        abort.abort();
+    }
     result
 }
 

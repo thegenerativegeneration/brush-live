@@ -1,8 +1,8 @@
 use brush_guide::protocol::{
-    ClientHeader, KeyframeHeader, ServerHeader, decode_cells, decode_frame, encode_frame,
+    Cell, ClientHeader, KeyframeHeader, ServerHeader, decode_cells, decode_frame, encode_frame,
 };
 use brush_guide::seed::project;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use glam::{Mat4, UVec2, Vec3};
 use serde::Deserialize;
@@ -19,8 +19,8 @@ struct Args {
     rate: f32,
     #[arg(long, default_value_t = 960)]
     long_side: u32,
-    #[arg(long, default_value = "both")]
-    mode: String,
+    #[arg(long, value_enum, default_value_t = Mode::Both)]
+    mode: Mode,
     #[arg(long, default_value_t = 300)]
     points_per_frame: usize,
     /// Write the rerun recording to this .rrd file instead of spawning a viewer
@@ -28,6 +28,32 @@ struct Args {
     #[arg(long)]
     save: Option<PathBuf>,
 }
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Mode {
+    /// Red/yellow by coverage.
+    Coverage,
+    /// Red/yellow by Fisher uncertainty.
+    Uncertainty,
+    /// Red/yellow if either metric flags the cell.
+    Both,
+    /// Weak cells only, coloured by which metric flags them.
+    Agreement,
+}
+
+const GREY: [u8; 3] = [150, 150, 150];
+const RED: [u8; 3] = [230, 40, 40];
+const YELLOW: [u8; 3] = [240, 200, 40];
+const BLUE: [u8; 3] = [40, 110, 240];
+const PURPLE: [u8; 3] = [180, 60, 220];
+
+const AGREEMENT_LEGEND: &str = "Agreement mode, weak cells only:\n\n\
+    * red: weak by coverage and by uncertainty\n\
+    * blue: weak by coverage only\n\
+    * purple: weak by uncertainty only\n\
+    * grey: first seen less than 3 s ago\n\n\
+    Uncertainty is ranked within each round, so its share of weak cells stays roughly \
+    constant; compare where the colours sit, not how many there are.";
 
 #[derive(Deserialize)]
 struct Transforms {
@@ -76,26 +102,64 @@ fn load_points(path: &Path) -> Result<Vec<Vec3>, String> {
         .collect())
 }
 
-fn cell_color(c: &brush_guide::protocol::Cell, mode: &str) -> Option<[u8; 3]> {
+fn weak_coverage(c: &Cell) -> bool {
+    c.coverage < 80
+}
+
+fn weak_uncertainty(c: &Cell) -> bool {
+    c.uncertainty > 200
+}
+
+fn cell_color(c: &Cell, mode: Mode) -> Option<[u8; 3]> {
     if c.age < 3 {
-        return Some([150, 150, 150]);
+        return Some(GREY);
     }
-    let weak_cov = c.coverage < 80;
+    let (wc, wu) = (weak_coverage(c), weak_uncertainty(c));
+    if matches!(mode, Mode::Agreement) {
+        return match (wc, wu) {
+            (true, true) => Some(RED),
+            (true, false) => Some(BLUE),
+            (false, true) => Some(PURPLE),
+            (false, false) => None,
+        };
+    }
     let border_cov = c.coverage < 160;
-    let weak_unc = c.uncertainty > 200;
     let border_unc = c.uncertainty > 140;
     let (weak, border) = match mode {
-        "coverage" => (weak_cov, border_cov),
-        "uncertainty" => (weak_unc, border_unc),
-        _ => (weak_cov || weak_unc, border_cov || border_unc),
+        Mode::Coverage => (wc, border_cov),
+        Mode::Uncertainty => (wu, border_unc),
+        Mode::Both | Mode::Agreement => (wc || wu, border_cov || border_unc),
     };
     if weak {
-        Some([230, 40, 40])
+        Some(RED)
     } else if border {
-        Some([240, 200, 40])
+        Some(YELLOW)
     } else {
         None
     }
+}
+
+/// Per-round counts of settled cells (not pending) flagged weak by each metric.
+fn log_agreement_counts(rec: &rerun::RecordingStream, cells: &[Cell]) {
+    let settled = cells.iter().filter(|c| c.age >= 3);
+    let (mut both, mut cov_only, mut unc_only) = (0u32, 0u32, 0u32);
+    for c in settled {
+        match (weak_coverage(c), weak_uncertainty(c)) {
+            (true, true) => both += 1,
+            (true, false) => cov_only += 1,
+            (false, true) => unc_only += 1,
+            (false, false) => {}
+        }
+    }
+    let _ = rec.log("agreement/both", &rerun::Scalars::new(vec![both as f64]));
+    let _ = rec.log(
+        "agreement/coverage_only",
+        &rerun::Scalars::new(vec![cov_only as f64]),
+    );
+    let _ = rec.log(
+        "agreement/uncertainty_only",
+        &rerun::Scalars::new(vec![unc_only as f64]),
+    );
 }
 
 #[tokio::main]
@@ -141,7 +205,13 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let rec_rx = rec.clone();
-    let mode = args.mode.clone();
+    let mode = args.mode;
+    if matches!(mode, Mode::Agreement) {
+        rec.log_static(
+            "legend",
+            &rerun::TextDocument::from_markdown(AGREEMENT_LEGEND),
+        )?;
+    }
     let receiver = tokio::spawn(async move {
         while let Some(Ok(msg)) = source.next().await {
             let Message::Binary(bytes) = msg else {
@@ -155,8 +225,9 @@ async fn main() -> anyhow::Result<()> {
                     let cells = decode_cells(payload).unwrap_or_default();
                     let (pos, col): (Vec<[f32; 3]>, Vec<[u8; 3]>) = cells
                         .iter()
-                        .filter_map(|c| cell_color(c, &mode).map(|col| (c.center, col)))
+                        .filter_map(|c| cell_color(c, mode).map(|col| (c.center, col)))
                         .unzip();
+                    log_agreement_counts(&rec_rx, &cells);
                     let _ = rec_rx.log(
                         "scores",
                         &rerun::Points3D::new(pos)
