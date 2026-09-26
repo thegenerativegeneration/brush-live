@@ -193,14 +193,19 @@ async fn worker(
         match cmd {
             Some(Command::Keyframe(h, payload, reply)) => {
                 let size = UVec2::new(h.width, h.height);
-                let result = match decode_keyframe(&h, &payload, &session_dir).await {
-                    Ok(kf) => {
-                        if live.add_keyframe(kf).await {
-                            sizes.push(size);
+                // A resend must not overwrite the stored image of the first send.
+                let result = if live.contains(h.id) {
+                    Ok(())
+                } else {
+                    match decode_keyframe(&h, &payload, &session_dir).await {
+                        Ok(kf) => {
+                            if live.add_keyframe(kf).await {
+                                sizes.push(size);
+                            }
+                            Ok(())
                         }
-                        Ok(())
+                        Err(e) => Err(e.to_string()),
                     }
-                    Err(e) => Err(e.to_string()),
                 };
                 // Counts are visible to the caller as soon as the push resolves.
                 publish_counts(&status_tx, &live);

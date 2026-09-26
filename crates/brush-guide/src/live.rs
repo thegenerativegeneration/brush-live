@@ -90,6 +90,11 @@ impl LiveModel {
         &self.views
     }
 
+    /// True if a keyframe with this id was already added.
+    pub fn contains(&self, id: u64) -> bool {
+        self.ids.contains(&id)
+    }
+
     pub fn last_keyframe_id(&self) -> Option<u64> {
         self.last_id
     }

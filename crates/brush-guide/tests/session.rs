@@ -66,3 +66,21 @@ async fn bad_keyframe_reports_error_and_session_survives() {
     session.push_keyframe(h, p).await.unwrap();
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resent_id_is_acked_without_touching_the_stored_image() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-session-dup-{}", std::process::id()));
+    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
+    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+    session.push_keyframe(h.clone(), p).await.unwrap();
+    let stored = std::fs::read(dir.join("images/0.jpg")).unwrap();
+
+    // Same id, undecodable content: recognised as a resend before decoding.
+    let garbage = vec![0u8; h.jpeg_len as usize];
+    let h = brush_guide::protocol::KeyframeHeader { num_points: 0, ..h };
+    session.push_keyframe(h, garbage).await.unwrap();
+    assert_eq!(std::fs::read(dir.join("images/0.jpg")).unwrap(), stored);
+    assert_eq!(session.status().borrow().num_keyframes, 1);
+    std::fs::remove_dir_all(dir).ok();
+}
