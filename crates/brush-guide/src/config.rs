@@ -1,4 +1,7 @@
-use crate::scores::{metrics::CoverageParams, pass::PassConfig};
+use crate::scores::{
+    metrics::{CoverageParams, FisherRidge},
+    pass::PassConfig,
+};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -16,7 +19,10 @@ pub struct GuideConfig {
     pub seed_stride_px: u32,
     pub seed_alpha_threshold: f32,
     pub init_random_count: usize,
+    /// Absolute ridge on the Fisher before its log-determinant.
     pub fisher_lambda: f32,
+    /// Ridge relative to the Fisher's mean eigenvalue (`tr(H)/6`).
+    pub fisher_lambda_rel: f32,
     pub pass: PassConfig,
     pub coverage: CoverageParams,
     pub seed: u64,
@@ -39,9 +45,19 @@ impl Default for GuideConfig {
             seed_alpha_threshold: 0.5,
             init_random_count: 5000,
             fisher_lambda: 1e-6,
+            fisher_lambda_rel: 1e-3,
             pass: PassConfig::default(),
             coverage: CoverageParams::default(),
             seed: 42,
+        }
+    }
+}
+
+impl GuideConfig {
+    pub fn fisher_ridge(&self) -> FisherRidge {
+        FisherRidge {
+            abs: self.fisher_lambda,
+            rel: self.fisher_lambda_rel,
         }
     }
 }

@@ -3,7 +3,7 @@ use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
 use crate::protocol::{Cell, KeyframeHeader, ServerHeader, encode_cells, encode_frame};
 use crate::schedule::ScoreScheduler;
-use crate::scores::metrics::gaussian_metrics;
+use crate::scores::metrics::{gaussian_metrics, uncertainty_cap};
 use crate::scores::pass::{PassView, score_pass};
 use crate::scores::voxel::{GaussianScore, VoxelAggregator};
 use brush_async::Actor;
@@ -163,7 +163,11 @@ async fn worker(
 ) {
     let clock = Instant::now();
     let mut live = LiveModel::new(config.clone(), device.clone());
-    let mut voxels = VoxelAggregator::new(config.voxel_size, config.min_cell_opacity);
+    let mut voxels = VoxelAggregator::new(
+        config.voxel_size,
+        config.min_cell_opacity,
+        uncertainty_cap(config.fisher_ridge()),
+    );
     let mut scheduler = ScoreScheduler::new(config.score_budget, config.min_score_interval_s);
     let mut version = 0u64;
     let mut last_score_ms = 0u32;
@@ -245,7 +249,7 @@ async fn worker(
                 .collect();
             let out = score_pass(&splats, &views, &config.pass).await;
             let (coverage, uncertainty) =
-                gaussian_metrics(&out, &config.coverage, config.fisher_lambda);
+                gaussian_metrics(&out, &config.coverage, config.fisher_ridge());
             let means = read_f32(splats.means()).await;
             let opac = read_f32(splats.opacities()).await;
             let gaussians: Vec<GaussianScore> = (0..opac.len())
