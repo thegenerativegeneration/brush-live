@@ -46,7 +46,11 @@ impl VoxelAggregator {
             if !visible || !g.pos.is_finite() {
                 continue;
             }
-            let coverage = if g.coverage.is_finite() { g.coverage } else { 0.0 };
+            let coverage = if g.coverage.is_finite() {
+                g.coverage
+            } else {
+                0.0
+            };
             let uncertainty = if g.uncertainty.is_finite() {
                 g.uncertainty
             } else {
@@ -96,7 +100,12 @@ mod tests {
     const CAP: f32 = 83.0;
 
     fn g(pos: [f32; 3], opacity: f32, coverage: f32, uncertainty: f32) -> GaussianScore {
-        GaussianScore { pos: Vec3::from(pos), opacity, coverage, uncertainty }
+        GaussianScore {
+            pos: Vec3::from(pos),
+            opacity,
+            coverage,
+            uncertainty,
+        }
     }
 
     #[test]
@@ -109,7 +118,11 @@ mod tests {
     fn groups_by_voxel_and_weights_by_opacity() {
         let mut agg = VoxelAggregator::new(1.0, 0.1, CAP);
         let cells = agg.aggregate(
-            &[g([0.2, 0.2, 0.2], 0.9, 1.0, 0.0), g([0.8, 0.1, 0.5], 0.3, 0.0, 0.0), g([5.5, 0.5, 0.5], 0.05, 1.0, 0.0)],
+            &[
+                g([0.2, 0.2, 0.2], 0.9, 1.0, 0.0),
+                g([0.8, 0.1, 0.5], 0.3, 0.0, 0.0),
+                g([5.5, 0.5, 0.5], 0.05, 1.0, 0.0),
+            ],
             0.0,
         );
         assert_eq!(cells.len(), 1, "low-opacity voxel dropped");
@@ -120,7 +133,9 @@ mod tests {
     #[test]
     fn uncertainty_is_percentile_normalised() {
         let mut agg = VoxelAggregator::new(1.0, 0.0, CAP);
-        let gs: Vec<_> = (0..100).map(|i| g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, i as f32)).collect();
+        let gs: Vec<_> = (0..100)
+            .map(|i| g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, i as f32))
+            .collect();
         let cells = agg.aggregate(&gs, 0.0);
         let by_x = |x: f32| cells.iter().find(|c| c.center[0] == x).unwrap().uncertainty;
         assert_eq!(by_x(0.5), 0);
@@ -131,7 +146,13 @@ mod tests {
     #[test]
     fn identical_uncertainty_gives_zero() {
         let mut agg = VoxelAggregator::new(1.0, 0.0, CAP);
-        let cells = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 3.0), g([1.5, 0.5, 0.5], 1.0, 0.0, 3.0)], 0.0);
+        let cells = agg.aggregate(
+            &[
+                g([0.5; 3], 1.0, 0.0, 3.0),
+                g([1.5, 0.5, 0.5], 1.0, 0.0, 3.0),
+            ],
+            0.0,
+        );
         assert!(cells.iter().all(|c| c.uncertainty == 0));
     }
 
@@ -139,7 +160,13 @@ mod tests {
     fn age_counts_from_first_appearance_and_saturates() {
         let mut agg = VoxelAggregator::new(1.0, 0.0, CAP);
         agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.0)], 10.0);
-        let cells = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.0), g([2.5, 0.5, 0.5], 1.0, 0.0, 0.0)], 13.4);
+        let cells = agg.aggregate(
+            &[
+                g([0.5; 3], 1.0, 0.0, 0.0),
+                g([2.5, 0.5, 0.5], 1.0, 0.0, 0.0),
+            ],
+            13.4,
+        );
         let age = |x: f32| cells.iter().find(|c| c.center[0] == x).unwrap().age;
         assert_eq!(age(0.5), 3);
         assert_eq!(age(2.5), 0);
@@ -169,7 +196,10 @@ mod tests {
         assert_eq!(cells.len(), 2);
         let first = cells.iter().find(|c| c.center[0] == 0.5).unwrap();
         assert_eq!(first.coverage, 128);
-        assert_eq!(first.uncertainty, 255, "(CAP + 1) / 2 is the higher cell mean");
+        assert_eq!(
+            first.uncertainty, 255,
+            "(CAP + 1) / 2 is the higher cell mean"
+        );
     }
 
     #[test]

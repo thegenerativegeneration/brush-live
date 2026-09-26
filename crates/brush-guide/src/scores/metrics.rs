@@ -148,7 +148,10 @@ mod tests {
         assert!((coverage_score(s, w, 100.0, &p()) - full_res * 0.5).abs() < 1e-5);
     }
 
-    const RIDGE: FisherRidge = FisherRidge { abs: 1e-6, rel: 1e-3 };
+    const RIDGE: FisherRidge = FisherRidge {
+        abs: 1e-6,
+        rel: 1e-3,
+    };
 
     #[test]
     fn uncertainty_orders_by_information() {
@@ -184,8 +187,15 @@ mod tests {
     #[test]
     fn rank_deficient_fisher_is_finite_and_ordered() {
         let u = |h: &[f32; 36]| uncertainty_score(h, RIDGE);
-        let (r1, r3, full) = (u(&fisher_from_views(1, 1)), u(&fisher_from_views(3, 2)), u(&fisher_from_views(12, 3)));
-        assert!(r1.is_finite() && r3.is_finite() && full.is_finite(), "{r1} {r3} {full}");
+        let (r1, r3, full) = (
+            u(&fisher_from_views(1, 1)),
+            u(&fisher_from_views(3, 2)),
+            u(&fisher_from_views(12, 3)),
+        );
+        assert!(
+            r1.is_finite() && r3.is_finite() && full.is_finite(),
+            "{r1} {r3} {full}"
+        );
         assert!(r1 > r3 && r3 > full, "{r1} {r3} {full}");
     }
 

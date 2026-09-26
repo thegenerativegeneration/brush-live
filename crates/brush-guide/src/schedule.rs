@@ -77,7 +77,10 @@ mod tests {
     #[test]
     fn short_captures_score_every_view() {
         assert_eq!(select_score_views(30, 120, 7), (0..30).collect::<Vec<_>>());
-        assert_eq!(select_score_views(120, 120, 7), (0..120).collect::<Vec<_>>());
+        assert_eq!(
+            select_score_views(120, 120, 7),
+            (0..120).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -85,7 +88,10 @@ mod tests {
         let picked = select_score_views(500, 120, 7);
         assert_eq!(picked.len(), 120);
         assert!(picked.windows(2).all(|w| w[0] < w[1]), "sorted, unique");
-        assert!((460..500).all(|i| picked.contains(&i)), "newest 40 included");
+        assert!(
+            (460..500).all(|i| picked.contains(&i)),
+            "newest 40 included"
+        );
         // 80 strata over the 460 older views: one pick in each.
         let older = &picked[..80];
         for (j, &i) in older.iter().enumerate() {
@@ -97,6 +103,9 @@ mod tests {
 
     #[test]
     fn tiny_limit_keeps_only_newest() {
-        assert_eq!(select_score_views(100, 10, 0), (90..100).collect::<Vec<_>>());
+        assert_eq!(
+            select_score_views(100, 10, 0),
+            (90..100).collect::<Vec<_>>()
+        );
     }
 }

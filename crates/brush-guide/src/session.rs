@@ -235,8 +235,7 @@ async fn worker(
                                 sizes.push(size);
                                 if finished {
                                     finished = false;
-                                    rate_window =
-                                        (clock.elapsed().as_secs_f64(), live.iter());
+                                    rate_window = (clock.elapsed().as_secs_f64(), live.iter());
                                 }
                             }
                             Ok(())

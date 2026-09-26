@@ -34,7 +34,11 @@ pub struct KeyframeHeader {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientHeader {
-    Hello { session_id: String, device_model: String, has_lidar: bool },
+    Hello {
+        session_id: String,
+        device_model: String,
+        has_lidar: bool,
+    },
     Keyframe(KeyframeHeader),
     Finish,
 }
@@ -42,11 +46,27 @@ pub enum ClientHeader {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerHeader {
-    Ack { keyframe_id: u64 },
-    ScoreSet { version: u64, based_on_keyframe_id: u64, voxel_size: f32, num_cells: u32 },
-    Status { num_keyframes: u32, num_splats: u32, train_iters_per_s: f32, last_score_ms: u32 },
-    Splat { ply_len: u64 },
-    Error { message: String },
+    Ack {
+        keyframe_id: u64,
+    },
+    ScoreSet {
+        version: u64,
+        based_on_keyframe_id: u64,
+        voxel_size: f32,
+        num_cells: u32,
+    },
+    Status {
+        num_keyframes: u32,
+        num_splats: u32,
+        train_iters_per_s: f32,
+        last_score_ms: u32,
+    },
+    Splat {
+        ply_len: u64,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,9 +89,15 @@ pub fn encode_frame<H: Serialize>(header: &H, payload: &[u8]) -> Vec<u8> {
 }
 
 pub fn decode_frame<H: DeserializeOwned>(frame: &[u8]) -> Result<(H, &[u8]), ProtocolError> {
-    let len_bytes: [u8; 4] = frame.get(0..4).ok_or(ProtocolError::Truncated)?.try_into().unwrap();
+    let len_bytes: [u8; 4] = frame
+        .get(0..4)
+        .ok_or(ProtocolError::Truncated)?
+        .try_into()
+        .unwrap();
     let len = u32::from_le_bytes(len_bytes) as usize;
-    let json = frame.get(4..4 + len).ok_or(ProtocolError::BadHeaderLength(len))?;
+    let json = frame
+        .get(4..4 + len)
+        .ok_or(ProtocolError::BadHeaderLength(len))?;
     Ok((serde_json::from_slice(json)?, &frame[4 + len..]))
 }
 
@@ -97,7 +123,12 @@ pub fn decode_cells(bytes: &[u8]) -> Result<Vec<Cell>, ProtocolError> {
         .chunks_exact(CELL_BYTES)
         .map(|c| {
             let f = |i: usize| f32::from_le_bytes(c[i * 4..i * 4 + 4].try_into().unwrap());
-            Cell { center: [f(0), f(1), f(2)], coverage: c[12], uncertainty: c[13], age: c[14] }
+            Cell {
+                center: [f(0), f(1), f(2)],
+                coverage: c[12],
+                uncertainty: c[13],
+                age: c[14],
+            }
         })
         .collect())
 }
@@ -128,7 +159,10 @@ pub fn split_keyframe_payload<'a>(
     let jpeg_len = h.jpeg_len as usize;
     let (depth_len, expected) = payload_sizes(h).ok_or(ProtocolError::SizeOverflow)?;
     if payload.len() != expected {
-        return Err(ProtocolError::PayloadSize { expected, actual: payload.len() });
+        return Err(ProtocolError::PayloadSize {
+            expected,
+            actual: payload.len(),
+        });
     }
     let (jpeg, rest) = payload.split_at(jpeg_len);
     let (depth_bytes, point_bytes) = rest.split_at(depth_len);
@@ -145,7 +179,11 @@ pub fn split_keyframe_payload<'a>(
             [f(0), f(1), f(2)]
         })
         .collect();
-    Ok(KeyframePayload { jpeg, depth, points })
+    Ok(KeyframePayload {
+        jpeg,
+        depth,
+        points,
+    })
 }
 
 #[cfg(test)]
@@ -156,7 +194,9 @@ mod tests {
         KeyframeHeader {
             id: 7,
             timestamp: 12.5,
-            pose: [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0.5, 1.0, -2.0, 1.],
+            pose: [
+                1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0.5, 1.0, -2.0, 1.,
+            ],
             fx: 700.0,
             fy: 700.0,
             cx: 480.0,
@@ -199,8 +239,18 @@ mod tests {
     #[test]
     fn cells_roundtrip_and_size() {
         let cells = vec![
-            Cell { center: [1.0, -2.0, 3.5], coverage: 10, uncertainty: 250, age: 255 },
-            Cell { center: [0.0, 0.0, 0.0], coverage: 0, uncertainty: 0, age: 0 },
+            Cell {
+                center: [1.0, -2.0, 3.5],
+                coverage: 10,
+                uncertainty: 250,
+                age: 255,
+            },
+            Cell {
+                center: [0.0, 0.0, 0.0],
+                coverage: 0,
+                uncertainty: 0,
+                age: 0,
+            },
         ];
         let bytes = encode_cells(&cells);
         assert_eq!(bytes.len(), 2 * CELL_BYTES);
@@ -239,28 +289,59 @@ mod tests {
     /// `WRITE_FIXTURES=/abs/path cargo test -p brush-guide write_golden_fixtures`
     #[test]
     fn write_golden_fixtures() {
-        let Ok(dir) = std::env::var("WRITE_FIXTURES") else { return };
+        let Ok(dir) = std::env::var("WRITE_FIXTURES") else {
+            return;
+        };
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let cells = [Cell { center: [1.0, -2.0, 3.5], coverage: 10, uncertainty: 250, age: 3 }];
+        let cells = [Cell {
+            center: [1.0, -2.0, 3.5],
+            coverage: 10,
+            uncertainty: 250,
+            age: 3,
+        }];
         let fixtures: Vec<(&str, Vec<u8>)> = vec![
-            ("ack.bin", encode_frame(&ServerHeader::Ack { keyframe_id: 3 }, &[])),
+            (
+                "ack.bin",
+                encode_frame(&ServerHeader::Ack { keyframe_id: 3 }, &[]),
+            ),
             (
                 "scoreset.bin",
                 encode_frame(
-                    &ServerHeader::ScoreSet { version: 2, based_on_keyframe_id: 9, voxel_size: 0.1, num_cells: 1 },
+                    &ServerHeader::ScoreSet {
+                        version: 2,
+                        based_on_keyframe_id: 9,
+                        voxel_size: 0.1,
+                        num_cells: 1,
+                    },
                     &encode_cells(&cells),
                 ),
             ),
             (
                 "status.bin",
                 encode_frame(
-                    &ServerHeader::Status { num_keyframes: 4, num_splats: 1000, train_iters_per_s: 55.5, last_score_ms: 1200 },
+                    &ServerHeader::Status {
+                        num_keyframes: 4,
+                        num_splats: 1000,
+                        train_iters_per_s: 55.5,
+                        last_score_ms: 1200,
+                    },
                     &[],
                 ),
             ),
-            ("error.bin", encode_frame(&ServerHeader::Error { message: "bad".into() }, &[])),
-            ("keyframe_header.json", serde_json::to_vec_pretty(&ClientHeader::Keyframe(kf_header())).unwrap()),
+            (
+                "error.bin",
+                encode_frame(
+                    &ServerHeader::Error {
+                        message: "bad".into(),
+                    },
+                    &[],
+                ),
+            ),
+            (
+                "keyframe_header.json",
+                serde_json::to_vec_pretty(&ClientHeader::Keyframe(kf_header())).unwrap(),
+            ),
         ];
         for (name, bytes) in fixtures {
             std::fs::write(dir.join(name), bytes).unwrap();

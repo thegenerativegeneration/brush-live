@@ -20,7 +20,10 @@ pub enum KeyframeError {
     #[error("jpeg decode failed: {0}")]
     Image(#[from] image::ImageError),
     #[error("jpeg size {actual:?} does not match header {expected:?}")]
-    SizeMismatch { expected: (u32, u32), actual: (u32, u32) },
+    SizeMismatch {
+        expected: (u32, u32),
+        actual: (u32, u32),
+    },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -58,7 +61,10 @@ pub fn arkit_to_camera(h: &KeyframeHeader) -> Result<Camera, KeyframeError> {
         return Err(KeyframeError::InvalidPose);
     }
     let r = Mat3::from_mat4(c2w);
-    let orthonormal = (r.transpose() * r - Mat3::IDENTITY).to_cols_array().iter().all(|v| v.abs() < 1e-3);
+    let orthonormal = (r.transpose() * r - Mat3::IDENTITY)
+        .to_cols_array()
+        .iter()
+        .all(|v| v.abs() < 1e-3);
     if !orthonormal || (r.determinant() - 1.0).abs() > 1e-3 {
         return Err(KeyframeError::InvalidPose);
     }
@@ -74,7 +80,14 @@ pub fn arkit_to_camera(h: &KeyframeHeader) -> Result<Camera, KeyframeError> {
     let fov_x = focal_to_fov(h.fx as f64, h.width, &model);
     let fov_y = focal_to_fov(h.fy as f64, h.height, &model);
     let center_uv = vec2(h.cx / h.width as f32, h.cy / h.height as f32);
-    Ok(Camera::new(translation, rotation, fov_x, fov_y, center_uv, model))
+    Ok(Camera::new(
+        translation,
+        rotation,
+        fov_x,
+        fov_y,
+        center_uv,
+        model,
+    ))
 }
 
 pub async fn decode_keyframe(
@@ -89,18 +102,32 @@ pub async fn decode_keyframe(
         return Err(KeyframeError::InvalidDepth);
     }
     let parts = split_keyframe_payload(h, payload)?;
-    let image = image::load_from_memory_with_format(parts.jpeg, image::ImageFormat::Jpeg)?.into_rgb8();
+    let image =
+        image::load_from_memory_with_format(parts.jpeg, image::ImageFormat::Jpeg)?.into_rgb8();
     if image.dimensions() != (h.width, h.height) {
-        return Err(KeyframeError::SizeMismatch { expected: (h.width, h.height), actual: image.dimensions() });
+        return Err(KeyframeError::SizeMismatch {
+            expected: (h.width, h.height),
+            actual: image.dimensions(),
+        });
     }
 
     let rel = PathBuf::from(format!("images/{}.jpg", h.id));
     tokio::fs::create_dir_all(session_dir.join("images")).await?;
     tokio::fs::write(session_dir.join(&rel), parts.jpeg).await?;
-    let vfs = Arc::new(BrushVfs::from_directory_files(session_dir, vec![rel.clone()]));
+    let vfs = Arc::new(BrushVfs::from_directory_files(
+        session_dir,
+        vec![rel.clone()],
+    ));
     let load = LoadImage::new(vfs, rel, None, h.width.max(h.height), None, false);
 
-    let depth = h.depth_size.zip(parts.depth).map(|([width, height], values)| DepthMap { width, height, values });
+    let depth = h
+        .depth_size
+        .zip(parts.depth)
+        .map(|([width, height], values)| DepthMap {
+            width,
+            height,
+            values,
+        });
     let points = parts.points.into_iter().map(Vec3::from).collect();
     Ok(DecodedKeyframe {
         id: h.id,
@@ -108,7 +135,10 @@ pub async fn decode_keyframe(
         image,
         depth,
         points,
-        view: SceneView { image: load, camera },
+        view: SceneView {
+            image: load,
+            camera,
+        },
     })
 }
 
@@ -148,7 +178,10 @@ mod tests {
         let cam = arkit_to_camera(&header(pose, 960, 720)).unwrap();
         assert!((cam.position - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
         let f = cam.focal(glam::uvec2(960, 720));
-        assert!((f.x - 700.0).abs() < 1e-2 && (f.y - 710.0).abs() < 1e-2, "{f}");
+        assert!(
+            (f.x - 700.0).abs() < 1e-2 && (f.y - 710.0).abs() < 1e-2,
+            "{f}"
+        );
     }
 
     #[test]
@@ -171,7 +204,11 @@ mod tests {
 
     #[test]
     fn depth_sampling() {
-        let d = DepthMap { width: 2, height: 1, values: vec![1.0, 0.0] };
+        let d = DepthMap {
+            width: 2,
+            height: 1,
+            values: vec![1.0, 0.0],
+        };
         assert_eq!(d.sample_uv(0.1, 0.5), Some(1.0));
         assert_eq!(d.sample_uv(0.9, 0.5), None);
     }
@@ -183,7 +220,10 @@ mod tests {
             let mut h = header(Mat4::IDENTITY, 8, 6);
             h.depth_size = Some(size);
             let err = decode_keyframe(&h, &[], &dir).await.err();
-            assert!(matches!(err, Some(KeyframeError::InvalidDepth)), "{size:?}: {err:?}");
+            assert!(
+                matches!(err, Some(KeyframeError::InvalidDepth)),
+                "{size:?}: {err:?}"
+            );
         }
         assert!(!dir.exists(), "nothing written for rejected keyframes");
     }
@@ -194,7 +234,10 @@ mod tests {
         let img = image::RgbImage::from_pixel(8, 6, image::Rgb([200, 10, 10]));
         let mut jpeg = Vec::new();
         image::DynamicImage::ImageRgb8(img)
-            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
             .unwrap();
         let mut h = header(Mat4::IDENTITY, 8, 6);
         h.jpeg_len = jpeg.len() as u32;

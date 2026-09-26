@@ -88,7 +88,8 @@ async fn resent_id_is_acked_without_touching_the_stored_image() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finish_writes_ply_and_pauses_training_until_next_keyframe() {
     let device = test_scene::device().await.autodiff();
-    let dir = std::env::temp_dir().join(format!("brush-guide-session-finish-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("brush-guide-session-finish-{}", std::process::id()));
     let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
     let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
     session.push_keyframe(h, p).await.unwrap();
@@ -100,11 +101,18 @@ async fn finish_writes_ply_and_pauses_training_until_next_keyframe() {
     assert!(std::fs::read(&path).unwrap().starts_with(b"ply"));
 
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(session.status().borrow().train_iters_per_s, 0.0, "idle after finish");
+    assert_eq!(
+        session.status().borrow().train_iters_per_s,
+        0.0,
+        "idle after finish"
+    );
 
     let (h, p) = test_scene::keyframe(1, Vec3::new(1.0, 0.0, 2.0));
     session.push_keyframe(h, p).await.unwrap();
     tokio::time::sleep(Duration::from_millis(2500)).await;
-    assert!(session.status().borrow().train_iters_per_s > 0.0, "training resumed");
+    assert!(
+        session.status().borrow().train_iters_per_s > 0.0,
+        "training resumed"
+    );
     std::fs::remove_dir_all(dir).ok();
 }
