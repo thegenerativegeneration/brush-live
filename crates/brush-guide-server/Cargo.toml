@@ -16,12 +16,11 @@ image = { workspace = true, features = ["jpeg", "png"] }
 log.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"] }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time", "fs"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time", "fs", "signal"] }
 tokio-tungstenite = "0.26"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rerun.workspace = true
 env_logger = "0.11"
-mdns-sd = "0.13"
 hostname = "0.4"
 
 [dev-dependencies]

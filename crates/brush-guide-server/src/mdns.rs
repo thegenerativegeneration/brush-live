@@ -1,29 +1,40 @@
-use mdns_sd::{ServiceDaemon, ServiceInfo};
-use std::collections::HashMap;
+use std::process::{Child, Command, Stdio};
 
-pub const SERVICE_TYPE: &str = "_brushguide._tcp.local.";
+pub const SERVICE_TYPE: &str = "_brushguide._tcp";
 
-pub fn service_info(port: u16, hostname: &str) -> anyhow::Result<ServiceInfo> {
-    let host = format!("{}.local.", hostname.trim_end_matches(".local"));
-    let props = HashMap::from([("proto".to_owned(), "1".to_owned())]);
-    let info = ServiceInfo::new(
-        SERVICE_TYPE,
-        &format!("brush-guide on {hostname}"),
-        &host,
-        "",
-        port,
-        props,
-    )?
-    .enable_addr_auto();
-    Ok(info)
+/// Arguments for `dns-sd -R <instance> <type> <domain> <port> <txt records...>`,
+/// registering `brush-guide on <hostname>` under `SERVICE_TYPE` with TXT `proto=1`.
+pub fn register_args(port: u16, hostname: &str) -> Vec<String> {
+    vec![
+        "-R".to_owned(),
+        format!("brush-guide on {hostname}"),
+        SERVICE_TYPE.to_owned(),
+        "local".to_owned(),
+        port.to_string(),
+        "proto=1".to_owned(),
+    ]
 }
 
-/// Advertise the server on the local network; drop the daemon to stop.
-pub fn advertise(port: u16) -> anyhow::Result<ServiceDaemon> {
+/// A running `dns-sd -R` registration; dropping it unregisters the service.
+pub struct Advertisement(Child);
+
+impl Drop for Advertisement {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Advertise the server on the local network via the system's mDNSResponder;
+/// drop the returned `Advertisement` to stop.
+pub fn advertise(port: u16) -> anyhow::Result<Advertisement> {
     let hostname = hostname::get()?.to_string_lossy().into_owned();
-    let daemon = ServiceDaemon::new()?;
-    daemon.register(service_info(port, &hostname)?)?;
-    Ok(daemon)
+    let child = Command::new("/usr/bin/dns-sd")
+        .args(register_args(port, &hostname))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(Advertisement(child))
 }
 
 #[cfg(test)]
@@ -31,14 +42,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn service_info_has_type_port_and_txt() {
-        let info = service_info(8765, "studio").unwrap();
-        assert_eq!(info.get_type(), SERVICE_TYPE);
-        assert_eq!(info.get_port(), 8765);
+    fn register_args_has_type_port_and_txt() {
+        let args = register_args(8765, "studio");
         assert_eq!(
-            info.get_fullname(),
-            "brush-guide on studio._brushguide._tcp.local."
+            args,
+            vec![
+                "-R",
+                "brush-guide on studio",
+                "_brushguide._tcp",
+                "local",
+                "8765",
+                "proto=1",
+            ]
         );
-        assert_eq!(info.get_property_val_str("proto"), Some("1"));
     }
 }

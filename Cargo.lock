@@ -1120,7 +1120,6 @@ dependencies = [
  "hostname",
  "image",
  "log",
- "mdns-sd",
  "rerun",
  "serde",
  "serde_json",
@@ -1413,7 +1412,7 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "portable-atomic",
- "spin 0.12.3",
+ "spin",
 ]
 
 [[package]]
@@ -1431,7 +1430,7 @@ dependencies = [
  "rand 0.10.2",
  "rand_distr",
  "serde",
- "spin 0.12.3",
+ "spin",
 ]
 
 [[package]]
@@ -1471,7 +1470,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "spin 0.12.3",
+ "spin",
 ]
 
 [[package]]
@@ -1519,7 +1518,7 @@ dependencies = [
  "derive-new",
  "hashbrown 0.16.1",
  "serde",
- "spin 0.12.3",
+ "spin",
 ]
 
 [[package]]
@@ -1596,7 +1595,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "log",
  "serde",
- "spin 0.12.3",
+ "spin",
  "tracing",
 ]
 
@@ -1723,7 +1722,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
  "serde",
- "spin 0.12.3",
+ "spin",
 ]
 
 [[package]]
@@ -1758,7 +1757,7 @@ dependencies = [
  "rand_distr",
  "serde",
  "smallvec",
- "spin 0.12.3",
+ "spin",
  "thiserror 2.0.20",
  "uuid",
 ]
@@ -2607,7 +2606,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde",
- "spin 0.12.3",
+ "spin",
  "tynm",
  "xxhash-rust",
 ]
@@ -2681,7 +2680,7 @@ dependencies = [
  "libc",
  "log",
  "pliron",
- "spin 0.12.3",
+ "spin",
  "sysinfo",
  "winapi",
 ]
@@ -2733,7 +2732,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "spin 0.12.3",
+ "spin",
  "toml",
  "wasm-bindgen-futures",
  "web-time",
@@ -2796,7 +2795,7 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "smallvec",
- "spin 0.12.3",
+ "spin",
  "thiserror 2.0.20",
  "variadics_please",
 ]
@@ -2963,7 +2962,7 @@ dependencies = [
  "num-traits",
  "paste",
  "serde",
- "spin 0.12.3",
+ "spin",
  "variadics_please",
 ]
 
@@ -4070,17 +4069,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flume"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
-dependencies = [
- "futures-core",
- "futures-sink",
- "spin 0.9.9",
-]
-
-[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4878,7 +4866,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.5",
+ "socket2",
  "tokio",
  "tower-service",
  "tracing",
@@ -5016,16 +5004,6 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
-]
-
-[[package]]
-name = "if-addrs"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
-dependencies = [
- "libc",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5796,20 +5774,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mdns-sd"
-version = "0.13.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "328f4e1041f7cfeb3affccb814ddbe2f004856a2ce769c8bf22080d74c5204c6"
-dependencies = [
- "fastrand",
- "flume",
- "if-addrs",
- "log",
- "mio",
- "socket2 0.5.10",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5879,7 +5843,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
- "log",
  "wasi",
  "windows-sys 0.61.2",
 ]
@@ -6884,7 +6847,7 @@ dependencies = [
  "rustc_apfloat",
  "slotmap",
  "smallvec",
- "spin 0.12.3",
+ "spin",
  "thiserror 2.0.20",
  "utf8-chars",
 ]
@@ -9361,31 +9324,12 @@ dependencies = [
 
 [[package]]
 name = "socket2"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22376abed350d73dd1cd119b57ffccad95b4e585a7cda43e286245ce23c0678"
-dependencies = [
- "libc",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "spin"
-version = "0.9.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
-dependencies = [
- "lock_api",
 ]
 
 [[package]]
@@ -9774,7 +9718,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "signal-hook-registry",
- "socket2 0.6.5",
+ "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
 ]
@@ -9908,7 +9852,7 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "rustls-native-certs",
- "socket2 0.6.5",
+ "socket2",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

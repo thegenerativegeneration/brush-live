@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
     let device = brush_process::burn_init_setup().await.autodiff();
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await?;
     log::info!("listening on {}", listener.local_addr()?);
-    let _mdns = if args.no_mdns {
+    let mdns_guard = if args.no_mdns {
         None
     } else {
         match brush_guide_server::mdns::advertise(args.port) {
@@ -46,5 +46,31 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     };
-    brush_guide_server::server::serve(listener, config, device, args.root).await
+    // Run until the server stops on its own, or until we're asked to shut down; either
+    // way, drop `mdns_guard` before returning so the Bonjour registration is torn down.
+    let result = tokio::select! {
+        result = brush_guide_server::server::serve(listener, config, device, args.root) => result,
+        () = shutdown_signal() => {
+            log::info!("shutting down");
+            Ok(())
+        }
+    };
+    drop(mdns_guard);
+    result
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
