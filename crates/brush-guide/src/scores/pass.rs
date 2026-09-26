@@ -38,6 +38,20 @@ pub struct PassOutput {
     pub max_px_per_m: Vec<f32>,
 }
 
+impl PassOutput {
+    /// Scales the per-Gaussian view counts, e.g. to extrapolate a pass over a
+    /// subset of views to the whole capture. `dir_sum` scales along with
+    /// `weight`, so the angular spread (their ratio) is unchanged.
+    pub fn scale_observations(&mut self, factor: f32) {
+        for w in &mut self.weight {
+            *w *= factor;
+        }
+        for d in &mut self.dir_sum {
+            *d = d.map(|v| v * factor);
+        }
+    }
+}
+
 async fn read_vec<const D: usize>(t: Tensor<D>) -> Vec<f32> {
     t.into_data_async()
         .await

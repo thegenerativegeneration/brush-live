@@ -15,6 +15,8 @@ pub struct GuideConfig {
     pub all_loader_rebuild_every: usize,
     pub score_budget: f32,
     pub min_score_interval_s: f32,
+    /// Views per scoring round: the newest 40 plus a stratified sample of the rest.
+    pub max_score_views: usize,
     pub sh_degree: u32,
     pub seed_stride_px: u32,
     pub seed_alpha_threshold: f32,
@@ -40,6 +42,7 @@ impl Default for GuideConfig {
             all_loader_rebuild_every: 10,
             score_budget: 0.25,
             min_score_interval_s: 2.0,
+            max_score_views: 120,
             sh_degree: 1,
             seed_stride_px: 8,
             seed_alpha_threshold: 0.5,

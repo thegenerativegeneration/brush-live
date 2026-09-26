@@ -2,7 +2,7 @@ use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
 use crate::protocol::{Cell, KeyframeHeader, ServerHeader, encode_cells, encode_frame};
-use crate::schedule::ScoreScheduler;
+use crate::schedule::{ScoreScheduler, select_score_views};
 use crate::scores::metrics::{gaussian_metrics, uncertainty_cap};
 use crate::scores::pass::{PassView, score_pass};
 use crate::scores::voxel::{GaussianScore, VoxelAggregator};
@@ -238,16 +238,22 @@ async fn worker(
         let now = clock.elapsed().as_secs_f64();
         if scheduler.due(now) {
             let splats = live.splats().expect("views imply splats").clone();
-            let views: Vec<PassView> = live
-                .views()
-                .iter()
-                .zip(&sizes)
-                .map(|(v, s)| PassView {
-                    camera: v.camera,
-                    img_size: *s,
-                })
-                .collect();
-            let out = score_pass(&splats, &views, &config.pass).await;
+            let num_views = live.views().len();
+            let views: Vec<PassView> = select_score_views(
+                num_views,
+                config.max_score_views,
+                config.seed.wrapping_add(version),
+            )
+            .into_iter()
+            .map(|i| PassView {
+                camera: live.views()[i].camera,
+                img_size: sizes[i],
+            })
+            .collect();
+            let mut out = score_pass(&splats, &views, &config.pass).await;
+            // Observation counts are over the sampled views only; rescale so
+            // `CoverageParams::n_target` keeps meaning views of the whole capture.
+            out.scale_observations(num_views as f32 / views.len() as f32);
             let (coverage, uncertainty) =
                 gaussian_metrics(&out, &config.coverage, config.fisher_ridge());
             let means = read_f32(splats.means()).await;
