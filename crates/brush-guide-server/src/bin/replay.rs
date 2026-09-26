@@ -51,17 +51,22 @@ struct Frame {
     h: Option<u32>,
 }
 
-fn load_points(path: &Path) -> Vec<Vec3> {
-    // Minimal ASCII/binary-agnostic path: reuse brush-serde's PLY loader via brush-dataset is heavier;
-    // accept only ASCII PLY with x y z as the first three properties.
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
-    let body = text.split("end_header").nth(1).unwrap_or("");
-    body.lines()
+/// Reads an ASCII PLY whose first three vertex properties are x y z.
+fn load_points(path: &Path) -> Result<Vec<Vec3>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let (header, body) = text
+        .split_once("end_header")
+        .ok_or_else(|| format!("{} has no PLY header", path.display()))?;
+    if !header.contains("format ascii") {
+        return Err(format!("{} is not an ASCII PLY", path.display()));
+    }
+    Ok(body
+        .lines()
         .filter_map(|l| {
             let v: Vec<f32> = l.split_whitespace().take(3).filter_map(|t| t.parse().ok()).collect();
             (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2]))
         })
-        .collect()
+        .collect())
 }
 
 fn cell_color(c: &brush_guide::protocol::Cell, mode: &str) -> Option<[u8; 3]> {
@@ -90,7 +95,23 @@ fn cell_color(c: &brush_guide::protocol::Cell, mode: &str) -> Option<[u8; 3]> {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let t: Transforms = serde_json::from_slice(&std::fs::read(args.dataset.join("transforms.json"))?)?;
-    let points = t.ply_file_path.as_ref().map(|p| load_points(&args.dataset.join(p))).unwrap_or_default();
+    let points = match &t.ply_file_path {
+        None => {
+            eprintln!("warning: transforms.json has no ply_file_path; sending keyframes without feature points");
+            Vec::new()
+        }
+        Some(p) => match load_points(&args.dataset.join(p)) {
+            Ok(points) if points.is_empty() => {
+                eprintln!("warning: {p} has no points; sending keyframes without feature points");
+                points
+            }
+            Ok(points) => points,
+            Err(e) => {
+                eprintln!("warning: {e}; sending keyframes without feature points");
+                Vec::new()
+            }
+        },
+    };
     let rec = match &args.save {
         Some(path) => rerun::RecordingStreamBuilder::new("capture-guidance-replay").save(path)?,
         None => rerun::RecordingStreamBuilder::new("capture-guidance-replay").spawn()?,
@@ -143,7 +164,11 @@ async fn main() -> anyhow::Result<()> {
         image::DynamicImage::ImageRgb8(img).write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg)?;
 
         let c2w = Mat4::from_cols_array_2d(&f.transform_matrix).transpose();
-        let (fx, fy) = (f.fl_x.or(t.fl_x).unwrap() * scale, f.fl_y.or(t.fl_y).or(f.fl_x).or(t.fl_x).unwrap() * scale);
+        let fl_x = f
+            .fl_x
+            .or(t.fl_x)
+            .ok_or_else(|| anyhow::anyhow!("frame {}: no fl_x in the frame or transforms.json", f.file_path))?;
+        let (fx, fy) = (fl_x * scale, f.fl_y.or(t.fl_y).unwrap_or(fl_x) * scale);
         let (cx, cy) = (f.cx.or(t.cx).unwrap_or(w0 as f32 / 2.0) * scale, f.cy.or(t.cy).unwrap_or(h0 as f32 / 2.0) * scale);
         let header = KeyframeHeader {
             id: i as u64,
