@@ -54,11 +54,6 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
         .iter()
         .filter_map(|p| project(input.camera, size, *p))
         .collect();
-    let median = {
-        let mut d: Vec<f32> = projected.iter().map(|p| p.1).collect();
-        d.sort_by(f32::total_cmp);
-        d.get(d.len() / 2).copied()
-    };
     let radius = FEATURE_RADIUS_PX * to_alpha_px.x;
 
     let mut seeds = Seeds {
@@ -73,19 +68,25 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
             }
             let px = Vec2::new(x as f32 + half, y as f32 + half).min(size.as_vec2() - 0.5);
             let uv = px / size.as_vec2();
-            let depth = input
-                .depth
-                .and_then(|d| d.sample_uv(uv.x, uv.y))
-                .or_else(|| {
-                    projected
-                        .iter()
-                        .map(|(p, d)| (p.distance(px), *d))
-                        .filter(|(dist, _)| *dist <= radius)
-                        .min_by(|a, b| a.0.total_cmp(&b.0))
-                        .map(|(_, d)| d)
-                })
-                .or(median);
-            let Some(depth) = depth else { continue };
+            let Some(depth) = (if let Some(d) = input.depth {
+                // A depth map is available: only seed where it has a
+                // trustworthy value there. No feature-point or median
+                // fallback — a pixel the depth map doesn't cover is
+                // skipped rather than guessed.
+                d.sample_uv(uv.x, uv.y)
+            } else {
+                // No depth map at all: seed only from a nearby projected
+                // feature point. No median fallback, which used to plant
+                // flat sheets in open space.
+                projected
+                    .iter()
+                    .map(|(p, d)| (p.distance(px), *d))
+                    .filter(|(dist, _)| *dist <= radius)
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, d)| d)
+            }) else {
+                continue;
+            };
             seeds
                 .means
                 .extend(unproject(input.camera, size, px, depth).to_array());
@@ -187,5 +188,56 @@ mod tests {
         );
         let none = seed_points(&input(&[0.0; 16], &rgb, None, &[]));
         assert!(none.means.is_empty());
+    }
+
+    #[test]
+    fn invalid_depth_pixel_is_skipped_not_backfilled_from_feature_point() {
+        let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        // Pixel (1,1) (grid point at stride 2) has an invalid (0.0) depth
+        // reading; pixel (3,1) has a valid one. A feature point sits right
+        // next to the invalid pixel, but with a depth map present it must
+        // never be used to backfill.
+        let mut values = vec![2.0; 16];
+        values[4 + 1] = 0.0;
+        let depth = DepthMap {
+            width: 4,
+            height: 4,
+            values,
+            confidence: None,
+        };
+        let pts = [Vec3::new(0.0, 0.0, 3.0)];
+        let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &pts));
+        // Only the valid pixel (3,1) (and the two on the y=3 row) should be
+        // seeded: 3 of the 4 grid points survive, none at depth 3.0.
+        assert_eq!(seeds.means.len(), 3 * 3, "invalid pixel must be skipped");
+        assert!(
+            seeds
+                .means
+                .chunks_exact(3)
+                .all(|p| (p[2] - 2.0).abs() < 1e-4),
+            "no seed should have picked up the feature-point depth: {:?}",
+            seeds.means
+        );
+    }
+
+    #[test]
+    fn no_depth_feature_point_outside_radius_is_not_seeded() {
+        // Use a large rgb image relative to the 4x4 alpha grid so
+        // `FEATURE_RADIUS_PX` (defined in rgb-pixel units) maps down to a
+        // small radius in alpha-grid space, letting a feature point that's
+        // clearly still in view land well outside it.
+        let rgb = image::RgbImage::from_pixel(400, 400, image::Rgb([0, 0, 0]));
+        // Projects to alpha-space pixel (0, 0); nearest grid center is
+        // (1, 1), a distance of sqrt(2) alpha px — far past the ~0.24 px
+        // radius (24 rgb px scaled by 4/400). Previously this would have
+        // fallen through to the median-depth fallback and seeded every
+        // uncovered pixel anyway.
+        let pts = [Vec3::new(-3.0, -3.0, 3.0)];
+        let seeds = seed_points(&input(&[0.0; 16], &rgb, None, &pts));
+        assert!(
+            seeds.means.is_empty(),
+            "no median fallback: {:?}",
+            seeds.means
+        );
     }
 }
