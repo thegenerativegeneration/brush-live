@@ -18,16 +18,29 @@ fn keyframe(id: u64, pos: Vec3) -> Vec<u8> {
     encode_frame(&header, &jpeg)
 }
 
-async fn next_header<S>(ws: &mut S) -> ServerHeader
+async fn next_frame<S>(ws: &mut S) -> (ServerHeader, Vec<u8>)
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     loop {
         let msg = tokio::time::timeout(Duration::from_secs(60), ws.next()).await.unwrap().unwrap().unwrap();
         if let Message::Binary(b) = msg {
-            return decode_frame::<ServerHeader>(&b).unwrap().0;
+            let (header, payload) = decode_frame::<ServerHeader>(&b).unwrap();
+            return (header, payload.to_vec());
         }
     }
+}
+
+async fn next_header<S>(ws: &mut S) -> ServerHeader
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    next_frame(ws).await.0
+}
+
+fn hello(session_id: &str) -> Message {
+    let hello = ClientHeader::Hello { session_id: session_id.into(), device_model: "test".into(), has_lidar: false };
+    Message::binary(encode_frame(&hello, &[]))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -39,8 +52,13 @@ async fn end_to_end() {
     tokio::spawn(brush_guide_server::server::serve(listener, GuideConfig::default(), device, root.clone()));
 
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}")).await.unwrap();
-    let hello = ClientHeader::Hello { session_id: "s1".into(), device_model: "test".into(), has_lidar: false };
-    ws.send(Message::binary(encode_frame(&hello, &[]))).await.unwrap();
+    // A session id that could escape the session root is refused; the connection stays open.
+    ws.send(hello("../s1")).await.unwrap();
+    match next_header(&mut ws).await {
+        ServerHeader::Error { message } => assert_eq!(message, "invalid session id"),
+        other => panic!("{other:?}"),
+    }
+    ws.send(hello("s1")).await.unwrap();
 
     // Malformed frame: error, connection survives.
     ws.send(Message::binary(vec![255, 255, 0, 0])).await.unwrap();
@@ -63,7 +81,7 @@ async fn end_to_end() {
     // Reconnect with the same session id and resend: acked, not duplicated.
     drop(ws);
     let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}")).await.unwrap();
-    ws.send(Message::binary(encode_frame(&hello, &[]))).await.unwrap();
+    ws.send(hello("s1")).await.unwrap();
     ws.send(Message::binary(keyframe(2, Vec3::new(0.0, 0.0, 2.0)))).await.unwrap();
     loop {
         match next_header(&mut ws).await {
@@ -81,9 +99,28 @@ async fn end_to_end() {
 
     ws.send(Message::binary(encode_frame(&ClientHeader::Finish, &[]))).await.unwrap();
     loop {
-        if let ServerHeader::Splat { ply_len } = next_header(&mut ws).await {
+        if let (ServerHeader::Splat { ply_len }, payload) = next_frame(&mut ws).await {
             assert!(ply_len > 0);
+            assert!(payload.is_empty(), "the PLY stays on the server");
+            assert_eq!(std::fs::metadata(root.join("s1/splat.ply")).unwrap().len(), ply_len);
             break;
+        }
+    }
+
+    // A different id on the same connection switches to a fresh session.
+    ws.send(hello("s2")).await.unwrap();
+    ws.send(Message::binary(keyframe(0, Vec3::new(0.0, 0.0, 2.0)))).await.unwrap();
+    loop {
+        match next_header(&mut ws).await {
+            ServerHeader::Ack { keyframe_id } => { assert_eq!(keyframe_id, 0); break; }
+            ServerHeader::Error { message } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    loop {
+        if let ServerHeader::Status { num_keyframes, .. } = next_header(&mut ws).await {
+            assert!(num_keyframes <= 1, "status of the new session, got {num_keyframes}");
+            if num_keyframes == 1 { break; }
         }
     }
     std::fs::remove_dir_all(root).ok();
