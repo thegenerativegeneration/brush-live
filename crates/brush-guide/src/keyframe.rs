@@ -35,6 +35,7 @@ pub struct DepthMap {
     pub width: u32,
     pub height: u32,
     pub values: Vec<f32>,
+    pub confidence: Option<Vec<u8>>,
 }
 
 impl DepthMap {
@@ -43,6 +44,19 @@ impl DepthMap {
         let y = ((v * self.height as f32) as u32).min(self.height - 1);
         let d = self.values[(y * self.width + x) as usize];
         (d.is_finite() && d > 0.0).then_some(d)
+    }
+
+    /// Zeroes values whose confidence is below `min_confidence`; unchanged
+    /// when there is no confidence data.
+    pub fn masked(mut self, min_confidence: u8) -> DepthMap {
+        if let Some(confidence) = &self.confidence {
+            for (v, &c) in self.values.iter_mut().zip(confidence) {
+                if c < min_confidence {
+                    *v = 0.0;
+                }
+            }
+        }
+        self
     }
 }
 
@@ -127,6 +141,7 @@ pub async fn decode_keyframe(
             width,
             height,
             values,
+            confidence: parts.confidence,
         });
     let points = parts.points.into_iter().map(Vec3::from).collect();
     Ok(DecodedKeyframe {
@@ -159,6 +174,7 @@ mod tests {
             height,
             jpeg_len: 0,
             depth_size: None,
+            depth_confidence: false,
             num_points: 0,
         }
     }
@@ -208,9 +224,32 @@ mod tests {
             width: 2,
             height: 1,
             values: vec![1.0, 0.0],
+            confidence: None,
         };
         assert_eq!(d.sample_uv(0.1, 0.5), Some(1.0));
         assert_eq!(d.sample_uv(0.9, 0.5), None);
+    }
+
+    #[test]
+    fn masked_zeroes_low_confidence_values() {
+        let d = DepthMap {
+            width: 2,
+            height: 1,
+            values: vec![1.0, 2.0],
+            confidence: Some(vec![2, 1]),
+        };
+        assert_eq!(d.masked(2).values, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn masked_leaves_values_unchanged_without_confidence() {
+        let d = DepthMap {
+            width: 2,
+            height: 1,
+            values: vec![1.0, 2.0],
+            confidence: None,
+        };
+        assert_eq!(d.masked(2).values, vec![1.0, 2.0]);
     }
 
     #[tokio::test]

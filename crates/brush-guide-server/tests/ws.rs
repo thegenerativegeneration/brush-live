@@ -32,6 +32,7 @@ fn keyframe(id: u64, pos: Vec3) -> Vec<u8> {
         height: h,
         jpeg_len: jpeg.len() as u32,
         depth_size: None,
+        depth_confidence: false,
         num_points: 0,
     });
     encode_frame(&header, &jpeg)

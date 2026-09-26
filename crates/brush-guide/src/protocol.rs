@@ -12,6 +12,8 @@ pub enum ProtocolError {
     PayloadSize { expected: usize, actual: usize },
     #[error("declared payload size overflows")]
     SizeOverflow,
+    #[error("depth_confidence set without depth_size")]
+    ConfidenceWithoutDepth,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -28,6 +30,8 @@ pub struct KeyframeHeader {
     pub height: u32,
     pub jpeg_len: u32,
     pub depth_size: Option<[u32; 2]>,
+    #[serde(default)]
+    pub depth_confidence: bool,
     pub num_points: u32,
 }
 
@@ -136,28 +140,43 @@ pub fn decode_cells(bytes: &[u8]) -> Result<Vec<Cell>, ProtocolError> {
 pub struct KeyframePayload<'a> {
     pub jpeg: &'a [u8],
     pub depth: Option<Vec<f32>>,
+    pub confidence: Option<Vec<u8>>,
     pub points: Vec<[f32; 3]>,
 }
 
-/// (depth bytes, total payload bytes) declared by the header, `None` on overflow.
-fn payload_sizes(h: &KeyframeHeader) -> Option<(usize, usize)> {
+/// (depth bytes, confidence bytes, total payload bytes) declared by the
+/// header, `None` on overflow.
+fn payload_sizes(h: &KeyframeHeader) -> Option<(usize, usize, usize)> {
     let depth_len = match h.depth_size {
         None => 0,
         Some([w, d]) => (w as usize).checked_mul(d as usize)?.checked_mul(2)?,
     };
+    let confidence_len = if h.depth_confidence {
+        match h.depth_size {
+            None => 0,
+            Some([w, d]) => (w as usize).checked_mul(d as usize)?,
+        }
+    } else {
+        0
+    };
     let points_len = (h.num_points as usize).checked_mul(12)?;
     let total = (h.jpeg_len as usize)
         .checked_add(depth_len)?
+        .checked_add(confidence_len)?
         .checked_add(points_len)?;
-    Some((depth_len, total))
+    Some((depth_len, confidence_len, total))
 }
 
 pub fn split_keyframe_payload<'a>(
     h: &KeyframeHeader,
     payload: &'a [u8],
 ) -> Result<KeyframePayload<'a>, ProtocolError> {
+    if h.depth_confidence && h.depth_size.is_none() {
+        return Err(ProtocolError::ConfidenceWithoutDepth);
+    }
     let jpeg_len = h.jpeg_len as usize;
-    let (depth_len, expected) = payload_sizes(h).ok_or(ProtocolError::SizeOverflow)?;
+    let (depth_len, confidence_len, expected) =
+        payload_sizes(h).ok_or(ProtocolError::SizeOverflow)?;
     if payload.len() != expected {
         return Err(ProtocolError::PayloadSize {
             expected,
@@ -165,13 +184,15 @@ pub fn split_keyframe_payload<'a>(
         });
     }
     let (jpeg, rest) = payload.split_at(jpeg_len);
-    let (depth_bytes, point_bytes) = rest.split_at(depth_len);
+    let (depth_bytes, rest) = rest.split_at(depth_len);
+    let (confidence_bytes, point_bytes) = rest.split_at(confidence_len);
     let depth = h.depth_size.map(|_| {
         depth_bytes
             .chunks_exact(2)
             .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
             .collect()
     });
+    let confidence = h.depth_confidence.then(|| confidence_bytes.to_vec());
     let points = point_bytes
         .chunks_exact(12)
         .map(|c| {
@@ -182,6 +203,7 @@ pub fn split_keyframe_payload<'a>(
     Ok(KeyframePayload {
         jpeg,
         depth,
+        confidence,
         points,
     })
 }
@@ -205,6 +227,7 @@ mod tests {
             height: 720,
             jpeg_len: 3,
             depth_size: Some([2, 1]),
+            depth_confidence: true,
             num_points: 1,
         }
     }
@@ -265,14 +288,40 @@ mod tests {
         for v in [1.5f32, 2.0] {
             payload.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
         }
+        payload.extend_from_slice(&[2, 0]);
         for v in [0.1f32, 0.2, 0.3] {
             payload.extend_from_slice(&v.to_le_bytes());
         }
         let p = split_keyframe_payload(&h, &payload).unwrap();
         assert_eq!(p.jpeg, b"jpg");
         assert_eq!(p.depth.unwrap(), vec![1.5, 2.0]);
+        assert_eq!(p.confidence.unwrap(), vec![2, 0]);
         assert_eq!(p.points, vec![[0.1, 0.2, 0.3]]);
         assert!(split_keyframe_payload(&h, &payload[..payload.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn header_without_confidence_field_defaults_to_false() {
+        let json = serde_json::json!({
+            "id": 1, "timestamp": 0.0,
+            "pose": [1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.],
+            "fx": 1.0, "fy": 1.0, "cx": 1.0, "cy": 1.0,
+            "width": 1, "height": 1, "jpeg_len": 0,
+            "depth_size": null, "num_points": 0,
+        });
+        let h: KeyframeHeader = serde_json::from_value(json).unwrap();
+        assert!(!h.depth_confidence);
+    }
+
+    #[test]
+    fn confidence_without_depth_size_is_an_error() {
+        let mut h = kf_header();
+        h.depth_size = None;
+        h.depth_confidence = true;
+        assert!(matches!(
+            split_keyframe_payload(&h, b"jpg"),
+            Err(ProtocolError::ConfidenceWithoutDepth)
+        ));
     }
 
     #[test]

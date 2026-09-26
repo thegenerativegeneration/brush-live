@@ -150,6 +150,7 @@ mod tests {
             width: 4,
             height: 4,
             values: vec![2.0; 16],
+            confidence: None,
         };
         let seeds = seed_points(&input(&[1.0; 16], &rgb, Some(&depth), &[]));
         assert!(seeds.means.is_empty());
@@ -162,6 +163,7 @@ mod tests {
             width: 4,
             height: 4,
             values: vec![2.0; 16],
+            confidence: None,
         };
         let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &[]));
         assert_eq!(seeds.means.len(), 4 * 3, "2x2 grid at stride 2");

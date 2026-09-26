@@ -107,10 +107,11 @@ impl LiveModel {
 
     /// Adds a view and seeds splats where the current model is transparent.
     /// Returns false if a keyframe with this id was already added.
-    pub async fn add_keyframe(&mut self, kf: DecodedKeyframe) -> bool {
+    pub async fn add_keyframe(&mut self, mut kf: DecodedKeyframe) -> bool {
         if !self.ids.insert(kf.id) {
             return false;
         }
+        kf.depth = kf.depth.map(|d| d.masked(self.config.min_depth_confidence));
         let size = UVec2::new(kf.image.width(), kf.image.height());
         self.view_cams
             .push((kf.camera.position, kf.camera.focal(size).x));

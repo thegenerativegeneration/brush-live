@@ -303,6 +303,7 @@ async fn main() -> anyhow::Result<()> {
             height: h,
             jpeg_len: jpeg.len() as u32,
             depth_size: None,
+            depth_confidence: false,
             num_points: 0,
         };
 

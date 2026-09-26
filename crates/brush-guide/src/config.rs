@@ -30,6 +30,8 @@ pub struct GuideConfig {
     pub pass: PassConfig,
     pub coverage: CoverageParams,
     pub seed: u64,
+    /// ARKit confidence below which depth is ignored for seeding (0 low, 1 medium, 2 high).
+    pub min_depth_confidence: u8,
 }
 
 impl Default for GuideConfig {
@@ -55,6 +57,7 @@ impl Default for GuideConfig {
             pass: PassConfig::default(),
             coverage: CoverageParams::default(),
             seed: 42,
+            min_depth_confidence: 2,
         }
     }
 }
