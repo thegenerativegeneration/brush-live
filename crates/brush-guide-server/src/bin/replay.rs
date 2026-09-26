@@ -6,6 +6,7 @@ use clap::{Parser, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use glam::{Mat4, UVec2, Vec3};
 use serde::Deserialize;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
@@ -27,6 +28,22 @@ struct Args {
     /// (useful headless, where spawning a viewer process fails).
     #[arg(long)]
     save: Option<PathBuf>,
+    /// Whether to send the export's depth (and confidence) alongside each keyframe.
+    #[arg(long, value_enum, default_value_t = DepthMode::High)]
+    depth: DepthMode,
+    /// Append one JSON line per received `score_set` to this file.
+    #[arg(long)]
+    dump_scores: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum DepthMode {
+    /// Send no depth.
+    None,
+    /// Send depth without confidence; the server uses every value.
+    All,
+    /// Send depth with confidence; the server masks low-confidence depth.
+    High,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -77,6 +94,37 @@ struct Frame {
     cy: Option<f32>,
     w: Option<u32>,
     h: Option<u32>,
+    depth_file_path: Option<String>,
+    depth_w: Option<u32>,
+    depth_h: Option<u32>,
+}
+
+/// Loads a frame's depth (and, under `High`, confidence) from the export directory.
+///
+/// Depth bytes are the raw little-endian f16 samples on disk, returned unchanged.
+/// Confidence is one byte per pixel at the path with the depth file's extension
+/// replaced by `.conf`. Missing confidence under `High` is not an error here; the
+/// caller decides whether/how to warn and falls back to sending depth alone.
+fn load_depth(
+    dir: &Path,
+    frame: &Frame,
+    mode: DepthMode,
+) -> anyhow::Result<Option<(Vec<u8>, Option<Vec<u8>>, [u32; 2])>> {
+    if matches!(mode, DepthMode::None) {
+        return Ok(None);
+    }
+    let (Some(path), Some(w), Some(h)) = (&frame.depth_file_path, frame.depth_w, frame.depth_h)
+    else {
+        return Ok(None);
+    };
+    let depth_bytes = std::fs::read(dir.join(path))?;
+    let confidence = if matches!(mode, DepthMode::High) {
+        let conf_path = Path::new(path).with_extension("conf");
+        std::fs::read(dir.join(&conf_path)).ok()
+    } else {
+        None
+    };
+    Ok(Some((depth_bytes, confidence, [w, h])))
 }
 
 /// Reads an ASCII PLY whose first three vertex properties are x y z.
@@ -212,6 +260,11 @@ async fn main() -> anyhow::Result<()> {
             &rerun::TextDocument::from_markdown(AGREEMENT_LEGEND),
         )?;
     }
+    let mut dump_file = match &args.dump_scores {
+        Some(p) => Some(std::fs::OpenOptions::new().create(true).append(true).open(p)?),
+        None => None,
+    };
+    let start = std::time::Instant::now();
     let receiver = tokio::spawn(async move {
         while let Some(Ok(msg)) = source.next().await {
             let Message::Binary(bytes) = msg else {
@@ -221,8 +274,32 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             };
             match header {
-                ServerHeader::ScoreSet { voxel_size, .. } => {
+                ServerHeader::ScoreSet {
+                    version, voxel_size, ..
+                } => {
                     let cells = decode_cells(payload).unwrap_or_default();
+                    if let Some(file) = dump_file.as_mut() {
+                        let cells_json: Vec<[f64; 6]> = cells
+                            .iter()
+                            .map(|c| {
+                                [
+                                    c.center[0] as f64,
+                                    c.center[1] as f64,
+                                    c.center[2] as f64,
+                                    c.coverage as f64,
+                                    c.uncertainty as f64,
+                                    c.age as f64,
+                                ]
+                            })
+                            .collect();
+                        let line = serde_json::json!({
+                            "version": version,
+                            "received_s": start.elapsed().as_secs_f64(),
+                            "voxel_size": voxel_size,
+                            "cells": cells_json,
+                        });
+                        let _ = writeln!(file, "{line}");
+                    }
                     let (pos, col): (Vec<[f32; 3]>, Vec<[u8; 3]>) = cells
                         .iter()
                         .filter_map(|c| cell_color(c, mode).map(|col| (c.center, col)))
@@ -261,6 +338,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let mut path_points = Vec::new();
+    let mut warned_missing_conf = false;
     for (i, f) in t.frames.iter().enumerate() {
         let img = image::open(args.dataset.join(&f.file_path))?.into_rgb8();
         let (w0, h0) = (
@@ -291,6 +369,16 @@ async fn main() -> anyhow::Result<()> {
             f.cx.or(t.cx).unwrap_or(w0 as f32 / 2.0) * scale,
             f.cy.or(t.cy).unwrap_or(h0 as f32 / 2.0) * scale,
         );
+        let depth = load_depth(&args.dataset, f, args.depth)?;
+        if let Some((_, confidence, _)) = &depth {
+            if args.depth == DepthMode::High && confidence.is_none() && !warned_missing_conf {
+                eprintln!(
+                    "warning: {}: no .conf file; sending depth without confidence (like --depth all)",
+                    f.file_path
+                );
+                warned_missing_conf = true;
+            }
+        }
         let header = KeyframeHeader {
             id: i as u64,
             timestamp: i as f64 / args.rate as f64,
@@ -302,8 +390,8 @@ async fn main() -> anyhow::Result<()> {
             width: w,
             height: h,
             jpeg_len: jpeg.len() as u32,
-            depth_size: None,
-            depth_confidence: false,
+            depth_size: depth.as_ref().map(|(_, _, size)| *size),
+            depth_confidence: depth.as_ref().is_some_and(|(_, c, _)| c.is_some()),
             num_points: 0,
         };
 
@@ -320,6 +408,12 @@ async fn main() -> anyhow::Result<()> {
             ..header
         };
         let mut payload = jpeg;
+        if let Some((depth_bytes, confidence, _)) = &depth {
+            payload.extend_from_slice(depth_bytes);
+            if let Some(confidence) = confidence {
+                payload.extend_from_slice(confidence);
+            }
+        }
         for p in &visible {
             for v in p.to_array() {
                 payload.extend_from_slice(&v.to_le_bytes());
@@ -342,4 +436,99 @@ async fn main() -> anyhow::Result<()> {
     println!("All frames sent. Leave running to watch scores settle; Ctrl-C to quit.");
     receiver.await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "brush-guide-replay-test-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn frame_with_depth(depth_file_path: Option<&str>) -> Frame {
+        Frame {
+            file_path: "images/0.jpg".into(),
+            transform_matrix: [[0.0; 4]; 4],
+            fl_x: None,
+            fl_y: None,
+            cx: None,
+            cy: None,
+            w: None,
+            h: None,
+            depth_file_path: depth_file_path.map(String::from),
+            depth_w: depth_file_path.map(|_| 2),
+            depth_h: depth_file_path.map(|_| 1),
+        }
+    }
+
+    #[test]
+    fn none_mode_sends_no_depth() {
+        let dir = TempDir::new("none");
+        let f = frame_with_depth(Some("depth/0.f16"));
+        assert!(load_depth(&dir.0, &f, DepthMode::None).unwrap().is_none());
+    }
+
+    #[test]
+    fn all_mode_sends_depth_without_confidence() {
+        let dir = TempDir::new("all");
+        std::fs::create_dir_all(dir.0.join("depth")).unwrap();
+        std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
+        std::fs::write(dir.0.join("depth/0.conf"), [9u8, 9]).unwrap();
+        let f = frame_with_depth(Some("depth/0.f16"));
+        let (depth, confidence, size) = load_depth(&dir.0, &f, DepthMode::All)
+            .unwrap()
+            .expect("depth present");
+        assert_eq!(depth, vec![0, 1, 2, 3]);
+        assert_eq!(confidence, None);
+        assert_eq!(size, [2, 1]);
+    }
+
+    #[test]
+    fn high_mode_with_confidence_sends_both() {
+        let dir = TempDir::new("high-with-conf");
+        std::fs::create_dir_all(dir.0.join("depth")).unwrap();
+        std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
+        std::fs::write(dir.0.join("depth/0.conf"), [2u8, 1]).unwrap();
+        let f = frame_with_depth(Some("depth/0.f16"));
+        let (depth, confidence, size) = load_depth(&dir.0, &f, DepthMode::High)
+            .unwrap()
+            .expect("depth present");
+        assert_eq!(depth, vec![0, 1, 2, 3]);
+        assert_eq!(confidence, Some(vec![2, 1]));
+        assert_eq!(size, [2, 1]);
+    }
+
+    #[test]
+    fn high_mode_without_confidence_falls_back_to_depth_only() {
+        let dir = TempDir::new("high-no-conf");
+        std::fs::create_dir_all(dir.0.join("depth")).unwrap();
+        std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
+        let f = frame_with_depth(Some("depth/0.f16"));
+        let (depth, confidence, size) = load_depth(&dir.0, &f, DepthMode::High)
+            .unwrap()
+            .expect("depth present");
+        assert_eq!(depth, vec![0, 1, 2, 3]);
+        assert_eq!(confidence, None);
+        assert_eq!(size, [2, 1]);
+    }
 }
