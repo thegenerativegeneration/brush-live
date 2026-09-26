@@ -12,6 +12,9 @@ struct Args {
     /// Optional JSON file with GuideConfig overrides.
     #[arg(long)]
     config: Option<PathBuf>,
+    /// Disable Bonjour advertisement.
+    #[arg(long)]
+    no_mdns: bool,
 }
 
 #[tokio::main]
@@ -25,5 +28,23 @@ async fn main() -> anyhow::Result<()> {
     let device = brush_process::burn_init_setup().await.autodiff();
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await?;
     log::info!("listening on {}", listener.local_addr()?);
+    let _mdns = if args.no_mdns {
+        None
+    } else {
+        match brush_guide_server::mdns::advertise(args.port) {
+            Ok(d) => {
+                log::info!(
+                    "advertising {} on port {}",
+                    brush_guide_server::mdns::SERVICE_TYPE,
+                    args.port
+                );
+                Some(d)
+            }
+            Err(e) => {
+                log::warn!("Bonjour advertisement failed: {e}");
+                None
+            }
+        }
+    };
     brush_guide_server::server::serve(listener, config, device, args.root).await
 }

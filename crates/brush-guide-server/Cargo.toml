@@ -21,6 +21,8 @@ tokio-tungstenite = "0.26"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rerun.workspace = true
 env_logger = "0.11"
+mdns-sd = "0.13"
+hostname = "0.4"
 
 [dev-dependencies]
 brush-cube.path = "../brush-cube"
