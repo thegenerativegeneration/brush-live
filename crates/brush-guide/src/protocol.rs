@@ -83,7 +83,7 @@ pub struct Cell {
     pub age: u8,
     /// Unit surface normal facing the observing cameras; `None` when the voxel is not planar enough.
     pub normal: Option<[f32; 3]>,
-    /// Summed opacity × 32, saturating at 255.
+    /// `min(255, round(Σ opacity · 32))` over the voxel's visible Gaussians.
     pub density: u8,
 }
 

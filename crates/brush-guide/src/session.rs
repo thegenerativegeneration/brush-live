@@ -5,10 +5,10 @@ use crate::protocol::{CELL_BYTES, Cell, KeyframeHeader, ServerHeader, encode_cel
 use crate::schedule::{ScoreScheduler, select_score_views};
 use crate::scores::metrics::{gaussian_metrics, uncertainty_cap};
 use crate::scores::pass::{PassView, score_pass};
-use crate::scores::voxel::{GaussianScore, VoxelAggregator};
+use crate::scores::voxel::{GaussianScore, ViewCone, VoxelAggregator};
 use brush_async::Actor;
 use burn::tensor::{Device, Tensor};
-use glam::{UVec2, Vec3};
+use glam::{Quat, UVec2, Vec3};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -177,6 +177,24 @@ async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
         .expect("f32 splat data")
 }
 
+/// World direction of the Gaussian's shortest scale axis; zero for a
+/// degenerate rotation.
+fn shortest_axis(r: &[f32], s: &[f32]) -> Vec3 {
+    // Brush stores rotations as [w, x, y, z].
+    let q = Quat::from_xyzw(r[1], r[2], r[3], r[0]);
+    if !q.is_finite() || q.length_squared() == 0.0 {
+        return Vec3::ZERO;
+    }
+    let k = if s[0] <= s[1] && s[0] <= s[2] {
+        0
+    } else if s[1] <= s[2] {
+        1
+    } else {
+        2
+    };
+    q.normalize() * Vec3::AXES[k]
+}
+
 fn publish_counts(status_tx: &watch::Sender<StatusMsg>, live: &LiveModel) {
     status_tx.send_modify(|s| {
         s.num_keyframes = live.views().len() as u32;
@@ -305,16 +323,31 @@ async fn worker(
                 gaussian_metrics(&out, &config.coverage, config.fisher_ridge());
             let means = read_f32(splats.means()).await;
             let opac = read_f32(splats.opacities()).await;
+            let rots = read_f32(splats.rotations()).await;
+            let scales = read_f32(splats.scales()).await;
             let gaussians: Vec<GaussianScore> = (0..opac.len())
                 .map(|i| GaussianScore {
                     pos: Vec3::new(means[i * 3], means[i * 3 + 1], means[i * 3 + 2]),
                     opacity: opac[i],
                     coverage: coverage[i],
                     uncertainty: uncertainty[i],
+                    axis: shortest_axis(&rots[i * 4..i * 4 + 4], &scales[i * 3..i * 3 + 3]),
+                })
+                .collect();
+            let cones: Vec<ViewCone> = live
+                .views()
+                .iter()
+                .map(|v| {
+                    let c = &v.camera;
+                    ViewCone {
+                        position: c.position,
+                        forward: c.rotation * Vec3::Z,
+                        cos_half_fov: (0.5 * c.fov_x.max(c.fov_y) as f32).cos(),
+                    }
                 })
                 .collect();
             let end = clock.elapsed().as_secs_f64();
-            let cells = voxels.aggregate(&gaussians, end);
+            let cells = voxels.aggregate(&gaussians, &cones, end);
             scheduler.record(end, end - now);
             last_score_ms = ((end - now) * 1000.0) as u32;
             version += 1;
@@ -364,5 +397,13 @@ mod tests {
         assert!(session.is_alive());
         drop(rx);
         assert!(!session.is_alive());
+    }
+
+    #[test]
+    fn shortest_axis_follows_rotation() {
+        let h = std::f32::consts::FRAC_1_SQRT_2;
+        // 90° about x in [w, x, y, z]; the flat local z axis maps to ±y.
+        let a = shortest_axis(&[h, h, 0.0, 0.0], &[1.0, 1.0, 0.01]);
+        assert!(a.dot(Vec3::Y).abs() > 0.999, "{a}");
     }
 }

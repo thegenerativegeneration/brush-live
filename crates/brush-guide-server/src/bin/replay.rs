@@ -336,6 +336,22 @@ async fn main() -> anyhow::Result<()> {
                             .with_colors(col)
                             .with_radii([voxel_size * 0.4]),
                     );
+                    let (origins, vectors): (Vec<[f32; 3]>, Vec<[f32; 3]>) = cells
+                        .iter()
+                        .filter_map(|c| {
+                            c.normal
+                                .map(|n| (c.center, [n[0] * 0.08, n[1] * 0.08, n[2] * 0.08]))
+                        })
+                        .unzip();
+                    eprintln!(
+                        "score set v{version}: {} of {} cells have a normal",
+                        origins.len(),
+                        cells.len()
+                    );
+                    let _ = rec_rx.log(
+                        "cells/normals",
+                        &rerun::Arrows3D::from_vectors(vectors).with_origins(origins),
+                    );
                 }
                 ServerHeader::Status {
                     num_splats,
