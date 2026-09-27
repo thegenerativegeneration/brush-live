@@ -9,6 +9,10 @@ pub struct GaussianScore {
     pub uncertainty: f32,
     /// Unit direction of the Gaussian's shortest scale axis in world space (sign arbitrary).
     pub axis: Vec3,
+    /// `1 − s_min / s_mid` of the sorted scales: 0 for a round Gaussian, whose
+    /// `axis` carries no orientation, towards 1 for a flat disc. Scales the
+    /// Gaussian's vote on the voxel normal.
+    pub flatness: f32,
 }
 
 /// A keyframe camera approximated as a cone for "does this camera see the voxel".
@@ -29,7 +33,7 @@ impl ViewCone {
 /// Minimum share of the axis tensor's trace on its dominant eigenvector for a
 /// voxel to count as planar; a two-plane crease scores 0.5.
 const MIN_PLANARITY: f32 = 0.7;
-/// Minimum summed opacity of Gaussians with a usable axis for a normal.
+/// Minimum Σ opacity · flatness of Gaussians with a usable axis for a normal.
 const MIN_NORMAL_WEIGHT: f32 = 0.3;
 
 pub struct VoxelAggregator {
@@ -46,8 +50,9 @@ struct Acc {
     cov: f32,
     unc: f32,
     pos: Vec3,
-    /// Σ opacity · a aᵀ over Gaussians with a usable axis.
+    /// Σ opacity · flatness · a aᵀ over Gaussians with a usable axis.
     tensor: Mat3,
+    /// Σ opacity · flatness over the same Gaussians.
     axis_w: f32,
 }
 
@@ -152,10 +157,15 @@ impl VoxelAggregator {
             a.cov += g.opacity * coverage;
             a.unc += g.opacity * uncertainty;
             a.pos += g.opacity * g.pos;
-            if g.axis.is_finite() && g.axis.length_squared() > 0.5 {
+            let axis_w = if g.flatness.is_finite() {
+                g.opacity * g.flatness.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if axis_w > 0.0 && g.axis.is_finite() && g.axis.length_squared() > 0.5 {
                 let ax = g.axis.normalize();
-                a.tensor += Mat3::from_cols(ax * ax.x, ax * ax.y, ax * ax.z) * g.opacity;
-                a.axis_w += g.opacity;
+                a.tensor += Mat3::from_cols(ax * ax.x, ax * ax.y, ax * ax.z) * axis_w;
+                a.axis_w += axis_w;
             }
         }
 
@@ -210,6 +220,7 @@ mod tests {
             coverage,
             uncertainty,
             axis: Vec3::Z,
+            flatness: 1.0,
         }
     }
 
@@ -220,6 +231,7 @@ mod tests {
             coverage: 0.5,
             uncertainty: 1.0,
             axis: Vec3::from(axis),
+            flatness: 1.0,
         }
     }
 
@@ -438,5 +450,35 @@ mod tests {
         let mut agg = VoxelAggregator::new(1.0, 0.1, CAP);
         let c = agg.aggregate(&gs, &[cam([0.5, 0.5, -4.0], [1.0, 0.0, 0.0])], 0.0);
         assert!(Vec3::from(c[0].normal.unwrap()).dot(Vec3::NEG_Z) > 0.99);
+    }
+
+    #[test]
+    fn round_gaussians_do_not_vote_on_the_normal() {
+        // 20 round Gaussians whose arbitrary shortest axes point along x, plus
+        // 3 flat ones along z: the normal comes from the flat ones.
+        let mut gs: Vec<_> = (0..20)
+            .map(|_| GaussianScore {
+                flatness: 0.02,
+                ..ga([0.5, 0.5, 0.5], 0.8, [1.0, 0.0, 0.0])
+            })
+            .collect();
+        gs.extend((0..3).map(|_| ga([0.5, 0.5, 0.5], 0.8, [0.0, 0.0, 1.0])));
+        let mut agg = VoxelAggregator::new(1.0, 0.1, CAP);
+        let c = agg.aggregate(&gs, &[cam([0.5, 0.5, 3.0], [0.0, 0.0, -1.0])], 0.0);
+        assert!(Vec3::from(c[0].normal.unwrap()).dot(Vec3::Z) > 0.99);
+    }
+
+    #[test]
+    fn only_round_gaussians_give_no_normal() {
+        let gs: Vec<_> = (0..20)
+            .map(|_| GaussianScore {
+                flatness: 0.0,
+                ..ga([0.5, 0.5, 0.5], 0.8, [0.0, 0.0, 1.0])
+            })
+            .collect();
+        let mut agg = VoxelAggregator::new(1.0, 0.1, CAP);
+        let c = agg.aggregate(&gs, &[], 0.0);
+        assert_eq!(c[0].normal, None);
+        assert_eq!(c[0].density, 255, "density stays opacity-weighted");
     }
 }

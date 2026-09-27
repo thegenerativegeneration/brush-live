@@ -195,6 +195,17 @@ fn shortest_axis(r: &[f32], s: &[f32]) -> Vec3 {
     q.normalize() * Vec3::AXES[k]
 }
 
+/// `1 − s_min / s_mid` of the Gaussian's scales: 0 when round (or
+/// degenerate), towards 1 for a flat disc.
+fn flatness(s: &[f32]) -> f32 {
+    let mut v = [s[0], s[1], s[2]];
+    v.sort_by(f32::total_cmp);
+    if !(v[0].is_finite() && v[1].is_finite()) || v[1] <= 0.0 {
+        return 0.0;
+    }
+    (1.0 - v[0] / v[1]).clamp(0.0, 1.0)
+}
+
 fn publish_counts(status_tx: &watch::Sender<StatusMsg>, live: &LiveModel) {
     status_tx.send_modify(|s| {
         s.num_keyframes = live.views().len() as u32;
@@ -332,6 +343,7 @@ async fn worker(
                     coverage: coverage[i],
                     uncertainty: uncertainty[i],
                     axis: shortest_axis(&rots[i * 4..i * 4 + 4], &scales[i * 3..i * 3 + 3]),
+                    flatness: flatness(&scales[i * 3..i * 3 + 3]),
                 })
                 .collect();
             let cones: Vec<ViewCone> = live
@@ -405,5 +417,13 @@ mod tests {
         // 90° about x in [w, x, y, z]; the flat local z axis maps to ±y.
         let a = shortest_axis(&[h, h, 0.0, 0.0], &[1.0, 1.0, 0.01]);
         assert!(a.dot(Vec3::Y).abs() > 0.999, "{a}");
+    }
+
+    #[test]
+    fn flatness_compares_smallest_to_middle_scale() {
+        assert!((flatness(&[1.0, 0.25, 0.5]) - 0.5).abs() < 1e-6);
+        assert_eq!(flatness(&[2.0, 2.0, 2.0]), 0.0);
+        assert!(flatness(&[1.0, 1.0, 0.001]) > 0.99);
+        assert_eq!(flatness(&[0.0, 0.0, 1.0]), 0.0);
     }
 }

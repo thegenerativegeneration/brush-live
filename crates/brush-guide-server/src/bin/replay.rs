@@ -343,10 +343,13 @@ async fn main() -> anyhow::Result<()> {
                                 .map(|n| (c.center, [n[0] * 0.08, n[1] * 0.08, n[2] * 0.08]))
                         })
                         .unzip();
+                    let dense: Vec<&Cell> = cells.iter().filter(|c| c.density >= 16).collect();
                     eprintln!(
-                        "score set v{version}: {} of {} cells have a normal",
+                        "score set v{version}: {} of {} cells have a normal; {} of {} with density >= 16",
                         origins.len(),
-                        cells.len()
+                        cells.len(),
+                        dense.iter().filter(|c| c.normal.is_some()).count(),
+                        dense.len()
                     );
                     let _ = rec_rx.log(
                         "cells/normals",
