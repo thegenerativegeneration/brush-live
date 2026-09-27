@@ -33,8 +33,11 @@ impl ViewCone {
 /// Minimum share of the axis tensor's trace on its dominant eigenvector for a
 /// voxel to count as planar; a two-plane crease scores 0.5.
 const MIN_PLANARITY: f32 = 0.7;
-/// Minimum Σ opacity · flatness of Gaussians with a usable axis for a normal.
+/// Minimum Σ opacity in a voxel for a normal.
 const MIN_NORMAL_WEIGHT: f32 = 0.3;
+/// Minimum Σ opacity · flatness of Gaussians with a usable axis for a normal;
+/// a voxel of only round Gaussians has no orientation.
+const MIN_FLAT_WEIGHT: f32 = 0.1;
 
 pub struct VoxelAggregator {
     voxel_size: f32,
@@ -188,7 +191,7 @@ impl VoxelAggregator {
                     0
                 };
                 let center = a.pos / a.w;
-                let normal = (a.axis_w >= MIN_NORMAL_WEIGHT)
+                let normal = (a.w >= MIN_NORMAL_WEIGHT && a.axis_w >= MIN_FLAT_WEIGHT)
                     .then(|| dominant_axis(a.tensor))
                     .flatten()
                     .filter(|(_, planarity)| *planarity >= MIN_PLANARITY)
@@ -480,5 +483,28 @@ mod tests {
         let c = agg.aggregate(&gs, &[], 0.0);
         assert_eq!(c[0].normal, None);
         assert_eq!(c[0].density, 255, "density stays opacity-weighted");
+    }
+
+    #[test]
+    fn weight_rule_uses_opacity_mass_and_a_smaller_flat_mass() {
+        let round = |n: usize| {
+            (0..n).map(|_| GaussianScore {
+                flatness: 0.0,
+                ..ga([0.5, 0.5, 0.5], 0.8, [1.0, 0.0, 0.0])
+            })
+        };
+        let mut agg = VoxelAggregator::new(1.0, 0.1, CAP);
+        // Opacity mass 1.0, flat mass 0.2: enough for a normal.
+        let mut gs: Vec<_> = round(1).collect();
+        gs.push(ga([0.5, 0.5, 0.5], 0.2, [0.0, 0.0, 1.0]));
+        let c = agg.aggregate(&gs, &[cam([0.5, 0.5, 3.0], [0.0, 0.0, -1.0])], 0.0);
+        assert!(Vec3::from(c[0].normal.unwrap()).dot(Vec3::Z) > 0.99);
+        // Opacity mass 1.8, flat mass 0.05: too little orientation.
+        let mut gs: Vec<_> = round(2).collect();
+        gs.push(GaussianScore {
+            flatness: 0.25,
+            ..ga([0.5, 0.5, 0.5], 0.2, [0.0, 0.0, 1.0])
+        });
+        assert_eq!(agg.aggregate(&gs, &[], 0.0)[0].normal, None);
     }
 }
