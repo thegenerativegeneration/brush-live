@@ -58,6 +58,7 @@ pub enum ServerHeader {
         based_on_keyframe_id: u64,
         voxel_size: f32,
         num_cells: u32,
+        cell_bytes: u32,
     },
     Status {
         num_keyframes: u32,
@@ -75,13 +76,46 @@ pub enum ServerHeader {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cell {
+    /// Opacity-weighted mean position of the voxel's Gaussians; lies inside the voxel.
     pub center: [f32; 3],
     pub coverage: u8,
     pub uncertainty: u8,
     pub age: u8,
+    /// Unit surface normal facing the observing cameras; `None` when the voxel is not planar enough.
+    pub normal: Option<[f32; 3]>,
+    /// Summed opacity × 32, saturating at 255.
+    pub density: u8,
 }
 
-pub const CELL_BYTES: usize = 15;
+pub const CELL_BYTES: usize = 19;
+pub const CELL_FLAG_NORMAL: u8 = 1;
+
+fn sign_not_zero(v: f32) -> f32 {
+    if v >= 0.0 { 1.0 } else { -1.0 }
+}
+
+/// Octahedral encoding of a unit vector into two bytes.
+pub fn oct_encode(n: glam::Vec3) -> [u8; 2] {
+    let n = n / (n.x.abs() + n.y.abs() + n.z.abs());
+    let (mut x, mut y) = (n.x, n.y);
+    if n.z < 0.0 {
+        let (ox, oy) = (x, y);
+        x = (1.0 - oy.abs()) * sign_not_zero(ox);
+        y = (1.0 - ox.abs()) * sign_not_zero(oy);
+    }
+    let q = |v: f32| ((v.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+    [q(x), q(y)]
+}
+
+pub fn oct_decode(b: [u8; 2]) -> glam::Vec3 {
+    let x = b[0] as f32 / 255.0 * 2.0 - 1.0;
+    let y = b[1] as f32 / 255.0 * 2.0 - 1.0;
+    let mut n = glam::Vec3::new(x, y, 1.0 - x.abs() - y.abs());
+    let t = (-n.z).max(0.0);
+    n.x += if n.x >= 0.0 { -t } else { t };
+    n.y += if n.y >= 0.0 { -t } else { t };
+    n.normalize()
+}
 
 pub fn encode_frame<H: Serialize>(header: &H, payload: &[u8]) -> Vec<u8> {
     let json = serde_json::to_vec(header).expect("header serialises");
@@ -112,6 +146,12 @@ pub fn encode_cells(cells: &[Cell]) -> Vec<u8> {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(&[c.coverage, c.uncertainty, c.age]);
+        let (oct, flags) = match c.normal {
+            Some(n) => (oct_encode(glam::Vec3::from(n)), CELL_FLAG_NORMAL),
+            None => ([0, 0], 0),
+        };
+        out.extend_from_slice(&oct);
+        out.extend_from_slice(&[c.density, flags]);
     }
     out
 }
@@ -132,6 +172,9 @@ pub fn decode_cells(bytes: &[u8]) -> Result<Vec<Cell>, ProtocolError> {
                 coverage: c[12],
                 uncertainty: c[13],
                 age: c[14],
+                normal: (c[18] & CELL_FLAG_NORMAL != 0)
+                    .then(|| oct_decode([c[15], c[16]]).to_array()),
+                density: c[17],
             }
         })
         .collect())
@@ -267,12 +310,16 @@ mod tests {
                 coverage: 10,
                 uncertainty: 250,
                 age: 255,
+                normal: None,
+                density: 0,
             },
             Cell {
                 center: [0.0, 0.0, 0.0],
                 coverage: 0,
                 uncertainty: 0,
                 age: 0,
+                normal: None,
+                density: 0,
             },
         ];
         let bytes = encode_cells(&cells);
@@ -298,6 +345,89 @@ mod tests {
         assert_eq!(p.confidence.unwrap(), vec![2, 0]);
         assert_eq!(p.points, vec![[0.1, 0.2, 0.3]]);
         assert!(split_keyframe_payload(&h, &payload[..payload.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn octahedral_round_trip_within_two_degrees() {
+        let mut worst = 0.0f32;
+        for i in 0..40 {
+            for j in 0..80 {
+                let theta = std::f32::consts::PI * (i as f32 + 0.5) / 40.0;
+                let phi = 2.0 * std::f32::consts::PI * j as f32 / 80.0;
+                let n = glam::Vec3::new(
+                    theta.sin() * phi.cos(),
+                    theta.sin() * phi.sin(),
+                    theta.cos(),
+                );
+                let back = oct_decode(oct_encode(n));
+                worst = worst.max(n.dot(back).clamp(-1.0, 1.0).acos().to_degrees());
+            }
+        }
+        for n in [
+            glam::Vec3::X,
+            glam::Vec3::NEG_X,
+            glam::Vec3::Y,
+            glam::Vec3::NEG_Y,
+            glam::Vec3::Z,
+            glam::Vec3::NEG_Z,
+        ] {
+            worst = worst.max(
+                n.dot(oct_decode(oct_encode(n)))
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees(),
+            );
+        }
+        assert!(worst < 2.0, "worst error {worst}°");
+    }
+
+    #[test]
+    fn cells_round_trip_with_and_without_normal() {
+        let cells = [
+            Cell {
+                center: [1.0, -2.0, 3.5],
+                coverage: 10,
+                uncertainty: 250,
+                age: 3,
+                normal: Some([0.6, 0.0, -0.8]),
+                density: 40,
+            },
+            Cell {
+                center: [0.25, 0.5, -1.0],
+                coverage: 200,
+                uncertainty: 5,
+                age: 30,
+                normal: None,
+                density: 3,
+            },
+        ];
+        let bytes = encode_cells(&cells);
+        assert_eq!(bytes.len(), 2 * CELL_BYTES);
+        assert_eq!(bytes[18], CELL_FLAG_NORMAL);
+        assert_eq!(bytes[CELL_BYTES + 18], 0);
+        let back = decode_cells(&bytes).unwrap();
+        assert_eq!(back[1], cells[1]);
+        let n = glam::Vec3::from(back[0].normal.unwrap());
+        assert!(n.dot(glam::Vec3::new(0.6, 0.0, -0.8)) > 0.999);
+        assert_eq!((back[0].center, back[0].density), (cells[0].center, 40));
+    }
+
+    #[test]
+    fn score_set_header_carries_cell_bytes() {
+        let msg = crate::session::ScoreSetMsg {
+            version: 1,
+            based_on_keyframe_id: 2,
+            voxel_size: 0.1,
+            cells: vec![],
+        };
+        let frame = msg.to_frame();
+        let (h, _): (serde_json::Value, _) = decode_frame(&frame).unwrap();
+        assert_eq!(h["cell_bytes"], 19);
+    }
+
+    #[test]
+    fn decode_cells_rejects_old_15_byte_payload() {
+        assert!(decode_cells(&[0u8; 15]).is_err());
     }
 
     #[test]
@@ -343,12 +473,24 @@ mod tests {
         };
         let dir = std::path::PathBuf::from(dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let cells = [Cell {
-            center: [1.0, -2.0, 3.5],
-            coverage: 10,
-            uncertainty: 250,
-            age: 3,
-        }];
+        let cells = [
+            Cell {
+                center: [1.0, -2.0, 3.5],
+                coverage: 10,
+                uncertainty: 250,
+                age: 3,
+                normal: Some([0.6, 0.0, -0.8]),
+                density: 40,
+            },
+            Cell {
+                center: [0.25, 0.5, -1.0],
+                coverage: 200,
+                uncertainty: 5,
+                age: 30,
+                normal: None,
+                density: 3,
+            },
+        ];
         let fixtures: Vec<(&str, Vec<u8>)> = vec![
             (
                 "ack.bin",
@@ -361,7 +503,8 @@ mod tests {
                         version: 2,
                         based_on_keyframe_id: 9,
                         voxel_size: 0.1,
-                        num_cells: 1,
+                        num_cells: 2,
+                        cell_bytes: CELL_BYTES as u32,
                     },
                     &encode_cells(&cells),
                 ),

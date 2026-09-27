@@ -87,6 +87,8 @@ impl VoxelAggregator {
                     coverage: ((a.cov / a.w).clamp(0.0, 1.0) * 255.0).round() as u8,
                     uncertainty: u8_unc,
                     age: (now_s - first).clamp(0.0, 255.0) as u8,
+                    normal: None,
+                    density: 0,
                 }
             })
             .collect()

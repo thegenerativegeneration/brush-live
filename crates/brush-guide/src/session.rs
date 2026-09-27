@@ -1,7 +1,7 @@
 use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
-use crate::protocol::{Cell, KeyframeHeader, ServerHeader, encode_cells, encode_frame};
+use crate::protocol::{CELL_BYTES, Cell, KeyframeHeader, ServerHeader, encode_cells, encode_frame};
 use crate::schedule::{ScoreScheduler, select_score_views};
 use crate::scores::metrics::{gaussian_metrics, uncertainty_cap};
 use crate::scores::pass::{PassView, score_pass};
@@ -28,6 +28,7 @@ impl ScoreSetMsg {
             based_on_keyframe_id: self.based_on_keyframe_id,
             voxel_size: self.voxel_size,
             num_cells: self.cells.len() as u32,
+            cell_bytes: CELL_BYTES as u32,
         };
         encode_frame(&header, &encode_cells(&self.cells))
     }

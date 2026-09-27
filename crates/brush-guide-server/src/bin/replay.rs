@@ -1,5 +1,6 @@
 use brush_guide::protocol::{
-    Cell, ClientHeader, KeyframeHeader, ServerHeader, decode_cells, decode_frame, encode_frame,
+    CELL_BYTES, Cell, ClientHeader, KeyframeHeader, ServerHeader, decode_cells, decode_frame,
+    encode_frame,
 };
 use brush_guide::seed::project;
 use clap::{Parser, ValueEnum};
@@ -292,8 +293,15 @@ async fn main() -> anyhow::Result<()> {
                 ServerHeader::ScoreSet {
                     version,
                     voxel_size,
+                    cell_bytes,
                     ..
                 } => {
+                    if cell_bytes != CELL_BYTES as u32 {
+                        eprintln!(
+                            "server and replay cell formats differ: server cell_bytes={cell_bytes}, replay expects {CELL_BYTES}"
+                        );
+                        continue;
+                    }
                     let cells = decode_cells(payload).unwrap_or_default();
                     if let Some(file) = dump_file.as_mut() {
                         let cells_json: Vec<[f64; 6]> = cells
