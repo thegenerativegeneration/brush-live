@@ -94,9 +94,20 @@ struct Frame {
     cy: Option<f32>,
     w: Option<u32>,
     h: Option<u32>,
+    /// Raw f16 lidar depth. Exports before the rename used `depth_file_path`, which
+    /// nerfstudio-style loaders read as a depth image, so it is only a fallback.
+    lidar_depth_file_path: Option<String>,
     depth_file_path: Option<String>,
     depth_w: Option<u32>,
     depth_h: Option<u32>,
+}
+
+impl Frame {
+    fn depth_path(&self) -> Option<&str> {
+        self.lidar_depth_file_path
+            .as_deref()
+            .or(self.depth_file_path.as_deref())
+    }
 }
 
 /// Loads a frame's depth (and, under `High`, confidence) from the export directory.
@@ -113,8 +124,7 @@ fn load_depth(
     if matches!(mode, DepthMode::None) {
         return Ok(None);
     }
-    let (Some(path), Some(w), Some(h)) = (&frame.depth_file_path, frame.depth_w, frame.depth_h)
-    else {
+    let (Some(path), Some(w), Some(h)) = (frame.depth_path(), frame.depth_w, frame.depth_h) else {
         return Ok(None);
     };
     let depth_bytes = std::fs::read(dir.join(path))?;
@@ -261,7 +271,12 @@ async fn main() -> anyhow::Result<()> {
         )?;
     }
     let mut dump_file = match &args.dump_scores {
-        Some(p) => Some(std::fs::OpenOptions::new().create(true).append(true).open(p)?),
+        Some(p) => Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)?,
+        ),
         None => None,
     };
     let start = std::time::Instant::now();
@@ -275,7 +290,9 @@ async fn main() -> anyhow::Result<()> {
             };
             match header {
                 ServerHeader::ScoreSet {
-                    version, voxel_size, ..
+                    version,
+                    voxel_size,
+                    ..
                 } => {
                     let cells = decode_cells(payload).unwrap_or_default();
                     if let Some(file) = dump_file.as_mut() {
@@ -475,7 +492,8 @@ mod tests {
             cy: None,
             w: None,
             h: None,
-            depth_file_path: depth_file_path.map(String::from),
+            lidar_depth_file_path: depth_file_path.map(String::from),
+            depth_file_path: None,
             depth_w: depth_file_path.map(|_| 2),
             depth_h: depth_file_path.map(|_| 1),
         }
@@ -530,5 +548,47 @@ mod tests {
         assert_eq!(depth, vec![0, 1, 2, 3]);
         assert_eq!(confidence, None);
         assert_eq!(size, [2, 1]);
+    }
+
+    #[test]
+    fn legacy_depth_key_is_read_when_the_new_key_is_absent() {
+        let dir = TempDir::new("legacy-key");
+        std::fs::create_dir_all(dir.0.join("depth")).unwrap();
+        std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
+        let mut f = frame_with_depth(Some("depth/0.f16"));
+        f.depth_file_path = f.lidar_depth_file_path.take();
+        let (depth, _, size) = load_depth(&dir.0, &f, DepthMode::All)
+            .unwrap()
+            .expect("depth present via depth_file_path");
+        assert_eq!(depth, vec![0, 1, 2, 3]);
+        assert_eq!(size, [2, 1]);
+    }
+
+    #[test]
+    fn new_depth_key_wins_over_the_legacy_key() {
+        let dir = TempDir::new("both-keys");
+        std::fs::create_dir_all(dir.0.join("depth")).unwrap();
+        std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
+        std::fs::write(dir.0.join("depth/old.f16"), [7u8, 7, 7, 7]).unwrap();
+        let mut f = frame_with_depth(Some("depth/0.f16"));
+        f.depth_file_path = Some("depth/old.f16".into());
+        let (depth, _, _) = load_depth(&dir.0, &f, DepthMode::All)
+            .unwrap()
+            .expect("depth present");
+        assert_eq!(depth, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn frame_json_accepts_either_depth_key() {
+        let base = r#""file_path":"images/0.jpg","transform_matrix":[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],"depth_w":2,"depth_h":1"#;
+        let new: Frame = serde_json::from_str(&format!(
+            r#"{{{base},"lidar_depth_file_path":"depth/0.f16"}}"#
+        ))
+        .unwrap();
+        let old: Frame =
+            serde_json::from_str(&format!(r#"{{{base},"depth_file_path":"depth/0.f16"}}"#))
+                .unwrap();
+        assert_eq!(new.depth_path(), Some("depth/0.f16"));
+        assert_eq!(old.depth_path(), Some("depth/0.f16"));
     }
 }
