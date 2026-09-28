@@ -32,7 +32,9 @@ struct Args {
     /// Whether to send the export's depth (and confidence) alongside each keyframe.
     #[arg(long, value_enum, default_value_t = DepthMode::High)]
     depth: DepthMode,
-    /// Append one JSON line per received `score_set` to this file.
+    /// Append one JSON line per received `score_set` to this file. Each cell is
+    /// `[x, y, z, coverage, uncertainty, age, nx, ny, nz, density]`, with
+    /// `nx, ny, nz = 0, 0, 0` when the cell has no normal.
     #[arg(long)]
     dump_scores: Option<PathBuf>,
 }
@@ -304,9 +306,10 @@ async fn main() -> anyhow::Result<()> {
                     }
                     let cells = decode_cells(payload).unwrap_or_default();
                     if let Some(file) = dump_file.as_mut() {
-                        let cells_json: Vec<[f64; 6]> = cells
+                        let cells_json: Vec<[f64; 10]> = cells
                             .iter()
                             .map(|c| {
+                                let [nx, ny, nz] = c.normal.unwrap_or([0.0, 0.0, 0.0]);
                                 [
                                     c.center[0] as f64,
                                     c.center[1] as f64,
@@ -314,6 +317,10 @@ async fn main() -> anyhow::Result<()> {
                                     c.coverage as f64,
                                     c.uncertainty as f64,
                                     c.age as f64,
+                                    nx as f64,
+                                    ny as f64,
+                                    nz as f64,
+                                    c.density as f64,
                                 ]
                             })
                             .collect();

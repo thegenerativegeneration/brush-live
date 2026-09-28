@@ -46,6 +46,9 @@ pub struct VoxelAggregator {
     /// maximally uncertain, not absent.
     uncertainty_cap: f32,
     first_seen: HashMap<IVec3, f64>,
+    /// EMA (α = 0.3 on the new round) of the sent uncertainty byte per voxel,
+    /// smoothing the per-round percentile normalisation across rounds.
+    unc_ema: HashMap<IVec3, f32>,
 }
 
 struct Acc {
@@ -125,11 +128,13 @@ impl VoxelAggregator {
             min_opacity,
             uncertainty_cap,
             first_seen: HashMap::new(),
+            unc_ema: HashMap::new(),
         }
     }
 
     pub fn reset(&mut self) {
         self.first_seen.clear();
+        self.unc_ema.clear();
     }
 
     pub fn aggregate(
@@ -190,6 +195,9 @@ impl VoxelAggregator {
                 } else {
                     0
                 };
+                let prev = *self.unc_ema.get(&key).unwrap_or(&(u8_unc as f32));
+                let smoothed = 0.3 * u8_unc as f32 + 0.7 * prev;
+                self.unc_ema.insert(key, smoothed);
                 let center = a.pos / a.w;
                 let normal = (a.w >= MIN_NORMAL_WEIGHT && a.axis_w >= MIN_FLAT_WEIGHT)
                     .then(|| dominant_axis(a.tensor))
@@ -200,7 +208,7 @@ impl VoxelAggregator {
                 Cell {
                     center: center.to_array(),
                     coverage: ((a.cov / a.w).clamp(0.0, 1.0) * 255.0).round() as u8,
-                    uncertainty: u8_unc,
+                    uncertainty: smoothed.round() as u8,
                     age: (now_s - first).clamp(0.0, 255.0) as u8,
                     normal,
                     density,
@@ -234,6 +242,17 @@ mod tests {
             coverage: 0.5,
             uncertainty: 1.0,
             axis: Vec3::from(axis),
+            flatness: 1.0,
+        }
+    }
+
+    fn ga_u(pos: [f32; 3], uncertainty: f32) -> GaussianScore {
+        GaussianScore {
+            pos: Vec3::from(pos),
+            opacity: 0.8,
+            coverage: 0.5,
+            uncertainty,
+            axis: Vec3::Z,
             flatness: 1.0,
         }
     }
@@ -298,6 +317,30 @@ mod tests {
             0.0,
         );
         assert!(cells.iter().all(|c| c.uncertainty == 0));
+    }
+
+    #[test]
+    fn uncertainty_is_smoothed_across_rounds_per_voxel() {
+        let mut agg = VoxelAggregator::new(1.0, 0.1, CAP);
+        // Two voxels so the per-round percentile normalisation has a range.
+        let low = |u: f32| vec![ga_u([0.5, 0.5, 0.5], u), ga_u([5.5, 0.5, 0.5], 1.0)];
+        let first = agg.aggregate(&low(50.0), &[], 0.0);
+        let a0 = first.iter().find(|c| c.center[0] < 1.0).unwrap().uncertainty;
+        assert_eq!(a0, 255); // highest in its round
+        let second = agg.aggregate(&low(0.5), &[], 1.0);
+        let a1 = second.iter().find(|c| c.center[0] < 1.0).unwrap().uncertainty;
+        // Round value is 0 (now the lowest); sent value = round(0.3·0 + 0.7·255) = 179.
+        assert_eq!(a1, 179);
+    }
+
+    #[test]
+    fn reset_clears_uncertainty_history() {
+        let mut agg = VoxelAggregator::new(1.0, 0.1, CAP);
+        let set = |u: f32| vec![ga_u([0.5, 0.5, 0.5], u), ga_u([5.5, 0.5, 0.5], 1.0)];
+        agg.aggregate(&set(50.0), &[], 0.0);
+        agg.reset();
+        let c = agg.aggregate(&set(0.5), &[], 1.0);
+        assert_eq!(c.iter().find(|c| c.center[0] < 1.0).unwrap().uncertainty, 0);
     }
 
     #[test]
