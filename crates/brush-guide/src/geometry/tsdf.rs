@@ -4,7 +4,10 @@
 //! (`andyzeng/tsdf-fusion-python`, BSD-2): every voxel centre is projected
 //! into the depth image, `sdf = depth − z`, voxels more than `TRUNC` behind
 //! the surface are skipped, the normalised distance `min(1, sdf / TRUNC)`
-//! enters a weighted running average. Weights are capped at `MAX_WEIGHT` so
+//! enters a weighted running average. Behind the surface the observation
+//! weight falls off linearly (voxblox `TsdfIntegratorBase::updateTsdfVoxel`,
+//! BSD-3), which keeps thin structures seen from both sides from averaging
+//! their zero crossing away. Weights are capped at `MAX_WEIGHT` so
 //! the volume keeps following a changing splat. Storage is sparse in the way
 //! of `Open3D`'s `ScalableTSDFVolume`: bricks of `BRICK³` voxels are allocated
 //! only around observed surface points.
@@ -73,14 +76,27 @@ impl Brick {
 
     /// Weighted running average of one observation into voxel `i`
     /// (Zeng et al.: `(w·t + w_obs·d) / (w + w_obs)`), weight capped.
-    fn fuse(&mut self, i: usize, dist: f32) {
-        const OBS_WEIGHT: f32 = 1.0;
+    fn fuse(&mut self, i: usize, dist: f32, w_obs: f32) {
+        if w_obs <= 0.0 {
+            return;
+        }
         let (t_old, w_old) = (self.tsdf[i], self.weight[i]);
-        let w_new = w_old + OBS_WEIGHT;
-        let t_new = (w_old * t_old + OBS_WEIGHT * dist) / w_new;
+        let w_new = w_old + w_obs;
+        let t_new = (w_old * t_old + w_obs * dist) / w_new;
         self.tsdf[i] = t_new;
         self.weight[i] = w_new.min(MAX_WEIGHT);
         self.change += (t_new - t_old).abs() * TRUNC;
+    }
+}
+
+/// Observation weight for signed distance `sdf` (metres): 1 down to one
+/// voxel behind the surface, then linearly to 0 at `-TRUNC` (voxblox weight
+/// drop-off with `dropoff_epsilon` = voxel size).
+fn observation_weight(sdf: f32) -> f32 {
+    if sdf < -VOXEL {
+        ((TRUNC + sdf) / (TRUNC - VOXEL)).max(0.0)
+    } else {
+        1.0
     }
 }
 
@@ -159,6 +175,16 @@ impl Projection {
             dist >= -radius
         })
     }
+}
+
+/// Padded samples of one brick, see `Tsdf::brick_samples`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrickSamples {
+    /// Normalised distance (units of `TRUNC`, positive in front of the
+    /// surface); unobserved samples read `1.0`.
+    pub sdf: Vec<f32>,
+    /// Fusion weight; 0 where unobserved.
+    pub weight: Vec<f32>,
 }
 
 pub struct Tsdf {
@@ -248,7 +274,11 @@ impl Tsdf {
                         if sdf < -TRUNC {
                             continue;
                         }
-                        brick.fuse(voxel_index(local), (sdf / TRUNC).min(1.0));
+                        brick.fuse(
+                            voxel_index(local),
+                            (sdf / TRUNC).min(1.0),
+                            observation_weight(sdf),
+                        );
                     }
                 }
             }
@@ -291,8 +321,10 @@ impl Tsdf {
     }
 
     /// Bricks to re-mesh, in key order: those whose summed |Δsdf| since their
-    /// last report averages more than 5 mm over the brick's voxels, and those
-    /// changed but never reported. Their change counters restart.
+    /// last report averages more than 5 mm over the brick's voxels, and every
+    /// brick changed since allocation but never reported yet, so a surface
+    /// that clips only a few voxels of a new brick is still meshed. Their
+    /// change counters restart.
     pub fn take_changed(&mut self) -> Vec<BrickKey> {
         let threshold = CHANGE_THRESHOLD * BRICK_VOXELS as f32;
         let mut keys: Vec<BrickKey> = self
@@ -309,27 +341,32 @@ impl Tsdf {
         keys
     }
 
-    /// Normalised distances of brick `key` and a one-voxel border taken from
-    /// its neighbours, for meshing as a padded chunk: `PADDED³` samples
+    /// Samples of brick `key` and a one-voxel border taken from its
+    /// neighbours, for meshing as a padded chunk: `PADDED³` samples
     /// (`PADDED = BRICK + 2`), sample `(x, y, z)` at index
     /// `x + PADDED·(y + PADDED·z)` (x fastest, the order of
     /// `ndshape::ConstShape3u32<PADDED, PADDED, PADDED>` used by
     /// `fast-surface-nets`), holding voxel `key·BRICK + (x−1, y−1, z−1)`.
-    /// Unobserved voxels read `1.0` (+TRUNC). `None` if the brick does not exist.
-    pub fn brick_samples(&self, key: BrickKey) -> Option<Vec<f32>> {
+    /// `None` if the brick does not exist.
+    pub fn brick_samples(&self, key: BrickKey) -> Option<BrickSamples> {
         if !self.bricks.contains_key(&key) {
             return None;
         }
         let origin = key.0 * BRICK - 1;
-        let mut samples = Vec::with_capacity(PADDED * PADDED * PADDED);
+        let n = PADDED * PADDED * PADDED;
+        let mut samples = BrickSamples {
+            sdf: Vec::with_capacity(n),
+            weight: Vec::with_capacity(n),
+        };
         for z in 0..PADDED as i32 {
             for y in 0..PADDED as i32 {
                 for x in 0..PADDED as i32 {
-                    let t = match self.voxel(origin + IVec3::new(x, y, z)) {
-                        Some((t, w)) if w > 0.0 => t,
-                        _ => 1.0,
+                    let (t, w) = match self.voxel(origin + IVec3::new(x, y, z)) {
+                        Some((t, w)) if w > 0.0 => (t, w),
+                        _ => (1.0, 0.0),
                     };
-                    samples.push(t);
+                    samples.sdf.push(t);
+                    samples.weight.push(w);
                 }
             }
         }
@@ -421,44 +458,51 @@ mod tests {
         }
     }
 
+    /// Inside of an axis-aligned room: where a ray from inside leaves it.
+    fn room(min: Vec3, max: Vec3) -> impl Fn(Vec3, Vec3) -> Option<f32> {
+        move |o, d| {
+            let inv = d.recip();
+            let (t0, t1) = ((min - o) * inv, (max - o) * inv);
+            Some(t0.max(t1).min_element()).filter(|t| *t > 0.0)
+        }
+    }
+
+    /// Nearest hit of two scenes.
+    fn union(
+        a: impl Fn(Vec3, Vec3) -> Option<f32>,
+        b: impl Fn(Vec3, Vec3) -> Option<f32>,
+    ) -> impl Fn(Vec3, Vec3) -> Option<f32> {
+        move |o, d| match (a(o, d), b(o, d)) {
+            (Some(s), Some(t)) => Some(s.min(t)),
+            (s, t) => s.or(t),
+        }
+    }
+
     fn integrate(tsdf: &mut Tsdf, cameras: &[Camera], hit: &impl Fn(Vec3, Vec3) -> Option<f32>) {
         for cam in cameras {
             tsdf.integrate(&depth_image(cam, hit), cam);
         }
     }
 
-    /// Normalised distance at `p` as the mesher sees it: trilinear between
-    /// voxel centres, unobserved voxels reading `1.0` as in `brick_samples`.
-    fn mesher_value(tsdf: &Tsdf, p: Vec3) -> f32 {
-        let g = p / VOXEL - 0.5;
-        let (base, f) = (g.floor().as_ivec3(), g - g.floor());
-        (0..8)
-            .map(|c| {
-                let o = IVec3::new(c & 1, (c >> 1) & 1, (c >> 2) & 1);
-                let t = match tsdf.voxel(base + o) {
-                    Some((t, w)) if w > 0.0 => t,
-                    _ => 1.0,
-                };
-                let o = o.as_vec3();
-                let k = (Vec3::ONE - o) * (Vec3::ONE - f) + o * f;
-                k.x * k.y * k.z * t
-            })
-            .sum()
-    }
-
-    /// Sign changes of the mesher's input sampled every 5 mm from `a` to `b`.
+    /// Sign changes of the sdf sampled every 5 mm from `a` to `b`, counting
+    /// only samples whose eight surrounding voxels are all observed (the
+    /// cells a mesher keeps when it drops cells touching weight 0).
     fn zero_crossings(tsdf: &Tsdf, a: Vec3, b: Vec3) -> Vec<Vec3> {
         let n = ((b - a).length() / 0.005).round() as usize;
-        let samples: Vec<(Vec3, f32)> = (0..=n)
+        let samples: Vec<(Vec3, Option<f32>)> = (0..=n)
             .map(|i| {
                 let p = a.lerp(b, i as f32 / n as f32);
-                (p, mesher_value(tsdf, p))
+                (p, tsdf.sdf(p))
             })
             .collect();
         samples
             .windows(2)
-            .filter(|w| (w[0].1 > 0.0) != (w[1].1 > 0.0))
-            .map(|w| w[0].0.lerp(w[1].0, w[0].1 / (w[0].1 - w[1].1)))
+            .filter_map(|w| match (w[0], w[1]) {
+                ((p0, Some(s0)), (p1, Some(s1))) if (s0 > 0.0) != (s1 > 0.0) => {
+                    Some(p0.lerp(p1, s0 / (s0 - s1)))
+                }
+                _ => None,
+            })
             .collect()
     }
 
@@ -536,11 +580,21 @@ mod tests {
                 vec3(x, y, 2.0 + 2.0 * TRUNC),
             );
             assert!(!crossings.is_empty(), "({x},{y}): no zero crossing");
+            for c in &crossings {
+                assert!(
+                    (c.z - 2.0).abs() <= VOXEL,
+                    "({x},{y}): crossing at z = {}",
+                    c.z
+                );
+            }
         }
     }
 
-    /// A 2 cm rod along y through `center`, fused from four sides at 1.5 m.
-    fn rod_crossings(center: Vec3) -> Vec<Vec<Vec3>> {
+    /// A square rod of side `width` along y through `center` inside a 5 m
+    /// room, fused from four sides at 1.5 m; zero crossings along x and z at
+    /// three heights. The room walls give every pixel a depth, so free space
+    /// around the rod is observed as it would be in a real scene.
+    fn rod_crossings(center: Vec3, width: f32) -> Vec<(Vec3, Vec<Vec3>)> {
         let cams = [
             look_at(center - 1.5 * Vec3::Z, center),
             look_at(center + 1.5 * Vec3::X, center),
@@ -548,38 +602,56 @@ mod tests {
             look_at(center - 1.5 * Vec3::X, center),
         ];
         let mut tsdf = Tsdf::new();
-        let half = vec3(0.01, 0.5, 0.01);
-        integrate(&mut tsdf, &cams, &aabb(center - half, center + half));
+        let half = vec3(0.5 * width, 0.5, 0.5 * width);
+        let scene = union(
+            aabb(center - half, center + half),
+            room(center - 2.5, center + 2.5),
+        );
+        integrate(&mut tsdf, &cams, &scene);
 
         let mut all = Vec::new();
         for y in [0.0, 0.12, -0.27] {
             for dir in [Vec3::X, Vec3::Z] {
                 let c = center + vec3(0.0, y, 0.0);
                 let crossings = zero_crossings(&tsdf, c - 2.0 * TRUNC * dir, c + 2.0 * TRUNC * dir);
-                all.push(crossings);
+                all.push((dir, crossings));
             }
         }
         all
     }
 
-    /// Rod axis on a line of voxel centres, so voxel projections hit it.
+    /// Rod axes on a line of voxel centres and midway between them.
+    const ROD_CENTRES: [Vec3; 2] = [Vec3::new(0.025, 0.0, 2.025), Vec3::new(0.0, 0.0, 2.0)];
+
     #[test]
-    fn thin_rod_seen_from_four_sides_keeps_a_zero_crossing() {
-        let center = vec3(0.025, 0.0, 2.025);
-        for crossings in rod_crossings(center) {
-            assert!(!crossings.is_empty(), "rod at {center}: no zero crossing");
+    fn rod_seen_from_four_sides_keeps_a_zero_crossing() {
+        for center in ROD_CENTRES {
+            for (dir, crossings) in rod_crossings(center, 0.05) {
+                assert!(
+                    !crossings.is_empty(),
+                    "rod at {center} along {dir}: no zero crossing"
+                );
+                for c in crossings {
+                    let off_axis = ((c - center) * dir).length();
+                    assert!(
+                        (off_axis - 0.025).abs() <= VOXEL,
+                        "rod at {center} along {dir}: crossing {off_axis} m off the axis"
+                    );
+                }
+            }
         }
     }
 
-    /// Rod axis midway between voxel centres: no voxel centre projects onto
-    /// the rod from the four axis-aligned views, so voxel-projection fusion
-    /// never observes it.
     #[test]
-    #[ignore = "known limitation of voxel-projection fusion for sub-voxel structures"]
-    fn thin_rod_between_voxel_centres_keeps_a_zero_crossing() {
-        let center = vec3(0.0, 0.0, 2.0);
-        for crossings in rod_crossings(center) {
-            assert!(!crossings.is_empty(), "rod at {center}: no zero crossing");
+    #[ignore = "below the 5 cm voxel resolution"]
+    fn thin_rod_seen_from_four_sides_keeps_a_zero_crossing() {
+        for center in ROD_CENTRES {
+            for (dir, crossings) in rod_crossings(center, 0.02) {
+                assert!(
+                    !crossings.is_empty(),
+                    "rod at {center} along {dir}: no zero crossing"
+                );
+            }
         }
     }
 
@@ -644,22 +716,24 @@ mod tests {
         assert!(tsdf.take_changed().contains(&brick));
     }
 
+    fn sample_index(x: i32, y: i32, z: i32) -> usize {
+        (x + 1) as usize + PADDED * ((y + 1) as usize + PADDED * (z + 1) as usize)
+    }
+
     #[test]
     fn brick_samples_are_padded_x_fastest() {
         let (tsdf, _) = plane_setup();
         let key = BrickKey(IVec3::new(0, 0, 2));
         let samples = tsdf.brick_samples(key).expect("allocated brick");
-        let p = (BRICK + 2) as usize;
-        assert_eq!(samples.len(), p * p * p);
+        let n = PADDED * PADDED * PADDED;
+        assert_eq!((samples.sdf.len(), samples.weight.len()), (n, n));
         assert!(
             samples
+                .sdf
                 .iter()
                 .all(|s| s.is_finite() && (-1.0..=1.0).contains(s))
         );
 
-        let at = |x: i32, y: i32, z: i32| {
-            samples[(x + 1) as usize + p * ((y + 1) as usize + p * (z + 1) as usize)]
-        };
         let voxel = |x: i32, y: i32, z: i32| IVec3::new(x, y, 2 * BRICK + z);
         // Interior voxels and padding taken from the neighbours at -x, -y, +x+y.
         for (x, y, z) in [
@@ -672,15 +746,34 @@ mod tests {
         ] {
             let (t, w) = tsdf.voxel(voxel(x, y, z)).expect("allocated");
             assert!(w > 0.0, "({x},{y},{z}) unobserved");
-            assert_eq!(at(x, y, z), t, "({x},{y},{z})");
+            let i = sample_index(x, y, z);
+            assert_eq!((samples.sdf[i], samples.weight[i]), (t, w), "({x},{y},{z})");
         }
         // Plane at 2.5 m: z index 9 is 2.475 m (in front), 10 is 2.525 m (behind).
-        assert!(at(5, 5, 9) > 0.0 && at(5, 5, 10) < 0.0);
-        // Beyond the truncation band behind the plane nothing was observed.
-        assert_eq!(tsdf.voxel(voxel(5, 5, 15)).map(|(_, w)| w), Some(0.0));
-        assert_eq!(at(5, 5, 15), 1.0);
+        assert!(samples.sdf[sample_index(5, 5, 9)] > 0.0);
+        assert!(samples.sdf[sample_index(5, 5, 10)] < 0.0);
 
         assert_eq!(tsdf.brick_samples(BrickKey(IVec3::new(9, 9, 9))), None);
+    }
+
+    /// Seen from one side only, everything more than TRUNC behind the plane
+    /// stays unobserved: weight 0 and distance +1.
+    #[test]
+    fn one_sided_plane_leaves_samples_beyond_truncation_unobserved() {
+        let (tsdf, _) = plane_setup();
+        let samples = tsdf.brick_samples(BrickKey(IVec3::new(0, 0, 2))).unwrap();
+        for x in -1..=BRICK {
+            for y in -1..=BRICK {
+                // z index 13 is 2.675 m, 17.5 cm behind the plane at 2.5 m.
+                for z in 13..=BRICK {
+                    let i = sample_index(x, y, z);
+                    assert_eq!(samples.weight[i], 0.0, "({x},{y},{z})");
+                    assert_eq!(samples.sdf[i], 1.0, "({x},{y},{z})");
+                }
+                // Up to one voxel behind the plane observations count fully.
+                assert_eq!(samples.weight[sample_index(x, y, 10)], 1.0, "({x},{y},10)");
+            }
+        }
     }
 
     #[test]
