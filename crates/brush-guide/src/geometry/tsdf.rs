@@ -28,8 +28,12 @@ pub const VOXEL: f32 = 0.05;
 pub const TRUNC: f32 = 0.15;
 pub const BRICK: i32 = 20;
 pub const MAX_WEIGHT: f32 = 20.0;
-/// Voxels whose fusion weight has decayed below this read as unobserved.
+/// A voxel becomes observed once its fusion weight reaches this.
 pub const MIN_WEIGHT: f32 = 0.1;
+/// An observed voxel stays observed until its weight falls below this.
+pub const UNOBSERVED_WEIGHT: f32 = 0.05;
+/// `decay` never lowers a weight below this.
+pub const DECAY_FLOOR: f32 = 2.0;
 /// Depth beyond this (metres) is not integrated, like voxblox's
 /// `max_ray_length_m`.
 pub const MAX_DEPTH: f32 = 8.0;
@@ -94,8 +98,10 @@ impl PartialOrd for BrickKey {
 struct Brick {
     /// Normalised distance per voxel, x fastest: `x + BRICK·(y + BRICK·z)`.
     tsdf: Vec<f32>,
-    /// Fusion weight per voxel; below `MIN_WEIGHT` means unobserved.
+    /// Fusion weight per voxel.
     weight: Vec<f32>,
+    /// Observed status per voxel, with hysteresis (`observed_after`).
+    observed: Vec<bool>,
     /// State the brick's mesh was made from, set by `Tsdf::mark_meshed`.
     meshed: Option<MeshedState>,
 }
@@ -113,6 +119,7 @@ impl Brick {
         Self {
             tsdf: vec![1.0; BRICK_VOXELS],
             weight: vec![0.0; BRICK_VOXELS],
+            observed: vec![false; BRICK_VOXELS],
             meshed: None,
         }
     }
@@ -127,7 +134,12 @@ impl Brick {
         let w_new = w_old + w_obs;
         let t_new = (w_old * t_old + w_obs * dist) / w_new;
         self.tsdf[i] = t_new;
-        self.weight[i] = w_new.min(MAX_WEIGHT);
+        self.set_weight(i, w_new.min(MAX_WEIGHT));
+    }
+
+    fn set_weight(&mut self, i: usize, w: f32) {
+        self.weight[i] = w;
+        self.observed[i] = observed_after(self.observed[i], w);
     }
 }
 
@@ -153,6 +165,21 @@ fn observation_weight(sdf: f32) -> f32 {
         1.0
     }
 }
+
+/// Observed status of a voxel whose weight became `w`: it turns observed
+/// at `MIN_WEIGHT` and unobserved below `UNOBSERVED_WEIGHT`, so weights
+/// hovering around one threshold do not toggle it.
+fn observed_after(observed: bool, w: f32) -> bool {
+    w >= if observed {
+        UNOBSERVED_WEIGHT
+    } else {
+        MIN_WEIGHT
+    }
+}
+
+/// A voxel whose observed status changed counts as a change only within
+/// this normalised distance of the surface.
+const STATUS_CHANGE_BAND: f32 = 0.5;
 
 fn usable_depth(d: f32) -> bool {
     d.is_finite() && d > 0.0 && d <= MAX_DEPTH
@@ -348,23 +375,26 @@ impl Tsdf {
         }
     }
 
-    /// Multiplies every fusion weight by `factor`, so later observations
-    /// count more than earlier ones.
+    /// Multiplies every fusion weight above `DECAY_FLOOR` by `factor`, not
+    /// going below the floor, so later observations count more than earlier
+    /// ones while a surface seen only a few times is kept.
     #[allow(
         clippy::iter_over_hash_type,
         reason = "per-brick updates are independent"
     )]
     pub fn decay(&mut self, factor: f32) {
         for brick in self.bricks.values_mut() {
-            for w in &mut brick.weight {
-                *w *= factor;
+            for i in 0..BRICK_VOXELS {
+                let w = brick.weight[i];
+                if w > DECAY_FLOOR {
+                    brick.set_weight(i, (w * factor).max(DECAY_FLOOR));
+                }
             }
         }
     }
 
     /// Signed distance in metres at `world`, trilinear between voxel centres;
-    /// `None` unless all eight surrounding voxels are observed (weight at
-    /// least `MIN_WEIGHT`).
+    /// `None` unless all eight surrounding voxels are observed.
     pub fn sdf(&self, world: Vec3) -> Option<f32> {
         let g = world / VOXEL - 0.5;
         let base = g.floor();
@@ -373,10 +403,7 @@ impl Tsdf {
         let mut sum = 0.0;
         for corner in 0..8 {
             let o = IVec3::new(corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
-            let (t, w) = self.voxel(base + o)?;
-            if w < MIN_WEIGHT {
-                return None;
-            }
+            let t = self.observed_voxel(base + o)?;
             let o = o.as_vec3();
             let k = (Vec3::ONE - o) * (Vec3::ONE - f) + o * f;
             sum += k.x * k.y * k.z * t;
@@ -390,10 +417,14 @@ impl Tsdf {
     /// - their near-surface voxels (now or then) moved by a mean |Δsdf| of
     ///   5 mm or more, unobserved voxels counting as distance `TRUNC`,
     /// - at least `SIGN_CHANGES` of their voxels changed sign,
-    /// - a neighbour was allocated, or
+    /// - a neighbour was allocated,
     /// - the layer of a neighbour they are padded with moved by a mean
-    ///   |Δsdf| of 5 mm or more, or a voxel of it became observed or
-    ///   unobserved (crossed `MIN_WEIGHT`).
+    ///   |Δsdf| of 5 mm or more, or
+    /// - a voxel of theirs or of that layer became observed or unobserved.
+    ///
+    /// A voxel that became observed or unobserved counts (in all of the
+    /// above) only if its observed distance is within
+    /// `STATUS_CHANGE_BAND` of the surface.
     pub fn changed(&self) -> Vec<BrickKey> {
         let mut keys: Vec<BrickKey> = self
             .bricks
@@ -468,6 +499,10 @@ impl Tsdf {
             };
             let r = padded_region(i);
             if before.is_nan() != now.is_nan() {
+                let seen = if before.is_nan() { now } else { before };
+                if seen.abs() >= STATUS_CHANGE_BAND {
+                    continue;
+                }
                 flipped[r] = true;
             }
             let (before, now) = (
@@ -483,9 +518,7 @@ impl Tsdf {
             }
         }
         let moved = |r: usize| count[r] > 0 && sum[r] / count[r] as f32 * TRUNC >= CHANGE_THRESHOLD;
-        moved(SELF_REGION)
-            || sign_changes >= SIGN_CHANGES
-            || (0..27).any(|r| r != SELF_REGION && (flipped[r] || moved(r)))
+        sign_changes >= SIGN_CHANGES || (0..27).any(|r| flipped[r] || moved(r))
     }
 
     /// Samples of brick `key` and a one-voxel border taken from its
@@ -494,7 +527,7 @@ impl Tsdf {
     /// `x + PADDED·(y + PADDED·z)` (x fastest, the order of
     /// `ndshape::ConstShape3u32<PADDED, PADDED, PADDED>` used by
     /// `fast-surface-nets`), holding voxel `key·BRICK + (x−1, y−1, z−1)`.
-    /// Voxels below `MIN_WEIGHT` read as unobserved (weight 0, distance 1).
+    /// Unobserved voxels read as weight 0, distance 1.
     /// `None` if the brick does not exist.
     pub fn brick_samples(&self, key: BrickKey) -> Option<BrickSamples> {
         if !self.bricks.contains_key(&key) {
@@ -515,11 +548,10 @@ impl Tsdf {
                 for (ly, y) in (y0..).zip(ys.clone()) {
                     for (lx, x) in (x0..).zip(xs.clone()) {
                         let v = voxel_index(IVec3::new(lx, ly, lz));
-                        let w = brick.weight[v];
-                        if w >= MIN_WEIGHT {
+                        if brick.observed[v] {
                             let i = x + PADDED * (y + PADDED * z);
                             samples.sdf[i] = brick.tsdf[v];
-                            samples.weight[i] = w;
+                            samples.weight[i] = brick.weight[v];
                         }
                     }
                 }
@@ -552,10 +584,10 @@ impl Tsdf {
                     for x in 0..BRICK {
                         let local = IVec3::new(x, y, z);
                         let i = voxel_index(local);
-                        (brick.tsdf[i], brick.weight[i]) =
+                        (brick.tsdf[i], brick.weight[i], brick.observed[i]) =
                             match sdf(voxel_centre(key.0 * BRICK + local)) {
-                                Some(d) => ((d / TRUNC).clamp(-1.0, 1.0), 1.0),
-                                None => (1.0, 0.0),
+                                Some(d) => ((d / TRUNC).clamp(-1.0, 1.0), 1.0, true),
+                                None => (1.0, 0.0, false),
                             };
                     }
                 }
@@ -571,10 +603,19 @@ impl Tsdf {
         let brick = self.bricks.get_mut(&key).expect("allocated brick");
         let i = voxel_index(local);
         brick.tsdf[i] = t;
-        brick.weight[i] = w;
+        brick.set_weight(i, w);
+    }
+
+    /// Normalised distance of global voxel `g`, if it is observed.
+    fn observed_voxel(&self, g: IVec3) -> Option<f32> {
+        let (key, local) = split_voxel(g);
+        let brick = self.bricks.get(&key)?;
+        let i = voxel_index(local);
+        brick.observed[i].then_some(brick.tsdf[i])
     }
 
     /// Normalised distance and weight of global voxel `g`, if its brick exists.
+    #[cfg(test)]
     fn voxel(&self, g: IVec3) -> Option<(f32, f32)> {
         let (key, local) = split_voxel(g);
         let brick = self.bricks.get(&key)?;
@@ -884,14 +925,28 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn decay_scales_weights() {
-        let (mut tsdf, _) = plane_setup();
+    fn decay_scales_weights_down_to_the_floor() {
+        let (mut tsdf, cam) = plane_setup();
         let p = vec3(0.025, 0.025, 2.475);
+        let depth = depth_image(&cam, plane_z(2.5));
+        for _ in 0..9 {
+            tsdf.integrate(&depth, &cam);
+        }
         let before = tsdf.sdf(p).unwrap();
-        assert_eq!(voxel_weight(&tsdf, p), 1.0);
+        assert_eq!(voxel_weight(&tsdf, p), 10.0);
         tsdf.decay(0.5);
-        assert_eq!(voxel_weight(&tsdf, p), 0.5);
+        assert_eq!(voxel_weight(&tsdf, p), 5.0);
         assert_eq!(tsdf.sdf(p), Some(before), "decay keeps distances");
+        tsdf.decay(0.5);
+        assert_eq!(voxel_weight(&tsdf, p), DECAY_FLOOR + 0.5);
+        tsdf.decay(0.5);
+        assert_eq!(voxel_weight(&tsdf, p), DECAY_FLOOR, "clamped to the floor");
+        tsdf.decay(0.5);
+        assert_eq!(voxel_weight(&tsdf, p), DECAY_FLOOR);
+
+        let (mut single, _) = plane_setup();
+        single.decay(0.5);
+        assert_eq!(voxel_weight(&single, p), 1.0, "below the floor: untouched");
     }
 
     #[test]
@@ -1007,27 +1062,42 @@ pub(super) mod tests {
         }
     }
 
+    /// A voxel becomes observed at `MIN_WEIGHT` and stays observed down to
+    /// `UNOBSERVED_WEIGHT`.
     #[test]
-    fn weights_below_min_weight_read_unobserved() {
+    fn observed_status_has_hysteresis() {
         let (mut tsdf, _) = plane_setup();
         let key = BrickKey(IVec3::new(0, 0, 2));
         let p = vec3(0.025, 0.025, 2.475);
+        let g = voxel_of(p);
         let i = sample_index(0, 0, 9);
+        let (t, _) = tsdf.voxel(g).unwrap();
         tsdf.take_changed();
 
-        tsdf.decay(MIN_WEIGHT);
-        tsdf.take_changed();
-        assert!(tsdf.sdf(p).is_some(), "weight at MIN_WEIGHT is observed");
-        assert_eq!(tsdf.brick_samples(key).unwrap().weight[i], MIN_WEIGHT);
+        tsdf.set_voxel(g, t, 0.07);
+        assert!(
+            tsdf.sdf(p).is_some(),
+            "observed voxel stays observed at 0.07"
+        );
+        assert_eq!(tsdf.brick_samples(key).unwrap().weight[i], 0.07);
 
-        tsdf.decay(0.9);
-        assert_eq!(tsdf.sdf(p), None);
+        tsdf.set_voxel(g, t, 0.04);
+        assert_eq!(tsdf.sdf(p), None, "below UNOBSERVED_WEIGHT");
         let samples = tsdf.brick_samples(key).unwrap();
         assert_eq!((samples.sdf[i], samples.weight[i]), (1.0, 0.0));
         assert!(
             tsdf.take_changed().contains(&key),
-            "surface decayed away is a change"
+            "near-surface voxel lost is a change"
         );
+
+        tsdf.set_voxel(g, t, 0.07);
+        assert_eq!(
+            tsdf.sdf(p),
+            None,
+            "unobserved voxel stays unobserved at 0.07"
+        );
+        tsdf.set_voxel(g, t, MIN_WEIGHT);
+        assert!(tsdf.sdf(p).is_some(), "observed again at MIN_WEIGHT");
     }
 
     /// A 160×120 image with the principal point off centre and different
@@ -1109,13 +1179,23 @@ pub(super) mod tests {
         assert_eq!(tsdf.changed(), vec![a, b], "allocated neighbour");
         tsdf.take_changed();
 
-        // B's voxel at the seam, just in front of the wall, decays below
-        // MIN_WEIGHT: A (padded with it) and B are stale.
+        // B's voxel at the seam, just in front of the wall, drops below
+        // UNOBSERVED_WEIGHT: A (padded with it) and B are stale.
         let seam = IVec3::new(BRICK, 5, 2 * BRICK + 17);
         let (t, _) = tsdf.voxel(seam).unwrap();
-        tsdf.set_voxel(seam, t, 0.5 * MIN_WEIGHT);
+        tsdf.set_voxel(seam, t, 0.5 * UNOBSERVED_WEIGHT);
         assert!(tsdf.changed().contains(&a), "{:?}", tsdf.changed());
         tsdf.take_changed();
+
+        // A seam voxel more than half the truncation band from the surface
+        // turning unobserved, or observed again, is no change.
+        let far = IVec3::new(BRICK, 5, 2 * BRICK + 10);
+        let (t, w) = tsdf.voxel(far).unwrap();
+        assert!(t.abs() >= 0.5, "{t}");
+        tsdf.set_voxel(far, t, 0.5 * UNOBSERVED_WEIGHT);
+        assert!(tsdf.changed().is_empty(), "{:?}", tsdf.changed());
+        tsdf.set_voxel(far, t, w);
+        assert!(tsdf.changed().is_empty(), "{:?}", tsdf.changed());
 
         // B's seam layer moves 2 cm; B's own mean over its band stays small.
         for y in 0..BRICK {
@@ -1167,5 +1247,38 @@ pub(super) mod tests {
         let depth = depth_image(&cam, plane_z(2.0));
         cam.camera_model = CameraModel::KannalaBrandt4(Default::default());
         Tsdf::new().integrate(&depth, &cam);
+    }
+
+    /// A static plane seen by eight views, re-integrated four views per
+    /// round with decay, as the session does after the last keyframe: once
+    /// meshed, no brick turns stale again.
+    #[test]
+    fn static_plane_drains_after_the_last_keyframe() {
+        let target = vec3(0.0, 0.0, 2.0);
+        let cams: Vec<Camera> = (0..8)
+            .map(|i| {
+                let a = i as f32 * 0.15 - 0.5;
+                look_at(vec3(a, 0.1 * a, 0.0), target)
+            })
+            .collect();
+        let mut tsdf = Tsdf::new();
+        integrate(&mut tsdf, &cams, &plane_z(2.0));
+        let mut counts = Vec::new();
+        let mut cursor = 0;
+        for _ in 0..60 {
+            let stale = tsdf.changed();
+            counts.push(stale.len());
+            tsdf.mark_meshed(&stale);
+            tsdf.decay(0.95);
+            for _ in 0..4 {
+                let cam = &cams[cursor % cams.len()];
+                cursor += 1;
+                tsdf.integrate(&depth_image(cam, plane_z(2.0)), cam);
+            }
+        }
+        assert!(
+            counts[5..].iter().all(|&n| n == 0),
+            "stale bricks per round: {counts:?}"
+        );
     }
 }

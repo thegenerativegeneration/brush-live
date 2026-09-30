@@ -400,6 +400,23 @@ mod tests {
         }
     }
 
+    /// Weights never decay below `DECAY_FLOOR`, so a surface seen once
+    /// stays until it is seen differently.
+    #[test]
+    fn single_view_surface_survives_long_decay() {
+        let cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 2.5));
+        let mut tsdf = Tsdf::new();
+        tsdf.integrate(&depth_image(&cam, plane_z(2.5)), &cam);
+        for _ in 0..200 {
+            tsdf.decay(0.95);
+        }
+        let mesh = mesh_brick(&tsdf, BrickKey(IVec3::new(0, 0, 2))).expect("still meshed");
+        assert!(
+            mesh.positions.iter().all(|p| (p[2] - 2.5).abs() < 0.01),
+            "vertices on the plane"
+        );
+    }
+
     #[test]
     fn thin_sheet_is_meshed() {
         let mut tsdf = thin_sheet_tsdf();

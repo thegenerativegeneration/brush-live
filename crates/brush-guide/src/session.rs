@@ -142,6 +142,12 @@ struct Geometry {
     cursor: usize,
     /// Bricks whose last published state is a mesh.
     meshed: HashSet<BrickKey>,
+    /// Bricks meshed at least once, with or without a result.
+    visited: HashSet<BrickKey>,
+    /// Round in which each stale brick was first seen stale.
+    stale_since: HashMap<BrickKey, u64>,
+    /// Meshing rounds so far.
+    round: u64,
 }
 
 impl Geometry {
@@ -151,6 +157,9 @@ impl Geometry {
             integrated: 0,
             cursor: 0,
             meshed: HashSet::new(),
+            visited: HashSet::new(),
+            stale_since: HashMap::new(),
+            round: 0,
         }
     }
 
@@ -183,20 +192,36 @@ impl Geometry {
         round.len()
     }
 
-    /// Meshes up to `MAX_BRICKS_PER_ROUND` stale bricks, nearest to `eye`
-    /// first, and marks those meshed; the rest stay stale for later rounds.
-    /// A brick that had a mesh and has none now is returned as removed.
-    /// Also returns how many bricks were stale.
+    /// Meshes up to `MAX_BRICKS_PER_ROUND` stale bricks and marks those
+    /// meshed; the rest stay stale for later rounds. Bricks never meshed
+    /// come first, then those stale for the most rounds, then those
+    /// nearest to `eye`, so near bricks that keep changing cannot starve
+    /// the others. A brick that had a mesh and has none now is returned
+    /// as removed. Also returns how many bricks were stale.
     fn mesh_changed(&mut self, eye: Vec3) -> (Vec<MeshBrick>, usize) {
+        self.round += 1;
         let mut stale = self.tsdf.changed();
         let pending = stale.len();
+        let round = self.round;
+        let current: HashSet<BrickKey> = stale.iter().copied().collect();
+        self.stale_since.retain(|k, _| current.contains(k));
+        for &k in &stale {
+            self.stale_since.entry(k).or_insert(round);
+        }
         let centre = |k: &BrickKey| ((k.0 * BRICK).as_vec3() + 0.5 * BRICK as f32) * VOXEL;
         stale.sort_by(|a, b| {
-            centre(a)
-                .distance_squared(eye)
-                .total_cmp(&centre(b).distance_squared(eye))
+            let rank = |k: &BrickKey| (self.visited.contains(k), self.stale_since[k]);
+            rank(a).cmp(&rank(b)).then_with(|| {
+                centre(a)
+                    .distance_squared(eye)
+                    .total_cmp(&centre(b).distance_squared(eye))
+            })
         });
         stale.truncate(MAX_BRICKS_PER_ROUND);
+        for k in &stale {
+            self.stale_since.remove(k);
+            self.visited.insert(*k);
+        }
         let mut bricks = Vec::new();
         for &key in &stale {
             match mesh_brick(&self.tsdf, key) {
@@ -713,6 +738,28 @@ mod tests {
         assert_eq!(xs, (0..6).rev().collect::<Vec<_>>());
         let (bricks, pending) = g.mesh_changed(Vec3::ZERO);
         assert_eq!((bricks.len(), pending), (0, 0));
+    }
+
+    /// Near bricks that keep changing must not starve far ones: with 30
+    /// stale bricks and the cap of 24, every brick is meshed within two
+    /// rounds even though the 24 nearest change again in between.
+    #[test]
+    fn meshing_queue_is_fair() {
+        let mut g = plane_row();
+        let eye = Vec3::new(29.5, 0.5, 0.5);
+        let mut meshed = HashSet::new();
+        for round in 0..2 {
+            let (bricks, _) = g.mesh_changed(eye);
+            meshed.extend(bricks.iter().map(|b| b.key().0.x));
+            // The nearest 24 bricks move by 2 cm (alternating).
+            let near: Vec<BrickKey> = (6..30)
+                .map(|x| BrickKey(glam::IVec3::new(x, 0, 0)))
+                .collect();
+            let z = if round % 2 == 0 { 0.52 } else { 0.5 };
+            g.tsdf.fill_sdf(&near, |p| Some(p.z - z));
+        }
+        let missing: Vec<i32> = (0..30).filter(|x| !meshed.contains(x)).collect();
+        assert!(missing.is_empty(), "never meshed: {missing:?}");
     }
 
     #[test]
