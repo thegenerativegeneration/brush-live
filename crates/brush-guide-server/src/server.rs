@@ -113,21 +113,34 @@ async fn get_or_start(shared: &Shared, session_id: &str) -> GuideSession {
     map.get(session_id).expect("just inserted or alive").clone()
 }
 
-/// Forwards the session's score sets as they change, and its status every second.
+/// Forwards the session's score sets as they change, each followed by the
+/// mesh bricks changed since the last ones this connection sent (all of
+/// them on a new connection), and its status every second.
 fn spawn_pusher(session: &GuideSession, out: mpsc::Sender<Message>) -> JoinHandle<()> {
     let mut scores = session.scores();
+    let meshes = session.meshes();
     let status = session.status();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut mesh_sent = 0u64;
         loop {
             tokio::select! {
                 changed = scores.changed() => {
                     if changed.is_err() { break; }
                     let frame = scores.borrow_and_update().as_ref().map(|s| s.to_frame());
-                    if let Some(frame) = frame
-                        && out.send(Message::binary(frame)).await.is_err()
-                    {
-                        break;
+                    let Some(frame) = frame else { continue };
+                    if out.send(Message::binary(frame)).await.is_err() { break; }
+                    let mesh = {
+                        let log = meshes.borrow();
+                        // The session was reset and its mesh log emptied.
+                        if log.version() < mesh_sent {
+                            mesh_sent = 0;
+                        }
+                        log.since(mesh_sent)
+                    };
+                    if let Some(mesh) = mesh {
+                        mesh_sent = mesh.version;
+                        if out.send(Message::binary(mesh.to_frame())).await.is_err() { break; }
                     }
                 }
                 _ = tick.tick() => {

@@ -1,3 +1,5 @@
+use crate::geometry::mesh::BrickMesh;
+use crate::geometry::tsdf::{BRICK, BrickKey, VOXEL};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Debug, thiserror::Error)]
@@ -68,6 +70,12 @@ pub enum ServerHeader {
     },
     Splat {
         ply_len: u64,
+    },
+    MeshBricks {
+        version: u64,
+        num_bricks: u32,
+        /// Depth rendering, TSDF fusion and meshing time of the round, ms.
+        mesh_ms: u32,
     },
     Error {
         message: String,
@@ -178,6 +186,161 @@ pub fn decode_cells(bytes: &[u8]) -> Result<Vec<Cell>, ProtocolError> {
             }
         })
         .collect())
+}
+
+/// One brick of a `mesh_bricks` message: its new mesh, or that it has none
+/// any more.
+#[derive(Debug, Clone)]
+pub enum MeshBrick {
+    Mesh(BrickMesh),
+    Removed(BrickKey),
+}
+
+impl MeshBrick {
+    pub fn key(&self) -> BrickKey {
+        match self {
+            Self::Mesh(m) => m.key,
+            Self::Removed(k) => *k,
+        }
+    }
+}
+
+pub const MESH_BRICK_REMOVED: u8 = 1;
+
+/// Bytes before a brick's vertex data: key, flags, vertex and index counts.
+const MESH_BRICK_HEADER: usize = 21;
+
+/// Brick side in metres.
+const BRICK_SIZE: f32 = BRICK as f32 * VOXEL;
+
+/// Quantised positions span the brick box widened by this on every side:
+/// surface-nets vertices of cells straddling the border lie up to half a
+/// voxel outside the box.
+pub const BRICK_MARGIN: f32 = 0.5 * VOXEL;
+
+const QUANT_SPAN: f32 = BRICK_SIZE + 2.0 * BRICK_MARGIN;
+
+fn quantise(local: f32) -> u16 {
+    ((local + BRICK_MARGIN) / QUANT_SPAN * 65535.0)
+        .round()
+        .clamp(0.0, 65535.0) as u16
+}
+
+fn dequantise(q: u16) -> f32 {
+    q as f32 / 65535.0 * QUANT_SPAN - BRICK_MARGIN
+}
+
+/// Encodes bricks as the `mesh_bricks` payload. Panics if a mesh has 65 536
+/// vertices or more (a brick has at most 21³).
+pub fn encode_mesh_bricks<'a>(bricks: impl IntoIterator<Item = &'a MeshBrick>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for brick in bricks {
+        for v in brick.key().0.to_array() {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let MeshBrick::Mesh(mesh) = brick else {
+            out.push(MESH_BRICK_REMOVED);
+            out.extend_from_slice(&[0; 8]);
+            continue;
+        };
+        assert!(
+            mesh.positions.len() <= u16::MAX as usize + 1,
+            "brick {:?} has {} vertices, more than u16 indices address",
+            mesh.key,
+            mesh.positions.len()
+        );
+        out.push(0);
+        out.extend_from_slice(&(mesh.positions.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(mesh.indices.len() as u32).to_le_bytes());
+        let origin = (mesh.key.0 * BRICK).as_vec3() * VOXEL;
+        for &p in &mesh.positions {
+            let local = glam::Vec3::from(p) - origin;
+            for v in local.to_array() {
+                out.extend_from_slice(&quantise(v).to_le_bytes());
+            }
+        }
+        for &n in &mesh.normals {
+            out.extend_from_slice(&oct_encode(glam::Vec3::from(n)));
+        }
+        for &i in &mesh.indices {
+            out.extend_from_slice(&(i as u16).to_le_bytes());
+        }
+    }
+    out
+}
+
+fn take<'a>(rest: &mut &'a [u8], n: usize) -> Result<&'a [u8], ProtocolError> {
+    if rest.len() < n {
+        return Err(ProtocolError::Truncated);
+    }
+    let (head, tail) = rest.split_at(n);
+    *rest = tail;
+    Ok(head)
+}
+
+/// Decodes a `mesh_bricks` payload of `num_bricks` bricks. Positions come
+/// back in world metres, within half a quantisation step (8 µm) of the
+/// encoded ones.
+pub fn decode_mesh_bricks(bytes: &[u8], num_bricks: u32) -> Result<Vec<MeshBrick>, ProtocolError> {
+    let mut rest = bytes;
+    let mut bricks = Vec::new();
+    for _ in 0..num_bricks {
+        let h = take(&mut rest, MESH_BRICK_HEADER)?;
+        let int = |i: usize| i32::from_le_bytes(h[i * 4..i * 4 + 4].try_into().unwrap());
+        let key = BrickKey(glam::IVec3::new(int(0), int(1), int(2)));
+        let flags = h[12];
+        let num_vertices = u32::from_le_bytes(h[13..17].try_into().unwrap()) as usize;
+        let num_indices = u32::from_le_bytes(h[17..21].try_into().unwrap()) as usize;
+        if flags & MESH_BRICK_REMOVED != 0 {
+            bricks.push(MeshBrick::Removed(key));
+            continue;
+        }
+        let origin = (key.0 * BRICK).as_vec3() * VOXEL;
+        let positions = take(
+            &mut rest,
+            num_vertices
+                .checked_mul(6)
+                .ok_or(ProtocolError::SizeOverflow)?,
+        )?
+        .as_chunks::<6>()
+        .0
+        .iter()
+        .map(|c| {
+            let q = |i: usize| dequantise(u16::from_le_bytes([c[i * 2], c[i * 2 + 1]]));
+            (origin + glam::Vec3::new(q(0), q(1), q(2))).to_array()
+        })
+        .collect();
+        let normals = take(&mut rest, num_vertices * 2)?
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| oct_decode(c).to_array())
+            .collect();
+        let indices = take(
+            &mut rest,
+            num_indices
+                .checked_mul(2)
+                .ok_or(ProtocolError::SizeOverflow)?,
+        )?
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&c| u16::from_le_bytes(c) as u32)
+        .collect();
+        bricks.push(MeshBrick::Mesh(BrickMesh {
+            key,
+            positions,
+            normals,
+            indices,
+        }));
+    }
+    if !rest.is_empty() {
+        return Err(ProtocolError::PayloadSize {
+            expected: bytes.len() - rest.len(),
+            actual: bytes.len(),
+        });
+    }
+    Ok(bricks)
 }
 
 pub struct KeyframePayload<'a> {
@@ -425,6 +588,127 @@ mod tests {
         assert_eq!(h["cell_bytes"], 19);
     }
 
+    /// A 1 m right triangle in brick (1, −2, 0), facing +z, and the removal
+    /// of brick (−1, 0, 3): the bricks of the golden fixture.
+    fn fixture_bricks() -> [MeshBrick; 2] {
+        let key = BrickKey(glam::IVec3::new(1, -2, 0));
+        let o = glam::Vec3::new(1.0, -2.0, 0.0);
+        [
+            MeshBrick::Mesh(BrickMesh {
+                key,
+                positions: [o, o + glam::Vec3::X, o + glam::Vec3::Y]
+                    .map(|p| p.to_array())
+                    .to_vec(),
+                normals: vec![[0.0, 0.0, 1.0]; 3],
+                indices: vec![0, 1, 2],
+            }),
+            MeshBrick::Removed(BrickKey(glam::IVec3::new(-1, 0, 3))),
+        ]
+    }
+
+    #[test]
+    fn mesh_bricks_round_trip_with_removal() {
+        let key = BrickKey(glam::IVec3::new(-3, 0, 2));
+        let o = glam::Vec3::new(-3.0, 0.0, 2.0);
+        let positions = [
+            glam::Vec3::new(0.3, 0.7, 0.1),
+            glam::Vec3::new(-0.025, 0.5, 1.025),
+            glam::Vec3::new(1.0, 0.0, 0.5),
+            glam::Vec3::new(0.123_45, 0.987_65, 0.5),
+        ]
+        .map(|p| (o + p).to_array());
+        let normals = [
+            glam::Vec3::new(0.6, 0.0, -0.8),
+            glam::Vec3::Z,
+            glam::Vec3::new(-0.48, 0.6, 0.64),
+            glam::Vec3::NEG_Y,
+        ];
+        let bricks = [
+            MeshBrick::Mesh(BrickMesh {
+                key,
+                positions: positions.to_vec(),
+                normals: normals.map(|n| n.to_array()).to_vec(),
+                indices: vec![0, 1, 2, 2, 1, 3],
+            }),
+            MeshBrick::Removed(BrickKey(glam::IVec3::new(7, -8, 9))),
+        ];
+        let bytes = encode_mesh_bricks(&bricks);
+        assert_eq!(bytes.len(), 2 * MESH_BRICK_HEADER + 4 * 8 + 6 * 2);
+        let back = decode_mesh_bricks(&bytes, 2).unwrap();
+        let MeshBrick::Mesh(mesh) = &back[0] else {
+            panic!("{:?}", back[0])
+        };
+        assert_eq!(mesh.key, key);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 2, 1, 3]);
+        for (p, q) in positions.iter().zip(&mesh.positions) {
+            let d = (glam::Vec3::from(*p) - glam::Vec3::from(*q))
+                .abs()
+                .max_element();
+            assert!(d < 1e-5, "{p:?} vs {q:?}");
+        }
+        for (n, m) in normals.iter().zip(&mesh.normals) {
+            assert!(n.dot(glam::Vec3::from(*m)) > 0.999, "{n} vs {m:?}");
+        }
+        assert!(matches!(back[1], MeshBrick::Removed(k) if k.0 == glam::IVec3::new(7, -8, 9)));
+    }
+
+    #[test]
+    fn mesh_bricks_byte_layout() {
+        let bytes = encode_mesh_bricks(&fixture_bricks());
+        let int = |i: usize| i32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+        let word = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+        let half = |i: usize| u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap());
+        assert_eq!((int(0), int(4), int(8)), (1, -2, 0));
+        assert_eq!(bytes[12], 0, "flags");
+        assert_eq!((word(13), word(17)), (3, 3));
+        // Vertex (1, 0, 0) in the brick: x at the far side of the box, y and z at its origin.
+        let v1 = 21 + 6;
+        let at = |local: f32| ((local + 0.025) / 1.05 * 65535.0).round() as u16;
+        assert_eq!(
+            (half(v1), half(v1 + 2), half(v1 + 4)),
+            (at(1.0), at(0.0), at(0.0))
+        );
+        let normals = 21 + 18;
+        assert_eq!(&bytes[normals..normals + 2], &oct_encode(glam::Vec3::Z));
+        let indices = normals + 6;
+        assert_eq!(
+            (half(indices), half(indices + 2), half(indices + 4)),
+            (0, 1, 2)
+        );
+        let removed = indices + 6;
+        assert_eq!(
+            (int(removed), int(removed + 4), int(removed + 8)),
+            (-1, 0, 3)
+        );
+        assert_eq!(bytes[removed + 12], MESH_BRICK_REMOVED);
+        assert_eq!(&bytes[removed + 13..], &[0; 8]);
+    }
+
+    #[test]
+    fn mesh_bricks_reject_truncated_and_trailing_bytes() {
+        let bytes = encode_mesh_bricks(&fixture_bricks());
+        assert!(decode_mesh_bricks(&bytes[..bytes.len() - 1], 2).is_err());
+        assert!(decode_mesh_bricks(&bytes, 1).is_err());
+        assert!(decode_mesh_bricks(&bytes, 3).is_err());
+    }
+
+    #[test]
+    fn mesh_bricks_header_json() {
+        let frame = encode_frame(
+            &ServerHeader::MeshBricks {
+                version: 5,
+                num_bricks: 2,
+                mesh_ms: 40,
+            },
+            &[],
+        );
+        let (h, _): (serde_json::Value, _) = decode_frame(&frame).unwrap();
+        assert_eq!(
+            h,
+            serde_json::json!({"type": "mesh_bricks", "version": 5, "num_bricks": 2, "mesh_ms": 40})
+        );
+    }
+
     #[test]
     fn decode_cells_rejects_old_15_byte_payload() {
         assert!(decode_cells(&[0u8; 15]).is_err());
@@ -528,6 +812,17 @@ mod tests {
                         message: "bad".into(),
                     },
                     &[],
+                ),
+            ),
+            (
+                "mesh_bricks.bin",
+                encode_frame(
+                    &ServerHeader::MeshBricks {
+                        version: 2,
+                        num_bricks: 2,
+                        mesh_ms: 35,
+                    },
+                    &encode_mesh_bricks(&fixture_bricks()),
                 ),
             ),
             (

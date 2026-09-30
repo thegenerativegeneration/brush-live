@@ -1,6 +1,7 @@
+use brush_guide::geometry::mesh::BrickMesh;
 use brush_guide::protocol::{
-    CELL_BYTES, Cell, ClientHeader, KeyframeHeader, ServerHeader, decode_cells, decode_frame,
-    encode_frame,
+    CELL_BYTES, Cell, ClientHeader, KeyframeHeader, MeshBrick, ServerHeader, decode_cells,
+    decode_frame, decode_mesh_bricks, encode_frame,
 };
 use brush_guide::seed::project;
 use clap::{Parser, ValueEnum};
@@ -37,6 +38,13 @@ struct Args {
     /// `nx, ny, nz = 0, 0, 0` when the cell has no normal.
     #[arg(long)]
     dump_scores: Option<PathBuf>,
+    /// Write every received `mesh_bricks` round to this directory: each
+    /// brick's mesh as `v<version>_brick_<x>_<y>_<z>.ply` (ASCII, world
+    /// metres) and one JSON line per round in `rounds.jsonl` with its bricks
+    /// (`removed` for bricks that lost their mesh), frame bytes and
+    /// `mesh_ms`.
+    #[arg(long)]
+    dump_mesh: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
@@ -163,6 +171,108 @@ fn load_points(path: &Path) -> Result<Vec<Vec3>, String> {
         .collect())
 }
 
+fn brick_name(b: &MeshBrick) -> String {
+    let [x, y, z] = b.key().0.to_array();
+    format!("brick_{x}_{y}_{z}")
+}
+
+fn write_ply(path: &Path, mesh: &BrickMesh) -> std::io::Result<()> {
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(
+        out,
+        "ply\nformat ascii 1.0\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz\nelement face {}\nproperty list uchar uint vertex_indices\nend_header",
+        mesh.positions.len(),
+        mesh.indices.len() / 3
+    )?;
+    for (p, n) in mesh.positions.iter().zip(&mesh.normals) {
+        writeln!(out, "{} {} {} {} {} {}", p[0], p[1], p[2], n[0], n[1], n[2])?;
+    }
+    for t in mesh.indices.as_chunks::<3>().0 {
+        writeln!(out, "3 {} {} {}", t[0], t[1], t[2])?;
+    }
+    out.flush()
+}
+
+/// Logs a round of mesh bricks to rerun under `mesh/brick_<x>_<y>_<z>` and
+/// optionally dumps it; returns the per-round summary line.
+fn handle_mesh_bricks(
+    rec: &rerun::RecordingStream,
+    dump: Option<&Path>,
+    version: u64,
+    mesh_ms: u32,
+    frame_bytes: usize,
+    bricks: &[MeshBrick],
+) -> std::io::Result<String> {
+    let removed = bricks
+        .iter()
+        .filter(|b| matches!(b, MeshBrick::Removed(_)))
+        .count();
+    let triangles: usize = bricks
+        .iter()
+        .map(|b| match b {
+            MeshBrick::Mesh(m) => m.indices.len() / 3,
+            MeshBrick::Removed(_) => 0,
+        })
+        .sum();
+    for b in bricks {
+        let path = format!("mesh/{}", brick_name(b));
+        let _ = match b {
+            MeshBrick::Mesh(m) => rec.log(
+                path,
+                &rerun::Mesh3D::new(m.positions.iter().copied())
+                    .with_vertex_normals(m.normals.iter().copied())
+                    .with_triangle_indices(m.indices.as_chunks::<3>().0.iter().copied()),
+            ),
+            MeshBrick::Removed(_) => rec.log(path, &rerun::Clear::flat()),
+        };
+    }
+    let _ = rec.log(
+        "mesh/stats/bricks",
+        &rerun::Scalars::new(vec![bricks.len() as f64]),
+    );
+    let _ = rec.log(
+        "mesh/stats/bytes",
+        &rerun::Scalars::new(vec![frame_bytes as f64]),
+    );
+    let _ = rec.log(
+        "mesh/stats/mesh_ms",
+        &rerun::Scalars::new(vec![mesh_ms as f64]),
+    );
+
+    if let Some(dir) = dump {
+        std::fs::create_dir_all(dir)?;
+        let mut entries = Vec::new();
+        for b in bricks {
+            let [x, y, z] = b.key().0.to_array();
+            match b {
+                MeshBrick::Mesh(m) => {
+                    let file = format!("v{version:05}_{}.ply", brick_name(b));
+                    write_ply(&dir.join(&file), m)?;
+                    entries.push(serde_json::json!({"key": [x, y, z], "file": file, "vertices": m.positions.len()}));
+                }
+                MeshBrick::Removed(_) => {
+                    entries.push(serde_json::json!({"key": [x, y, z], "removed": true}));
+                }
+            }
+        }
+        let line = serde_json::json!({
+            "version": version,
+            "bytes": frame_bytes,
+            "mesh_ms": mesh_ms,
+            "bricks": entries,
+        });
+        let mut rounds = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("rounds.jsonl"))?;
+        writeln!(rounds, "{line}")?;
+    }
+    Ok(format!(
+        "mesh bricks v{version}: {} bricks ({removed} removed, {triangles} triangles), {frame_bytes} bytes, TSDF+mesh {mesh_ms} ms",
+        bricks.len()
+    ))
+}
+
 fn weak_coverage(c: &Cell) -> bool {
     c.coverage < 80
 }
@@ -282,6 +392,7 @@ async fn main() -> anyhow::Result<()> {
         ),
         None => None,
     };
+    let dump_mesh = args.dump_mesh.clone();
     let start = std::time::Instant::now();
     let receiver = tokio::spawn(async move {
         while let Some(Ok(msg)) = source.next().await {
@@ -382,6 +493,26 @@ async fn main() -> anyhow::Result<()> {
                         &rerun::Scalars::new(vec![last_score_ms as f64]),
                     );
                 }
+                ServerHeader::MeshBricks {
+                    version,
+                    num_bricks,
+                    mesh_ms,
+                } => match decode_mesh_bricks(payload, num_bricks) {
+                    Ok(bricks) => {
+                        match handle_mesh_bricks(
+                            &rec_rx,
+                            dump_mesh.as_deref(),
+                            version,
+                            mesh_ms,
+                            bytes.len(),
+                            &bricks,
+                        ) {
+                            Ok(line) => eprintln!("{line}"),
+                            Err(e) => eprintln!("mesh dump failed: {e}"),
+                        }
+                    }
+                    Err(e) => eprintln!("bad mesh_bricks v{version}: {e}"),
+                },
                 ServerHeader::Error { message } => eprintln!("server error: {message}"),
                 _ => {}
             }
@@ -531,6 +662,38 @@ mod tests {
             depth_w: depth_file_path.map(|_| 2),
             depth_h: depth_file_path.map(|_| 1),
         }
+    }
+
+    #[test]
+    fn mesh_dump_writes_ply_and_round_line() {
+        let dir = TempDir::new("mesh-dump");
+        let key = brush_guide::geometry::tsdf::BrickKey(glam::IVec3::new(1, -2, 0));
+        let bricks = [
+            MeshBrick::Mesh(BrickMesh {
+                key,
+                positions: vec![[1.0, -2.0, 0.0], [2.0, -2.0, 0.0], [1.0, -1.0, 0.0]],
+                normals: vec![[0.0, 0.0, 1.0]; 3],
+                indices: vec![0, 1, 2],
+            }),
+            MeshBrick::Removed(brush_guide::geometry::tsdf::BrickKey(glam::IVec3::new(
+                -1, 0, 3,
+            ))),
+        ];
+        let rec = rerun::RecordingStream::disabled();
+        let line = handle_mesh_bricks(&rec, Some(&dir.0), 7, 12, 100, &bricks).unwrap();
+        assert!(
+            line.contains("2 bricks (1 removed, 1 triangles), 100 bytes"),
+            "{line}"
+        );
+        let ply = std::fs::read_to_string(dir.0.join("v00007_brick_1_-2_0.ply")).unwrap();
+        assert!(
+            ply.contains("element vertex 3\n") && ply.ends_with("3 0 1 2\n"),
+            "{ply}"
+        );
+        let rounds = std::fs::read_to_string(dir.0.join("rounds.jsonl")).unwrap();
+        let round: serde_json::Value = serde_json::from_str(rounds.trim()).unwrap();
+        assert_eq!(round["version"], 7);
+        assert_eq!(round["bricks"][1]["removed"], true);
     }
 
     #[test]

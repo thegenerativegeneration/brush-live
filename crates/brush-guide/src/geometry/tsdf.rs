@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 
 use brush_render::camera::Camera;
+use brush_render::kernels::camera_model::CameraModel;
 use glam::{IVec3, UVec2, Vec3};
 use half::f16;
 
@@ -29,6 +30,9 @@ pub const BRICK: i32 = 20;
 pub const MAX_WEIGHT: f32 = 20.0;
 /// Voxels whose fusion weight has decayed below this read as unobserved.
 pub const MIN_WEIGHT: f32 = 0.1;
+/// Depth beyond this (metres) is not integrated, like voxblox's
+/// `max_ray_length_m`.
+pub const MAX_DEPTH: f32 = 8.0;
 
 /// Mean |Δsdf| (metres) over the near-surface voxels of a brick, or of a
 /// neighbour's layer facing it, since the brick was meshed, from which
@@ -150,6 +154,10 @@ fn observation_weight(sdf: f32) -> f32 {
     }
 }
 
+fn usable_depth(d: f32) -> bool {
+    d.is_finite() && d > 0.0 && d <= MAX_DEPTH
+}
+
 fn voxel_index(local: IVec3) -> usize {
     (local.x + BRICK * (local.y + BRICK * local.z)) as usize
 }
@@ -256,11 +264,16 @@ impl Tsdf {
 
     /// Fuses one depth image (depth along the camera's forward axis, NaN
     /// where empty) seen from `camera`, a pinhole with the image's size.
+    /// Depth beyond `MAX_DEPTH` is ignored.
     #[allow(
         clippy::iter_over_hash_type,
         reason = "per-brick updates are independent"
     )]
     pub fn integrate(&mut self, depth: &DepthImage, camera: &Camera) {
+        debug_assert!(
+            matches!(camera.camera_model, CameraModel::Pinhole),
+            "integrate projects with a pinhole camera"
+        );
         let size = UVec2::new(depth.width, depth.height);
         let proj = Projection::new(camera, size);
         let local_to_world = camera.local_to_world();
@@ -269,7 +282,7 @@ impl Tsdf {
         let mut far = 0.0f32;
         let mut touched = Vec::new();
         for (i, &d) in depth.depth.iter().enumerate() {
-            if !(d.is_finite() && d > 0.0) {
+            if !usable_depth(d) {
                 continue;
             }
             far = far.max(d);
@@ -317,7 +330,7 @@ impl Tsdf {
                             continue;
                         };
                         let d = depth.depth[pixel];
-                        if !(d.is_finite() && d > 0.0) {
+                        if !usable_depth(d) {
                             continue;
                         }
                         let sdf = d - cam.z;
@@ -1131,5 +1144,28 @@ pub(super) mod tests {
         assert_eq!(tsdf.sdf(vec3(0.0, 0.0, 2.5)), None);
         assert!(tsdf.take_changed().is_empty());
         assert_eq!(tsdf.brick_samples(BrickKey(IVec3::new(0, 0, 2))), None);
+    }
+
+    #[test]
+    fn depth_beyond_max_depth_is_ignored() {
+        let cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 1.0));
+        let mut tsdf = Tsdf::new();
+        tsdf.integrate(&depth_image(&cam, plane_z(MAX_DEPTH + 0.5)), &cam);
+        assert!(tsdf.bricks.is_empty(), "no bricks beyond MAX_DEPTH");
+
+        let near = MAX_DEPTH - 0.5;
+        tsdf.integrate(&depth_image(&cam, plane_z(near)), &cam);
+        let sdf = tsdf.sdf(vec3(0.0, 0.0, near)).expect("observed");
+        assert!(sdf.abs() < 0.01, "{sdf}");
+    }
+
+    #[test]
+    #[should_panic(expected = "pinhole")]
+    #[cfg(debug_assertions)]
+    fn integrate_rejects_non_pinhole_cameras() {
+        let mut cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 1.0));
+        let depth = depth_image(&cam, plane_z(2.0));
+        cam.camera_model = CameraModel::KannalaBrandt4(Default::default());
+        Tsdf::new().integrate(&depth, &cam);
     }
 }

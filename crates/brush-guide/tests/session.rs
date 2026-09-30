@@ -1,7 +1,7 @@
 mod test_scene;
 
 use brush_guide::config::GuideConfig;
-use brush_guide::protocol::{ServerHeader, decode_cells, decode_frame};
+use brush_guide::protocol::{ServerHeader, decode_cells, decode_frame, decode_mesh_bricks};
 use brush_guide::session::GuideSession;
 use glam::Vec3;
 use std::time::Duration;
@@ -51,6 +51,57 @@ async fn scores_arrive_after_keyframes() {
 
     session.reset().await;
     assert_eq!(session.status().borrow().num_keyframes, 0);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mesh_bricks_follow_the_first_score_set() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-session-mesh-{}", std::process::id()));
+    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
+    let mut scores = session.scores();
+    let meshes = session.meshes();
+
+    for (i, a) in [0.0f32, 0.5, 1.0, -0.5].iter().enumerate() {
+        let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
+        session.push_keyframe(h, p).await.unwrap();
+    }
+    let set = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            scores.changed().await.unwrap();
+            if let Some(s) = scores.borrow().clone() {
+                return s;
+            }
+        }
+    })
+    .await
+    .expect("a ScoreSet within 60 s");
+
+    let msg = meshes
+        .borrow()
+        .since(0)
+        .expect("mesh bricks recorded with the score set");
+    assert_eq!(msg.version, set.version);
+    assert!(!msg.bricks.is_empty(), "at least one brick");
+
+    let frame = msg.to_frame();
+    let (header, payload): (ServerHeader, &[u8]) = decode_frame(&frame).unwrap();
+    let ServerHeader::MeshBricks {
+        version,
+        num_bricks,
+        ..
+    } = header
+    else {
+        panic!("{header:?}")
+    };
+    assert_eq!(version, set.version);
+    assert_eq!(
+        decode_mesh_bricks(payload, num_bricks).unwrap().len(),
+        msg.bricks.len()
+    );
+
+    session.reset().await;
+    assert!(session.meshes().borrow().since(0).is_none());
     std::fs::remove_dir_all(dir).ok();
 }
 

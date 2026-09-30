@@ -227,6 +227,28 @@ mod tests {
         );
     }
 
+    /// Seam vertices sit in cells straddling the brick border, so a brick's
+    /// vertices reach up to half a voxel beyond its box on every side; the
+    /// wire format quantises positions over that widened box.
+    #[test]
+    fn vertices_lie_within_half_a_voxel_of_their_brick() {
+        let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+        for m in sphere_meshes() {
+            let origin = (m.key.0 * BRICK).as_vec3() * VOXEL;
+            for &p in &m.positions {
+                let local = Vec3::from(p) - origin;
+                lo = lo.min(local.min_element());
+                hi = hi.max(local.max_element());
+            }
+        }
+        let size = BRICK as f32 * VOXEL;
+        assert!(
+            lo >= -0.5 * VOXEL - 1e-5 && hi <= size + 0.5 * VOXEL + 1e-5,
+            "local range [{lo}, {hi}]"
+        );
+        assert!(lo < 0.0 && hi > size, "local range [{lo}, {hi}]");
+    }
+
     #[test]
     fn sphere_is_closed_across_brick_seams() {
         assert_closed(&sphere_meshes());

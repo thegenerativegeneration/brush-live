@@ -110,12 +110,21 @@ async fn end_to_end() {
         .await
         .unwrap();
     }
-    let mut saw_scores = false;
-    while acks.len() < 3 || !saw_scores || !saw_error {
+    // Every score set is followed by the mesh bricks of the same version.
+    let mut awaiting_mesh: Option<u64> = None;
+    let mut saw_mesh = false;
+    while acks.len() < 3 || !saw_mesh || !saw_error {
         match next_header(&mut ws).await {
             ServerHeader::Ack { keyframe_id } => acks.push(keyframe_id),
             ServerHeader::Error { .. } => saw_error = true,
-            ServerHeader::ScoreSet { .. } => saw_scores = true,
+            ServerHeader::ScoreSet { version, .. } => {
+                assert_eq!(awaiting_mesh, None, "mesh bricks before the next score set");
+                awaiting_mesh = Some(version);
+            }
+            ServerHeader::MeshBricks { version, .. } => {
+                assert_eq!(awaiting_mesh.take(), Some(version));
+                saw_mesh = true;
+            }
             _ => {}
         }
     }
@@ -130,12 +139,15 @@ async fn end_to_end() {
     ws.send(Message::binary(keyframe(2, Vec3::new(0.0, 0.0, 2.0))))
         .await
         .unwrap();
-    loop {
+    // The new connection also gets the session's current mesh.
+    let (mut acked, mut saw_mesh) = (false, false);
+    while !acked || !saw_mesh {
         match next_header(&mut ws).await {
             ServerHeader::Ack { keyframe_id } => {
                 assert_eq!(keyframe_id, 2);
-                break;
+                acked = true;
             }
+            ServerHeader::MeshBricks { .. } => saw_mesh = true,
             ServerHeader::Error { message } => panic!("{message}"),
             _ => {}
         }
