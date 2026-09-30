@@ -95,7 +95,30 @@ pub fn mesh_brick(tsdf: &Tsdf, key: BrickKey) -> Option<BrickMesh> {
             mesh.indices.push(remap[v]);
         }
     }
+    fill_zero_normals(&mut mesh);
     (!mesh.indices.is_empty()).then_some(mesh)
+}
+
+/// Gives vertices whose distance gradient vanished the normalised sum of
+/// the area-weighted normals of their triangles.
+fn fill_zero_normals(mesh: &mut BrickMesh) {
+    let zero: Vec<bool> = mesh.normals.iter().map(|n| *n == [0.0; 3]).collect();
+    if !zero.contains(&true) {
+        return;
+    }
+    let mut sums = vec![Vec3::ZERO; mesh.positions.len()];
+    for tri in mesh.indices.as_chunks::<3>().0 {
+        let [a, b, c] = tri.map(|i| Vec3::from(mesh.positions[i as usize]));
+        let face = (b - a).cross(c - a);
+        for &i in tri {
+            sums[i as usize] += face;
+        }
+    }
+    for (i, sum) in sums.into_iter().enumerate() {
+        if zero[i] {
+            mesh.normals[i] = sum.normalize_or_zero().to_array();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -206,7 +229,13 @@ mod tests {
 
     #[test]
     fn sphere_is_closed_across_brick_seams() {
-        let triangles = welded_triangles(&sphere_meshes());
+        assert_closed(&sphere_meshes());
+    }
+
+    /// Asserts that every edge of `meshes` is shared by exactly two
+    /// consistently oriented triangles.
+    fn assert_closed(meshes: &[BrickMesh]) {
+        let triangles = welded_triangles(meshes);
         assert!(!triangles.is_empty());
         let mut directed: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for [a, b, c] in &triangles {
@@ -219,6 +248,30 @@ mod tests {
             let back = directed.get(&(v, u)).copied().unwrap_or(0);
             assert_eq!(back, 1, "edge {u}-{v} shared by {} triangles", n + back);
         }
+    }
+
+    /// Brick A is meshed alone, then its neighbour B is filled: A is
+    /// re-meshed, and the meshes kept per brick close at the seam.
+    #[test]
+    fn neighbour_filled_later_remeshes_the_seam() {
+        let centre = vec3(1.013, 0.52, 0.47);
+        let sphere = |p: Vec3| Some((p - centre).length() - 0.3);
+        let (a, b) = (BrickKey(IVec3::ZERO), BrickKey(IVec3::X));
+        let mut tsdf = Tsdf::from_sdf(&[a], sphere);
+        let mut meshes: BTreeMap<BrickKey, Option<BrickMesh>> = BTreeMap::new();
+        let remesh = |tsdf: &mut Tsdf, meshes: &mut BTreeMap<_, _>| {
+            for key in tsdf.take_changed() {
+                meshes.insert(key, mesh_brick(tsdf, key));
+            }
+        };
+        remesh(&mut tsdf, &mut meshes);
+        assert!(meshes.contains_key(&a));
+
+        tsdf.fill_sdf(&[b], sphere);
+        remesh(&mut tsdf, &mut meshes);
+        let kept: Vec<BrickMesh> = meshes.into_values().flatten().collect();
+        assert_eq!(kept.len(), 2);
+        assert_closed(&kept);
     }
 
     #[test]
@@ -272,6 +325,21 @@ mod tests {
     }
 
     #[test]
+    fn zero_gradient_falls_back_to_the_face_normal() {
+        let mut mesh = BrickMesh {
+            key: BrickKey(IVec3::ZERO),
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0; 3]],
+            indices: vec![0, 1, 2],
+        };
+        fill_zero_normals(&mut mesh);
+        assert_eq!(
+            mesh.normals,
+            vec![[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]
+        );
+    }
+
+    #[test]
     fn free_space_and_missing_bricks_have_no_mesh() {
         let key = BrickKey(IVec3::new(0, 0, 0));
         let free = Tsdf::from_sdf(&[key], |_| Some(1.0));
@@ -315,9 +383,10 @@ mod tests {
         let mut tsdf = thin_sheet_tsdf();
         let keys = tsdf.take_changed();
         let meshes = mesh_all(&tsdf, &keys);
-        // Within 5 cm of the rim one camera sees past the sheet, and its
-        // negative band behind the sheet is not cleared by the other view;
-        // those fused voxels hold a real zero crossing off the sheet.
+        // Near the rim one camera sees past the sheet, and its negative band
+        // behind the sheet is not cleared by the other view; those fused
+        // voxels hold a real zero crossing off the sheet. Only vertices
+        // more than 10 cm inside the 0.6 m half-width rim are checked.
         let inner: Vec<&[f32; 3]> = meshes
             .iter()
             .flat_map(|m| &m.positions)

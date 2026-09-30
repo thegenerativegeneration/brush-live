@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use brush_render::camera::Camera;
 use glam::{IVec3, UVec2, Vec3};
+use half::f16;
 
 use super::depth::DepthImage;
 
@@ -29,14 +30,45 @@ pub const MAX_WEIGHT: f32 = 20.0;
 /// Voxels whose fusion weight has decayed below this read as unobserved.
 pub const MIN_WEIGHT: f32 = 0.1;
 
-/// A brick is reported by `take_changed` once the mean |Δsdf| of its
-/// near-surface voxels since its last report exceeds this (metres).
+/// Mean |Δsdf| (metres) over the near-surface voxels of a brick, or of a
+/// neighbour's layer facing it, since the brick was meshed, from which
+/// `changed` reports it.
 const CHANGE_THRESHOLD: f32 = 0.005;
+
+/// Number of a brick's voxels whose sign flipped since it was meshed, from
+/// which `changed` reports it: catches small objects appearing next to a
+/// large surface, whose change is too small for the mean.
+const SIGN_CHANGES: usize = 20;
 
 const BRICK_VOXELS: usize = (BRICK * BRICK * BRICK) as usize;
 
 /// Side of the padded sample grid of `Tsdf::brick_samples`.
 pub const PADDED: usize = BRICK as usize + 2;
+
+const PADDED_SAMPLES: usize = PADDED * PADDED * PADDED;
+
+/// Index of the brick itself among the 27 bricks around it,
+/// `(o.x + 1) + 3·(o.y + 1) + 9·(o.z + 1)` for offset `o`.
+const SELF_REGION: usize = 13;
+
+fn region_index(o: IVec3) -> usize {
+    ((o.x + 1) + 3 * (o.y + 1) + 9 * (o.z + 1)) as usize
+}
+
+fn region_offset(r: usize) -> IVec3 {
+    let r = r as i32;
+    IVec3::new(r % 3, (r / 3) % 3, r / 9) - 1
+}
+
+/// Padded sample coordinates covered by the neighbour at offset `o` along
+/// one axis, and the neighbour-local voxel coordinate of the first.
+fn padded_span(o: i32) -> (std::ops::Range<usize>, i32) {
+    match o {
+        -1 => (0..1, BRICK - 1),
+        0 => (1..PADDED - 1, 0),
+        _ => (PADDED - 1..PADDED, 0),
+    }
+}
 
 /// Brick index: the brick covers world `[key, key + 1)` metres per axis.
 /// Ordered lexicographically by (x, y, z).
@@ -60,11 +92,16 @@ struct Brick {
     tsdf: Vec<f32>,
     /// Fusion weight per voxel; below `MIN_WEIGHT` means unobserved.
     weight: Vec<f32>,
-    /// `observed_sdf` of every voxel when `take_changed` last reported the
-    /// brick (all `1.0` before the first report).
-    reported_sdf: Vec<f32>,
-    /// Whether `take_changed` has reported this brick before.
-    reported: bool,
+    /// State the brick's mesh was made from, set by `Tsdf::mark_meshed`.
+    meshed: Option<MeshedState>,
+}
+
+/// What the mesher saw of a brick: its padded samples, normalised distance
+/// or NaN where unobserved, and which of its 26 neighbours existed (bit
+/// `region_index(offset)`).
+struct MeshedState {
+    sdf: Vec<f16>,
+    neighbours: u32,
 }
 
 impl Brick {
@@ -72,8 +109,7 @@ impl Brick {
         Self {
             tsdf: vec![1.0; BRICK_VOXELS],
             weight: vec![0.0; BRICK_VOXELS],
-            reported_sdf: vec![1.0; BRICK_VOXELS],
-            reported: false,
+            meshed: None,
         }
     }
 
@@ -89,45 +125,18 @@ impl Brick {
         self.tsdf[i] = t_new;
         self.weight[i] = w_new.min(MAX_WEIGHT);
     }
+}
 
-    /// Normalised distance of voxel `i` as the mesher sees it: `1.0` where
-    /// unobserved.
-    fn observed_sdf(&self, i: usize) -> f32 {
-        if self.weight[i] >= MIN_WEIGHT {
-            self.tsdf[i]
-        } else {
-            1.0
-        }
-    }
-
-    /// Mean |Δsdf| in metres since the last report over the voxels near the
-    /// surface (observed with |sdf| < `TRUNC`) now or at the last report,
-    /// and whether there are any such voxels now.
-    fn change_since_report(&self) -> (f32, bool) {
-        let (mut sum, mut count, mut near_now) = (0.0, 0usize, false);
-        for (i, &before) in self.reported_sdf.iter().enumerate() {
-            let now = self.observed_sdf(i);
-            let near = now.abs() < 1.0;
-            near_now |= near;
-            if near || before.abs() < 1.0 {
-                sum += (now - before).abs();
-                count += 1;
-            }
-        }
-        let mean = if count == 0 {
-            0.0
-        } else {
-            sum / count as f32 * TRUNC
-        };
-        (mean, near_now)
-    }
-
-    fn mark_reported(&mut self) {
-        for i in 0..BRICK_VOXELS {
-            self.reported_sdf[i] = self.observed_sdf(i);
-        }
-        self.reported = true;
-    }
+/// Region (`region_index`) of the brick or neighbour padded sample `i`
+/// comes from.
+fn padded_region(i: usize) -> usize {
+    let axis = |c: usize| match c {
+        0 => -1,
+        c if c == PADDED - 1 => 1,
+        _ => 0,
+    };
+    let (x, y, z) = (i % PADDED, (i / PADDED) % PADDED, i / (PADDED * PADDED));
+    region_index(IVec3::new(axis(x), axis(y), axis(z)))
 }
 
 /// Observation weight for signed distance `sdf` (metres): 1 down to one
@@ -362,27 +371,108 @@ impl Tsdf {
         Some(sum * TRUNC)
     }
 
-    /// Bricks to re-mesh, in key order: those whose |Δsdf| since their last
-    /// report averages more than 5 mm over their near-surface voxels
-    /// (observed, |sdf| < `TRUNC`, now or at the last report), and every
-    /// never-reported brick that has near-surface voxels, so a surface that
-    /// clips only a few voxels of a new brick is still meshed. Reported
-    /// bricks measure later changes from their state now.
-    pub fn take_changed(&mut self) -> Vec<BrickKey> {
+    /// Bricks whose mesh is stale, in key order: never meshed but holding
+    /// near-surface voxels (observed, |sdf| < `TRUNC`), or, since
+    /// `mark_meshed`,
+    /// - their near-surface voxels (now or then) moved by a mean |Δsdf| of
+    ///   5 mm or more, unobserved voxels counting as distance `TRUNC`,
+    /// - at least `SIGN_CHANGES` of their voxels changed sign,
+    /// - a neighbour was allocated, or
+    /// - the layer of a neighbour they are padded with moved by a mean
+    ///   |Δsdf| of 5 mm or more, or a voxel of it became observed or
+    ///   unobserved (crossed `MIN_WEIGHT`).
+    pub fn changed(&self) -> Vec<BrickKey> {
         let mut keys: Vec<BrickKey> = self
             .bricks
-            .iter_mut()
-            .filter(|(_, b)| {
-                let (mean, near_now) = b.change_since_report();
-                mean > CHANGE_THRESHOLD || (!b.reported && near_now)
-            })
-            .map(|(key, b)| {
-                b.mark_reported();
-                *key
-            })
+            .keys()
+            .copied()
+            .filter(|&key| self.is_stale(key))
             .collect();
         keys.sort_unstable();
         keys
+    }
+
+    /// Records the state bricks `keys` were meshed from; `changed` measures
+    /// their later changes against it.
+    pub fn mark_meshed(&mut self, keys: &[BrickKey]) {
+        for &key in keys {
+            let Some(samples) = self.brick_samples(key) else {
+                continue;
+            };
+            let sdf = samples
+                .sdf
+                .iter()
+                .zip(&samples.weight)
+                .map(|(&t, &w)| f16::from_f32(if w > 0.0 { t } else { f32::NAN }))
+                .collect();
+            let neighbours = self.neighbour_mask(key);
+            if let Some(brick) = self.bricks.get_mut(&key) {
+                brick.meshed = Some(MeshedState { sdf, neighbours });
+            }
+        }
+    }
+
+    /// `changed`, then `mark_meshed` of the result.
+    pub fn take_changed(&mut self) -> Vec<BrickKey> {
+        let keys = self.changed();
+        self.mark_meshed(&keys);
+        keys
+    }
+
+    fn neighbour_mask(&self, key: BrickKey) -> u32 {
+        (0..27)
+            .filter(|&r| r != SELF_REGION)
+            .filter(|&r| {
+                self.bricks
+                    .contains_key(&BrickKey(key.0 + region_offset(r)))
+            })
+            .fold(0, |mask, r| mask | 1 << r)
+    }
+
+    fn is_stale(&self, key: BrickKey) -> bool {
+        let Some(samples) = self.brick_samples(key) else {
+            return false;
+        };
+        let Some(meshed) = self.bricks.get(&key).and_then(|b| b.meshed.as_ref()) else {
+            return (0..PADDED_SAMPLES)
+                .filter(|&i| padded_region(i) == SELF_REGION)
+                .any(|i| samples.weight[i] > 0.0 && samples.sdf[i].abs() < 1.0);
+        };
+        if self.neighbour_mask(key) & !meshed.neighbours != 0 {
+            return true;
+        }
+
+        let mut sum = [0.0f32; 27];
+        let mut count = [0usize; 27];
+        let mut flipped = [false; 27];
+        let mut sign_changes = 0;
+        for i in 0..PADDED_SAMPLES {
+            let before = meshed.sdf[i].to_f32();
+            let now = if samples.weight[i] > 0.0 {
+                f16::from_f32(samples.sdf[i]).to_f32()
+            } else {
+                f32::NAN
+            };
+            let r = padded_region(i);
+            if before.is_nan() != now.is_nan() {
+                flipped[r] = true;
+            }
+            let (before, now) = (
+                if before.is_nan() { 1.0 } else { before },
+                if now.is_nan() { 1.0 } else { now },
+            );
+            if before.abs() < 1.0 || now.abs() < 1.0 {
+                sum[r] += (now - before).abs();
+                count[r] += 1;
+            }
+            if r == SELF_REGION && (before < 0.0) != (now < 0.0) {
+                sign_changes += 1;
+            }
+        }
+        let moved = |r: usize| count[r] > 0 && sum[r] / count[r] as f32 * TRUNC >= CHANGE_THRESHOLD;
+        moved(SELF_REGION)
+            || sign_changes >= SIGN_CHANGES
+            || (0..27).any(|r| r != SELF_REGION && (flipped[r] || moved(r)))
     }
 
     /// Samples of brick `key` and a one-voxel border taken from its
@@ -397,21 +487,28 @@ impl Tsdf {
         if !self.bricks.contains_key(&key) {
             return None;
         }
-        let origin = key.0 * BRICK - 1;
-        let n = PADDED * PADDED * PADDED;
         let mut samples = BrickSamples {
-            sdf: Vec::with_capacity(n),
-            weight: Vec::with_capacity(n),
+            sdf: vec![1.0; PADDED_SAMPLES],
+            weight: vec![0.0; PADDED_SAMPLES],
         };
-        for z in 0..PADDED as i32 {
-            for y in 0..PADDED as i32 {
-                for x in 0..PADDED as i32 {
-                    let (t, w) = match self.voxel(origin + IVec3::new(x, y, z)) {
-                        Some((t, w)) if w >= MIN_WEIGHT => (t, w),
-                        _ => (1.0, 0.0),
-                    };
-                    samples.sdf.push(t);
-                    samples.weight.push(w);
+        for r in 0..27 {
+            let o = region_offset(r);
+            let Some(brick) = self.bricks.get(&BrickKey(key.0 + o)) else {
+                continue;
+            };
+            let ((xs, x0), (ys, y0), (zs, z0)) =
+                (padded_span(o.x), padded_span(o.y), padded_span(o.z));
+            for (lz, z) in (z0..).zip(zs) {
+                for (ly, y) in (y0..).zip(ys.clone()) {
+                    for (lx, x) in (x0..).zip(xs.clone()) {
+                        let v = voxel_index(IVec3::new(lx, ly, lz));
+                        let w = brick.weight[v];
+                        if w >= MIN_WEIGHT {
+                            let i = x + PADDED * (y + PADDED * z);
+                            samples.sdf[i] = brick.tsdf[v];
+                            samples.weight[i] = w;
+                        }
+                    }
                 }
             }
         }
@@ -427,23 +524,41 @@ impl Tsdf {
     #[cfg(test)]
     pub(crate) fn from_sdf(keys: &[BrickKey], sdf: impl Fn(Vec3) -> Option<f32>) -> Self {
         let mut tsdf = Self::new();
+        tsdf.fill_sdf(keys, sdf);
+        tsdf
+    }
+
+    /// Allocates bricks `keys` if needed and overwrites their voxels as in
+    /// `from_sdf`.
+    #[cfg(test)]
+    pub(crate) fn fill_sdf(&mut self, keys: &[BrickKey], sdf: impl Fn(Vec3) -> Option<f32>) {
         for &key in keys {
-            let mut brick = Brick::new();
+            let brick = self.bricks.entry(key).or_insert_with(Brick::new);
             for z in 0..BRICK {
                 for y in 0..BRICK {
                     for x in 0..BRICK {
                         let local = IVec3::new(x, y, z);
-                        if let Some(d) = sdf(voxel_centre(key.0 * BRICK + local)) {
-                            let i = voxel_index(local);
-                            brick.tsdf[i] = (d / TRUNC).clamp(-1.0, 1.0);
-                            brick.weight[i] = 1.0;
-                        }
+                        let i = voxel_index(local);
+                        (brick.tsdf[i], brick.weight[i]) =
+                            match sdf(voxel_centre(key.0 * BRICK + local)) {
+                                Some(d) => ((d / TRUNC).clamp(-1.0, 1.0), 1.0),
+                                None => (1.0, 0.0),
+                            };
                     }
                 }
             }
-            tsdf.bricks.insert(key, brick);
         }
-        tsdf
+    }
+
+    /// Sets normalised distance and weight of global voxel `g` in an
+    /// existing brick.
+    #[cfg(test)]
+    fn set_voxel(&mut self, g: IVec3, t: f32, w: f32) {
+        let (key, local) = split_voxel(g);
+        let brick = self.bricks.get_mut(&key).expect("allocated brick");
+        let i = voxel_index(local);
+        brick.tsdf[i] = t;
+        brick.weight[i] = w;
     }
 
     /// Normalised distance and weight of global voxel `g`, if its brick exists.
@@ -933,6 +1048,80 @@ pub(super) mod tests {
             let wall = tsdf.sdf(vec3(x, y, 2.5)).expect("wall observed");
             assert!(wall.abs() < 0.01, "wall ({x},{y}): sdf {wall}");
         }
+    }
+
+    /// Wall at z = 2.9 m across bricks A = (0, 0, 2) and its +x neighbour B.
+    fn wall_pair() -> (Tsdf, BrickKey, BrickKey) {
+        let (a, b) = (BrickKey(IVec3::new(0, 0, 2)), BrickKey(IVec3::new(1, 0, 2)));
+        let tsdf = Tsdf::from_sdf(&[a, b], |p| Some(2.9 - p.z));
+        (tsdf, a, b)
+    }
+
+    #[test]
+    fn changed_stays_pending_until_marked() {
+        let (mut tsdf, a, b) = wall_pair();
+        assert_eq!(tsdf.changed(), vec![a, b]);
+        tsdf.mark_meshed(&[a]);
+        assert_eq!(tsdf.changed(), vec![b], "unmarked brick dropped");
+        assert_eq!(tsdf.changed(), vec![b], "changed() consumed state");
+        tsdf.mark_meshed(&[b]);
+        assert!(tsdf.changed().is_empty());
+    }
+
+    /// A 15 cm cube (27 voxels) appearing half a metre in front of the wall:
+    /// its mean change over the wall's near-surface band is ~2 mm, but 27
+    /// voxels change sign.
+    #[test]
+    fn small_object_next_to_a_wall_is_reported() {
+        let (mut tsdf, a, b) = wall_pair();
+        tsdf.take_changed();
+        let inside = |p: Vec3| {
+            (p - vec3(0.375, 0.375, 2.375))
+                .abs()
+                .cmple(Vec3::splat(0.075))
+                .all()
+        };
+        tsdf.fill_sdf(&[a], |p| Some(if inside(p) { -0.01 } else { 2.9 - p.z }));
+        assert_eq!(tsdf.changed(), vec![a], "{b:?} unaffected");
+    }
+
+    #[test]
+    fn neighbour_allocation_and_seam_layer_changes_are_reported() {
+        let (mut tsdf, a, b) = wall_pair();
+        tsdf.take_changed();
+
+        // An empty brick next to A and diagonally next to B.
+        let above = BrickKey(IVec3::new(0, 1, 2));
+        tsdf.fill_sdf(&[above], |_| None);
+        assert_eq!(tsdf.changed(), vec![a, b], "allocated neighbour");
+        tsdf.take_changed();
+
+        // B's voxel at the seam, just in front of the wall, decays below
+        // MIN_WEIGHT: A (padded with it) and B are stale.
+        let seam = IVec3::new(BRICK, 5, 2 * BRICK + 17);
+        let (t, _) = tsdf.voxel(seam).unwrap();
+        tsdf.set_voxel(seam, t, 0.5 * MIN_WEIGHT);
+        assert!(tsdf.changed().contains(&a), "{:?}", tsdf.changed());
+        tsdf.take_changed();
+
+        // B's seam layer moves 2 cm; B's own mean over its band stays small.
+        for y in 0..BRICK {
+            for z in 2 * BRICK + 14..2 * BRICK + 20 {
+                let g = IVec3::new(BRICK, y, z);
+                let (t, w) = tsdf.voxel(g).unwrap();
+                tsdf.set_voxel(g, t - 0.02 / TRUNC, w);
+            }
+        }
+        let changed = tsdf.changed();
+        assert!(changed.contains(&a), "{changed:?}");
+        assert!(!changed.contains(&b), "{changed:?}");
+
+        // Voxels of B away from the seam do not concern A.
+        tsdf.take_changed();
+        let inner = IVec3::new(BRICK + 5, 5, 2 * BRICK + 17);
+        let (t, _) = tsdf.voxel(inner).unwrap();
+        tsdf.set_voxel(inner, t, 0.0);
+        assert!(!tsdf.changed().contains(&a));
     }
 
     #[test]
