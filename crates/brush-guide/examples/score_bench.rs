@@ -58,6 +58,7 @@ async fn main() {
             PassView {
                 camera: camera_at(Vec3::new(4.0 * a.cos(), 0.5, 4.0 * a.sin()), Vec3::ZERO),
                 img_size: UVec2::new(960, 720),
+                weight: 1.0,
             }
         })
         .collect();

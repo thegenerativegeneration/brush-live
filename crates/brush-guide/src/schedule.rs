@@ -37,6 +37,27 @@ pub const SCORE_RECENT_VIEWS: usize = 40;
 /// the newest `SCORE_RECENT_VIEWS` plus one seeded random pick from each of
 /// `max_views - SCORE_RECENT_VIEWS` equal strata over the older views, so a
 /// round's cost stays bounded as the capture grows.
+/// Horvitz–Thompson weight of view `index` when selected by
+/// [`select_score_views`]: 1 for a view scored in every round, otherwise the
+/// size of its stratum (the inverse of its chance of being picked), so the
+/// weighted sums over a round estimate sums over all views; 0 for an older
+/// view when there are no strata (never picked).
+pub fn score_view_weight(index: usize, num_views: usize, max_views: usize) -> f32 {
+    let max_views = max_views.max(1);
+    let recent = SCORE_RECENT_VIEWS.min(max_views);
+    let older = num_views.saturating_sub(recent);
+    let strata = max_views - recent;
+    if num_views <= max_views || index >= older {
+        return 1.0;
+    }
+    if strata == 0 {
+        return 0.0;
+    }
+    // Stratum j covers j·older/strata .. (j+1)·older/strata.
+    let j = ((index + 1) * strata).div_ceil(older) - 1;
+    ((j + 1) * older / strata - j * older / strata) as f32
+}
+
 pub fn select_score_views(num_views: usize, max_views: usize, seed: u64) -> Vec<usize> {
     use rand::{RngExt as _, SeedableRng};
     let max_views = max_views.max(1);
@@ -99,6 +120,51 @@ mod tests {
         }
         assert_eq!(picked, select_score_views(500, 120, 7));
         assert_ne!(picked, select_score_views(500, 120, 8));
+    }
+
+    #[test]
+    fn short_captures_weight_every_view_one() {
+        for i in 0..120 {
+            assert_eq!(score_view_weight(i, 120, 120), 1.0);
+        }
+    }
+
+    #[test]
+    fn weights_are_horvitz_thompson_per_view() {
+        let (n, max) = (500, 120);
+        // Exact per round: recent weights sum to 40, older ones to 460.
+        for seed in 0..50 {
+            let picked = select_score_views(n, max, seed);
+            let w = |range: std::ops::Range<usize>| -> f32 {
+                picked
+                    .iter()
+                    .filter(|i| range.contains(i))
+                    .map(|&i| score_view_weight(i, n, max))
+                    .sum()
+            };
+            assert_eq!(w(460..500), 40.0);
+            assert!((w(0..460) - 460.0).abs() < 1e-3, "{}", w(0..460));
+        }
+        // In expectation every view counts once: mean of weight · picked ≈ 1.
+        let rounds = 4000;
+        let mut total = vec![0f64; n];
+        for seed in 0..rounds {
+            for i in select_score_views(n, max, seed) {
+                total[i] += f64::from(score_view_weight(i, n, max));
+            }
+        }
+        for (i, t) in total.iter().enumerate() {
+            let mean = t / rounds as f64;
+            assert!((mean - 1.0).abs() < 0.2, "view {i}: {mean}");
+        }
+    }
+
+    #[test]
+    fn recent_weight_does_not_grow_with_capture_size() {
+        for n in [121, 500, 5000] {
+            assert_eq!(score_view_weight(n - 1, n, 120), 1.0);
+            assert_eq!(score_view_weight(n - SCORE_RECENT_VIEWS, n, 120), 1.0);
+        }
     }
 
     #[test]

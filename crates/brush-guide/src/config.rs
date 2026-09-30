@@ -31,10 +31,6 @@ pub struct GuideConfig {
     /// Pixel noise on [0, 1] RGB that scales a voxel's inverse position
     /// Fisher to a positional σ in metres.
     pub sigma_pix: f32,
-    /// Voxel positional σ (metres) sent as uncertainty byte 0.
-    pub sigma_good: f32,
-    /// Voxel positional σ (metres) sent as uncertainty byte 255.
-    pub sigma_bad: f32,
     /// Appends each round's per-voxel positional σ and coverage to
     /// `raw_uncertainty.jsonl` in the session directory, for calibration.
     pub dump_raw_uncertainty: bool,
@@ -66,8 +62,6 @@ impl Default for GuideConfig {
             fisher_lambda: 1e-6,
             fisher_lambda_rel: 1e-3,
             sigma_pix: 0.05,
-            sigma_good: 0.01,
-            sigma_bad: 0.05,
             dump_raw_uncertainty: false,
             pass: PassConfig::default(),
             coverage: CoverageParams::default(),
@@ -89,8 +83,6 @@ impl GuideConfig {
         UncertaintyScale {
             ridge: self.fisher_ridge(),
             sigma_pix: self.sigma_pix,
-            sigma_good: self.sigma_good,
-            sigma_bad: self.sigma_bad,
         }
     }
 }

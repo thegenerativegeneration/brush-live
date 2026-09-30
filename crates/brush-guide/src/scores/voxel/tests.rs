@@ -5,8 +5,6 @@ use crate::scores::metrics::FisherRidge;
 const SCALE: UncertaintyScale = UncertaintyScale {
     ridge: FisherRidge { abs: 0.0, rel: 0.0 },
     sigma_pix: 1.0,
-    sigma_good: 0.1,
-    sigma_bad: 0.2,
 };
 
 /// Isotropic position Fisher of a Gaussian that alone, at opacity 1, has `sigma`.
@@ -72,74 +70,57 @@ fn groups_by_voxel_and_weights_by_opacity() {
     assert_eq!(cells[0].coverage, (0.75f32 * 255.0).round() as u8);
 }
 
-#[test]
-fn sigma_maps_good_and_bad_to_byte_range_and_clamps() {
+/// One voxel per unit along x, voxel `i` with σ = 0.01 · 1.05^i · `factor`.
+fn ladder(factor: f32) -> Vec<Cell> {
     let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-    let at = |x: f32, s: f32| g([x, 0.5, 0.5], 1.0, 0.0, s);
+    let gs: Vec<_> = (0..100)
+        .map(|i| {
+            let s = 0.01 * 1.05f32.powi(i) * factor;
+            g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, s)
+        })
+        .collect();
+    let mut cells = agg.aggregate(&gs, &[], 0.0);
+    cells.sort_by(|a, b| a.center[0].total_cmp(&b.center[0]));
+    cells
+}
+
+#[test]
+fn log_sigma_maps_round_p5_to_0_and_p95_to_255() {
+    let cells = ladder(1.0);
+    let bytes: Vec<u8> = cells.iter().map(|c| c.uncertainty).collect();
+    // p5 is voxel round(99 · 0.05) = 5, p95 voxel round(99 · 0.95) = 94.
+    assert!(
+        bytes[..=5].iter().all(|&b| b == 0),
+        "at and below p5: {bytes:?}"
+    );
+    assert!(
+        bytes[94..].iter().all(|&b| b == 255),
+        "at and above p95: {bytes:?}"
+    );
+    // Log σ is linear in the index: voxel 50 sits at (50 − 5) / (94 − 5).
+    assert_eq!(bytes[50], (45.0f32 / 89.0 * 255.0).round() as u8);
+    assert!(bytes.windows(2).all(|w| w[0] <= w[1]), "monotone in σ");
+}
+
+#[test]
+fn scaling_every_sigma_leaves_the_bytes_unchanged() {
+    let bytes = |f: f32| ladder(f).iter().map(|c| c.uncertainty).collect::<Vec<_>>();
+    assert_eq!(bytes(1.0), bytes(3.7));
+    assert_eq!(bytes(1.0), bytes(0.02));
+}
+
+#[test]
+fn uniform_round_maps_to_zero() {
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
     let cells = agg.aggregate(
         &[
-            at(0.5, 0.1),
-            at(1.5, 0.2),
-            at(2.5, 0.14),
-            at(3.5, 0.02),
-            at(4.5, 3.0),
+            g([0.5; 3], 1.0, 0.0, 0.1),
+            g([1.5, 0.5, 0.5], 1.0, 0.0, 0.1),
         ],
         &[],
         0.0,
     );
-    let by_x = |x: f32| cells.iter().find(|c| c.center[0] == x).unwrap().uncertainty;
-    assert_eq!(by_x(0.5), 0, "sigma_good maps to 0");
-    assert_eq!(by_x(1.5), 255, "sigma_bad maps to 255");
-    assert_eq!(by_x(2.5), 102, "0.4 · 255");
-    assert_eq!(by_x(3.5), 0, "below sigma_good clamps");
-    assert_eq!(by_x(4.5), 255, "above sigma_bad clamps");
-}
-
-#[test]
-fn uncertainty_byte_ignores_the_other_voxels_of_the_round() {
-    let byte = |others: &[f32]| {
-        let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-        let mut gs = vec![g([0.5; 3], 1.0, 0.0, 0.14)];
-        gs.extend(
-            others
-                .iter()
-                .enumerate()
-                .map(|(i, &s)| g([i as f32 + 2.5, 0.5, 0.5], 1.0, 0.0, s)),
-        );
-        let cells = agg.aggregate(&gs, &[], 0.0);
-        cells
-            .iter()
-            .find(|c| c.center[0] < 1.0)
-            .unwrap()
-            .uncertainty
-    };
-    let alone = byte(&[]);
-    assert_eq!(alone, 102);
-    assert_eq!(byte(&[0.11, 0.12]), alone, "all others lower");
-    assert_eq!(byte(&[0.18, 0.19, 0.5]), alone, "all others higher");
-    assert_eq!(byte(&[0.14, 0.14]), alone, "others identical");
-}
-
-#[test]
-fn identical_information_gives_identical_bytes_across_rounds() {
-    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-    let voxel = || g([0.5; 3], 1.0, 0.0, 0.16);
-    let neighbour = |x: f32, s: f32| g([x, 0.5, 0.5], 1.0, 0.0, s);
-    let a = agg.aggregate(&[voxel(), neighbour(2.5, 0.11)], &[], 0.0);
-    let b = agg.aggregate(
-        &[voxel(), neighbour(2.5, 0.195), neighbour(4.5, 0.4)],
-        &[],
-        1.0,
-    );
-    let at = |cells: &[Cell]| {
-        cells
-            .iter()
-            .find(|c| c.center[0] < 1.0)
-            .unwrap()
-            .uncertainty
-    };
-    assert_eq!(at(&a), at(&b));
-    assert_eq!(at(&a), 153, "0.6 · 255");
+    assert!(cells.iter().all(|c| c.uncertainty == 0));
 }
 
 #[test]
@@ -184,20 +165,34 @@ fn more_gaussians_observing_a_voxel_lower_its_sigma() {
 #[test]
 fn uncertainty_is_smoothed_across_rounds_per_voxel() {
     let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    let first = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.2)], &[], 0.0);
-    assert_eq!(first[0].uncertainty, 255, "a new voxel starts at its value");
-    let second = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.1)], &[], 1.0);
-    // Round value 0; sent value = round(0.3·0 + 0.7·255) = 179.
-    assert_eq!(second[0].uncertainty, 179);
+    // Two voxels so the round has a range; the other one is fixed at 0.1.
+    let round = |s: f32| [g([0.5; 3], 1.0, 0.0, s), g([5.5, 0.5, 0.5], 1.0, 0.0, 0.1)];
+    let at = |cells: &[Cell]| {
+        cells
+            .iter()
+            .find(|c| c.center[0] < 1.0)
+            .unwrap()
+            .uncertainty
+    };
+    let first = agg.aggregate(&round(0.4), &[], 0.0);
+    assert_eq!(
+        at(&first),
+        255,
+        "highest in its round; a new voxel starts at its value"
+    );
+    let second = agg.aggregate(&round(0.025), &[], 1.0);
+    // Round value 0 (now the lowest); sent value = round(0.3·0 + 0.7·255) = 179.
+    assert_eq!(at(&second), 179);
 }
 
 #[test]
 fn reset_clears_uncertainty_history() {
     let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.2)], &[], 0.0);
+    let round = |s: f32| [g([0.5; 3], 1.0, 0.0, s), g([5.5, 0.5, 0.5], 1.0, 0.0, 0.1)];
+    agg.aggregate(&round(0.4), &[], 0.0);
     agg.reset();
-    let c = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.1)], &[], 1.0);
-    assert_eq!(c[0].uncertainty, 0);
+    let c = agg.aggregate(&round(0.025), &[], 1.0);
+    assert_eq!(c.iter().find(|c| c.center[0] < 1.0).unwrap().uncertainty, 0);
 }
 
 #[test]
@@ -277,7 +272,15 @@ fn nan_scores_count_as_uncovered_and_uninformative() {
     let first = cells.iter().find(|c| c.center[0] < 1.0).unwrap();
     assert!((first.center[0] - 0.55).abs() < 1e-6);
     assert_eq!(first.coverage, 128);
-    assert_eq!(first.uncertainty, 0, "the NaN Gaussian adds no information");
+    let raw = agg
+        .raw_round()
+        .iter()
+        .find(|r| r.key == IVec3::ZERO)
+        .unwrap();
+    assert!(
+        (raw.sigma - 0.1).abs() < 1e-6,
+        "the NaN Gaussian adds no information"
+    );
     let only_nan = cells.iter().find(|c| c.center[0] > 2.0).unwrap();
     assert_eq!(only_nan.uncertainty, 255, "non-finite sigma maps to 255");
 }

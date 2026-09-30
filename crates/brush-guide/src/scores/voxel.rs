@@ -52,16 +52,12 @@ pub struct VoxelAggregator {
     raw: Vec<RawVoxel>,
 }
 
-/// How a voxel's summed position Fisher becomes its uncertainty byte.
+/// How a voxel's summed position Fisher becomes its positional σ.
 #[derive(Clone, Copy, Debug)]
 pub struct UncertaintyScale {
     pub ridge: FisherRidge,
     /// Pixel noise on [0, 1] RGB that turns information into metres.
     pub sigma_pix: f32,
-    /// Positional σ (metres) sent as byte 0.
-    pub sigma_good: f32,
-    /// Positional σ (metres) sent as byte 255.
-    pub sigma_bad: f32,
 }
 
 /// A voxel's scores before quantisation.
@@ -128,13 +124,29 @@ fn dominant_axis(t: Mat3) -> Option<(Vec3, f32)> {
     best.map(|(v, lambda)| (v, lambda / trace))
 }
 
-/// `clamp((σ − good) / (bad − good), 0, 1) · 255`, rounded; 255 for a
+/// The round's 5th and 95th percentile of `ln σ` over finite σ.
+fn log_sigma_range(sigmas: &[f32]) -> (f32, f32) {
+    let mut logs: Vec<f32> = sigmas
+        .iter()
+        .filter(|s| s.is_finite() && **s > 0.0)
+        .map(|s| s.ln())
+        .collect();
+    logs.sort_by(f32::total_cmp);
+    let pct = |p: f32| {
+        logs.get(((logs.len() as f32 - 1.0) * p).round() as usize)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    (pct(0.05), pct(0.95))
+}
+
+/// `clamp((ln σ − lo) / (hi − lo), 0, 1) · 255`, rounded; 255 for a
 /// non-finite σ, 0 for an empty range.
-fn uncertainty_byte(sigma: f32, good: f32, bad: f32) -> u8 {
+fn uncertainty_byte(sigma: f32, (lo, hi): (f32, f32)) -> u8 {
     if !sigma.is_finite() {
         255
-    } else if bad > good {
-        (((sigma - good) / (bad - good)).clamp(0.0, 1.0) * 255.0).round() as u8
+    } else if hi > lo {
+        (((sigma.ln() - lo) / (hi - lo)).clamp(0.0, 1.0) * 255.0).round() as u8
     } else {
         0
     }
@@ -218,18 +230,27 @@ impl VoxelAggregator {
             }
         }
 
-        self.raw.clear();
-        acc.into_iter()
+        let sc = self.scale;
+        let voxels: Vec<(IVec3, Acc, f32)> = acc
+            .into_iter()
             .map(|(key, a)| {
-                let first = *self.first_seen.entry(key).or_insert(now_s);
-                let sc = self.scale;
                 let sigma = position_sigma(&a.info, sc.ridge, sc.sigma_pix);
+                (key, a, sigma)
+            })
+            .collect();
+        let sigmas: Vec<f32> = voxels.iter().map(|v| v.2).collect();
+        let range = log_sigma_range(&sigmas);
+        self.raw.clear();
+        voxels
+            .into_iter()
+            .map(|(key, a, sigma)| {
+                let first = *self.first_seen.entry(key).or_insert(now_s);
                 self.raw.push(RawVoxel {
                     key,
                     coverage: a.cov / a.w,
                     sigma,
                 });
-                let u8_unc = uncertainty_byte(sigma, sc.sigma_good, sc.sigma_bad);
+                let u8_unc = uncertainty_byte(sigma, range);
                 let prev = *self.unc_ema.get(&key).unwrap_or(&(u8_unc as f32));
                 let smoothed = 0.3 * u8_unc as f32 + 0.7 * prev;
                 self.unc_ema.insert(key, smoothed);

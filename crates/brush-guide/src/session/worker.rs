@@ -7,7 +7,7 @@ use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
 use crate::protocol::{Cell, KeyframeHeader, MeshBrick};
-use crate::schedule::{ScoreScheduler, select_score_views};
+use crate::schedule::{ScoreScheduler, score_view_weight, select_score_views};
 use crate::scores::metrics::gaussian_metrics;
 use crate::scores::pass::{PassView, score_pass};
 use crate::scores::voxel::{GaussianScore, RawVoxel, ViewCone, VoxelAggregator};
@@ -242,13 +242,12 @@ impl Worker {
         .map(|i| PassView {
             camera: self.live.views()[i].camera,
             img_size: self.sizes[i],
+            // Sums over the sample estimate sums over every view, so
+            // `CoverageParams::n_target` and σ refer to the whole capture.
+            weight: score_view_weight(i, num_views, config.max_score_views),
         })
         .collect();
-        let mut out = score_pass(splats, &views, &config.pass).await;
-        // Observation counts and Fisher sum over the sampled views only;
-        // rescale so `CoverageParams::n_target` keeps meaning views of the
-        // whole capture and σ reflects every view.
-        out.scale_observations(num_views as f32 / views.len() as f32);
+        let out = score_pass(splats, &views, &config.pass).await;
         let (coverage, fisher_pos) = gaussian_metrics(&out, &config.coverage);
         let gaussians = gaussian_scores(splats, &coverage, &fisher_pos).await;
         let cones = view_cones(self.live.views());

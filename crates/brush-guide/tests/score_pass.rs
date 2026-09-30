@@ -58,6 +58,7 @@ async fn hutchinson_matches_exact_fisher() {
     let view = PassView {
         camera: camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)),
         img_size: SIZE,
+        weight: 1.0,
     };
 
     let exact = exact_fisher(&splats, &view).await;
@@ -91,10 +92,12 @@ async fn opposite_views_cancel_direction_sum() {
         PassView {
             camera: camera_at(Vec3::new(0.0, 0.0, -2.0), Vec3::ZERO),
             img_size: SIZE,
+            weight: 1.0,
         },
         PassView {
             camera: camera_at(Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO),
             img_size: SIZE,
+            weight: 1.0,
         },
     ];
     let out = score_pass(&splats, &views, &PassConfig::default()).await;
@@ -129,6 +132,7 @@ async fn occluded_gaussian_is_not_observed() {
     let view = PassView {
         camera: camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)),
         img_size: SIZE,
+        weight: 1.0,
     };
     let out = score_pass(&splats, &[view], &PassConfig::default()).await;
     assert_eq!(out.weight[0..3], [1.0, 1.0, 1.0]);
@@ -154,6 +158,7 @@ async fn px_per_m_uses_capture_resolution() {
         let view = PassView {
             camera,
             img_size: SIZE,
+            weight: 1.0,
         };
         let cfg = PassConfig {
             render_scale,
@@ -176,7 +181,39 @@ async fn inner_device_splats_are_scored() {
     let view = PassView {
         camera: camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)),
         img_size: SIZE,
+        weight: 1.0,
     };
     let out = score_pass(&splats, &[view], &PassConfig::default()).await;
     assert_eq!(out.weight, vec![1.0]);
+}
+
+#[tokio::test]
+async fn view_weight_scales_counts_directions_and_fisher() {
+    let device = device().await.autodiff();
+    let splats = splats_from(&[[0.0, 0.0, 2.0]], -2.0, 0.6, &device);
+    let camera = camera_at(Vec3::new(0.3, 0.0, 0.0), Vec3::new(0.0, 0.0, 2.0));
+    let cfg = PassConfig {
+        hutchinson_samples: 512,
+        ..Default::default()
+    };
+    let pass = |weight: f32| {
+        let view = PassView {
+            camera,
+            img_size: SIZE,
+            weight,
+        };
+        let splats = splats.clone();
+        let cfg = cfg.clone();
+        async move { score_pass(&splats, &[view], &cfg).await }
+    };
+    let (one, three) = (pass(1.0).await, pass(3.0).await);
+    assert_eq!(one.weight[0], 1.0);
+    assert_eq!(three.weight[0], 3.0);
+    for (a, b) in one.dir_sum[0].iter().zip(three.dir_sum[0]) {
+        assert!((3.0 * a - b).abs() < 1e-5, "{a} vs {b}");
+    }
+    assert_eq!(one.max_px_per_m[0], three.max_px_per_m[0]);
+    let trace = |h: &[f32; 36]| (0..6).map(|i| h[i * 6 + i]).sum::<f32>();
+    let ratio = trace(&three.fisher[0]) / trace(&one.fisher[0]);
+    assert!((2.4..3.6).contains(&ratio), "Fisher ratio {ratio}");
 }

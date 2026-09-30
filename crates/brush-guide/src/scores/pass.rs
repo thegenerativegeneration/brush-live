@@ -8,6 +8,9 @@ use glam::{UVec2, Vec3};
 pub struct PassView {
     pub camera: Camera,
     pub img_size: UVec2,
+    /// Multiplies the view's Fisher, observation count and direction, e.g.
+    /// a sampling weight so a round's sums estimate sums over all views.
+    pub weight: f32,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -36,24 +39,6 @@ pub struct PassOutput {
     pub dir_sum: Vec<[f32; 3]>,
     pub weight: Vec<f32>,
     pub max_px_per_m: Vec<f32>,
-}
-
-impl PassOutput {
-    /// Scales the per-view sums (view counts, directions and Fisher), e.g. to
-    /// extrapolate a pass over a subset of views to the whole capture.
-    /// `dir_sum` scales along with `weight`, so the angular spread (their
-    /// ratio) is unchanged.
-    pub fn scale_observations(&mut self, factor: f32) {
-        for h in &mut self.fisher {
-            *h = h.map(|v| v * factor);
-        }
-        for w in &mut self.weight {
-            *w *= factor;
-        }
-        for d in &mut self.dir_sum {
-            *d = d.map(|v| v * factor);
-        }
-    }
 }
 
 async fn read_vec<const D: usize>(t: Tensor<D>) -> Vec<f32> {
@@ -104,7 +89,7 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
                 1,
             );
             let outer = j.clone().unsqueeze_dim::<3>(2) * j.clone().unsqueeze_dim::<3>(1);
-            fisher = fisher + outer / samples as f32;
+            fisher = fisher + outer * (view.weight / samples as f32);
             trace = trace + j.powi_scalar(2).sum_dim(1).squeeze_dim(1) / samples as f32;
         }
 
@@ -119,8 +104,8 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
             .sqrt()
             .clamp_min(1e-6); // [n,1]
         let dir = to_g / dist.clone();
-        dir_sum = dir_sum + dir * observed.clone().unsqueeze_dim::<2>(1);
-        weight = weight + observed.clone();
+        dir_sum = dir_sum + dir * (observed.clone() * view.weight).unsqueeze_dim::<2>(1);
+        weight = weight + observed.clone() * view.weight;
         let focal = view.camera.focal(view.img_size).x;
         let ppm = dist.squeeze_dim::<1>(1).recip() * focal * observed;
         max_ppm = max_ppm.max_pair(ppm);
@@ -133,25 +118,5 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
         dir_sum: dir_v.as_chunks::<3>().0.to_vec(),
         weight: read_vec(weight).await,
         max_px_per_m: read_vec(max_ppm).await,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scale_observations_scales_counts_directions_and_fisher() {
-        let mut out = PassOutput {
-            fisher: vec![[2.0; 36]],
-            dir_sum: vec![[1.0, 0.0, -1.0]],
-            weight: vec![3.0],
-            max_px_per_m: vec![500.0],
-        };
-        out.scale_observations(1.5);
-        assert_eq!(out.fisher[0], [3.0; 36]);
-        assert_eq!(out.dir_sum[0], [1.5, 0.0, -1.5]);
-        assert_eq!(out.weight[0], 4.5);
-        assert_eq!(out.max_px_per_m[0], 500.0);
     }
 }
