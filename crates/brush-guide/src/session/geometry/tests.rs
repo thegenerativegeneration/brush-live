@@ -1,4 +1,5 @@
 use super::*;
+use crate::geometry::tsdf::fixtures::{colour_image, depth_image, look_at, plane_z};
 
 fn mesh(x: i32) -> MeshBrick {
     MeshBrick::Mesh(crate::geometry::mesh::BrickMesh {
@@ -191,4 +192,74 @@ fn a_brick_that_never_had_a_mesh_is_not_sent() {
     let (bricks, pending) = g.mesh_changed(Vec3::ZERO);
     assert_eq!((bricks.len(), pending), (0, 1));
     assert!(g.tsdf.changed().is_empty(), "marked meshed");
+}
+
+/// Fuses plane z = 2.5, seen head-on from the origin and painted `rgb`
+/// (linear), `n` times.
+fn paint_plane(g: &mut Geometry, rgb: [f32; 3], n: usize) {
+    let cam = look_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 2.5));
+    let depth = depth_image(&cam, plane_z(2.5));
+    let colour = colour_image(&cam, plane_z(2.5), |_| rgb);
+    for _ in 0..n {
+        g.tsdf.integrate(&depth, Some(&colour), &cam);
+    }
+}
+
+#[test]
+fn a_repainted_plane_is_remeshed_with_its_new_colour() {
+    let mut g = Geometry::new();
+    paint_plane(&mut g, [0.2; 3], 30);
+    let (bricks, pending) = g.mesh_changed(Vec3::ZERO);
+    assert!(!bricks.is_empty() && pending <= MAX_BRICKS_PER_ROUND);
+    paint_plane(&mut g, [1.0, 0.0, 0.0], 150);
+    assert!(g.tsdf.changed().is_empty(), "geometry unchanged");
+
+    let (bricks, pending) = g.mesh_changed(Vec3::ZERO);
+    assert_eq!(bricks.len(), pending);
+    assert!(!bricks.is_empty(), "repainted bricks re-meshed");
+    for b in &bricks {
+        let MeshBrick::Mesh(m) = b else {
+            panic!("{:?} removed", b.key())
+        };
+        assert_eq!(m.colours.len(), m.positions.len());
+        for c in &m.colours {
+            assert!(c[0] >= 250 && c[1] <= 5 && c[2] <= 5, "{c:?}");
+        }
+    }
+    assert_eq!(g.mesh_changed(Vec3::ZERO).1, 0, "nothing stale after");
+}
+
+/// Geometry changes go first: with 26 bricks moved (25 and the neighbour
+/// padded with one of them) and 4 repainted, the repainted ones wait
+/// behind the cap of 24 and follow in the next round.
+#[test]
+fn colour_only_changes_wait_behind_geometry_changes() {
+    let row = |xs: std::ops::Range<i32>| -> Vec<BrickKey> {
+        xs.map(|x| BrickKey(glam::IVec3::new(x, 0, 0))).collect()
+    };
+    let mut g = plane_row();
+    g.tsdf.fill_colour(&row(0..30), [0.2; 3]);
+    let eye = Vec3::new(29.5, 0.5, 0.5);
+    g.mesh_changed(eye);
+    g.mesh_changed(eye);
+    assert_eq!(g.mesh_changed(eye).1, 0, "all meshed");
+
+    g.tsdf.fill_colour(&row(0..4), [1.0, 0.0, 0.0]);
+    g.tsdf.fill_sdf(&row(5..30), |p| Some(p.z - 0.52));
+    let (bricks, pending) = g.mesh_changed(eye);
+    assert_eq!((bricks.len(), pending), (MAX_BRICKS_PER_ROUND, 30));
+    let xs: Vec<i32> = bricks.iter().map(|b| b.key().0.x).collect();
+    assert!(xs.iter().all(|&x| x >= 4), "geometry first: {xs:?}");
+
+    let (bricks, pending) = g.mesh_changed(eye);
+    assert_eq!(pending, 6);
+    let xs: Vec<i32> = bricks.iter().map(|b| b.key().0.x).collect();
+    assert_eq!(xs.len(), 6, "{xs:?}");
+    assert!(
+        xs[..2].iter().all(|&x| x >= 4),
+        "geometry leftovers first: {xs:?}"
+    );
+    let mut repainted = xs[2..].to_vec();
+    repainted.sort_unstable();
+    assert_eq!(repainted, vec![0, 1, 2, 3]);
 }

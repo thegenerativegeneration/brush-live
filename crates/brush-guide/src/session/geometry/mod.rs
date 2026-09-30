@@ -171,45 +171,65 @@ impl Geometry {
             let camera = &views[i].camera;
             let depth = render_expected_depth(splats, camera, size).await;
             let colour = render_colour(splats, camera, size).await;
+            // Colour shares the distance's weight (Open3D), so every
+            // integration passes it: one without would weigh later
+            // colours down.
             self.tsdf.integrate(&depth, Some(&colour), camera);
         }
         round.len()
     }
 
-    /// Meshes up to `MAX_BRICKS_PER_ROUND` stale bricks and marks those
-    /// meshed; the rest stay stale for later rounds. A brick that had a
-    /// mesh and has none now is returned as removed. Also returns how many
-    /// bricks were stale.
+    /// Meshes up to `MAX_BRICKS_PER_ROUND` stale bricks, those whose
+    /// geometry changed before those whose colour alone changed, and marks
+    /// them meshed; the rest stay stale for later rounds. A brick that had
+    /// a mesh and has none now is returned as removed. Also returns how
+    /// many bricks were stale.
     pub(super) fn mesh_changed(&mut self, eye: Vec3) -> (Vec<MeshBrick>, usize) {
         self.round += 1;
         let stale = self.tsdf.changed();
-        let pending = stale.len();
-        let chosen = self.select(stale, eye);
+        let geometry: HashSet<BrickKey> = stale.iter().copied().collect();
+        let repainted: Vec<BrickKey> = self
+            .tsdf
+            .colour_changed()
+            .into_iter()
+            .filter(|k| !geometry.contains(k))
+            .collect();
+        let pending = stale.len() + repainted.len();
+        let chosen = self.select(stale, repainted, eye);
         let bricks = chosen.iter().filter_map(|&key| self.mesh(key)).collect();
         self.tsdf.mark_meshed(&chosen);
         (bricks, pending)
     }
 
-    /// The first `MAX_BRICKS_PER_ROUND` of `stale`: bricks never meshed
-    /// come first, then those stale for the most rounds, then those
+    /// The first `MAX_BRICKS_PER_ROUND` of `stale` (geometry changed),
+    /// then of `repainted` (only colour changed). Within each, bricks never
+    /// meshed come first, then those stale for the most rounds, then those
     /// nearest to `eye`, so near bricks that keep changing cannot starve
     /// the others.
-    fn select(&mut self, mut stale: Vec<BrickKey>, eye: Vec3) -> Vec<BrickKey> {
+    fn select(
+        &mut self,
+        mut stale: Vec<BrickKey>,
+        mut repainted: Vec<BrickKey>,
+        eye: Vec3,
+    ) -> Vec<BrickKey> {
         let round = self.round;
-        let current: HashSet<BrickKey> = stale.iter().copied().collect();
+        let current: HashSet<BrickKey> = stale.iter().chain(&repainted).copied().collect();
         self.stale_since.retain(|k, _| current.contains(k));
-        for &k in &stale {
+        for &k in stale.iter().chain(&repainted) {
             self.stale_since.entry(k).or_insert(round);
         }
         let centre = |k: &BrickKey| ((k.0 * BRICK).as_vec3() + 0.5 * BRICK as f32) * VOXEL;
-        stale.sort_by(|a, b| {
+        let order = |a: &BrickKey, b: &BrickKey| {
             let rank = |k: &BrickKey| (self.visited.contains(k), self.stale_since[k]);
             rank(a).cmp(&rank(b)).then_with(|| {
                 centre(a)
                     .distance_squared(eye)
                     .total_cmp(&centre(b).distance_squared(eye))
             })
-        });
+        };
+        stale.sort_by(order);
+        repainted.sort_by(order);
+        stale.extend(repainted);
         stale.truncate(MAX_BRICKS_PER_ROUND);
         for k in &stale {
             self.stale_since.remove(k);

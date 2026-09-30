@@ -2,6 +2,7 @@ use glam::{IVec3, Vec3, vec3};
 
 use super::fixtures::{colour_image, depth_image, look_at, plane_z};
 use super::*;
+use crate::geometry::colour::srgb_to_linear;
 
 const A: [f32; 3] = [0.9, 0.2, 0.05];
 const B: [f32; 3] = [0.1, 0.6, 0.8];
@@ -78,4 +79,29 @@ fn colour_of_another_size_is_rejected() {
     let mut colour = colour_image(&cam, plane_z(2.5), |_| A);
     colour.width /= 2;
     Tsdf::new().integrate(&depth_image(&cam, plane_z(2.5)), Some(&colour), &cam);
+}
+
+/// Fuses plane 2.5 painted `rgb` `n` times.
+fn repaint(tsdf: &mut Tsdf, rgb: [f32; 3], n: usize) {
+    for _ in 0..n {
+        fuse_plane(tsdf, 2.5, rgb);
+    }
+}
+
+/// A converged grey plane drifting by 5/255 in sRGB is not colour-stale;
+/// by 12/255 it is.
+#[test]
+fn colour_change_below_the_threshold_is_ignored() {
+    let grey = |v: f32| [srgb_to_linear(v / 255.0); 3];
+    let brick = BrickKey(IVec3::new(0, 0, 2));
+    let mut tsdf = Tsdf::new();
+    repaint(&mut tsdf, grey(128.0), 30);
+    assert!(tsdf.take_changed().contains(&brick));
+    repaint(&mut tsdf, grey(133.0), 150);
+    assert!(tsdf.changed().is_empty(), "geometry unchanged");
+    assert!(tsdf.colour_changed().is_empty(), "drift of 5");
+    repaint(&mut tsdf, grey(140.0), 150);
+    assert!(tsdf.colour_changed().contains(&brick), "change of 12");
+    tsdf.mark_meshed(&[brick]);
+    assert!(!tsdf.colour_changed().contains(&brick), "snapshot taken");
 }

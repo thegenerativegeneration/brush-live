@@ -13,7 +13,14 @@
 use glam::{IVec3, Vec3};
 use half::f16;
 
-use super::{BRICK_VOXELS, Tsdf, VOXEL, split_voxel, voxel_index};
+use crate::geometry::colour::linear_to_srgb8;
+
+use super::changes::MeshedState;
+use super::{BRICK_VOXELS, Brick, BrickKey, Tsdf, VOXEL, split_voxel, voxel_index};
+
+/// Mean |Δ sRGB| per channel (0–255) from which `colour_changed` reports
+/// a brick.
+const COLOUR_CHANGE: f32 = 8.0;
 
 /// Linear RGB per voxel of a brick; NaN until the voxel's first coloured
 /// observation.
@@ -76,5 +83,77 @@ impl Tsdf {
             return None;
         }
         brick.colour.as_ref()?.get(i)
+    }
+}
+
+/// 8-bit sRGB of every observed, coloured voxel of `brick`, for comparing
+/// later colours against; empty if the brick has no colour. Change
+/// detection needs no more than the 8 bits sent.
+pub(super) fn colour_snapshot(brick: &Brick) -> Vec<Option<[u8; 3]>> {
+    let Some(colours) = &brick.colour else {
+        return Vec::new();
+    };
+    (0..BRICK_VOXELS)
+        .map(|i| {
+            brick.observed[i]
+                .then(|| colours.get(i).map(linear_to_srgb8))
+                .flatten()
+        })
+        .collect()
+}
+
+/// Whether `brick`'s near-surface voxels (observed and |sdf| < `TRUNC`
+/// now, or when meshed), coloured then and now, changed by a mean
+/// |Δ sRGB| of `COLOUR_CHANGE` or more per channel since `snapshot`.
+fn colour_stale(brick: &Brick, meshed: &MeshedState) -> bool {
+    let (Some(colours), false) = (&brick.colour, meshed.colour.is_empty()) else {
+        return false;
+    };
+    let (mut sum, mut channels) = (0u32, 0u32);
+    for i in 0..BRICK_VOXELS {
+        let near_now = brick.observed[i] && brick.tsdf[i].abs() < 1.0;
+        if !near_now && !meshed.near_surface(i) {
+            continue;
+        }
+        let now = brick.observed[i].then(|| colours.get(i)).flatten();
+        let (Some(then), Some(now)) = (meshed.colour[i], now) else {
+            continue;
+        };
+        let now = linear_to_srgb8(now);
+        sum += (0..3)
+            .map(|c| u32::from(then[c].abs_diff(now[c])))
+            .sum::<u32>();
+        channels += 3;
+    }
+    channels > 0 && sum as f32 / channels as f32 >= COLOUR_CHANGE
+}
+
+impl Tsdf {
+    /// Bricks meshed before whose colour changed by a mean |Δ sRGB| of
+    /// `COLOUR_CHANGE` (8 of 255) or more per channel since
+    /// `mark_meshed`, over their near-surface voxels (observed, |sdf| <
+    /// `TRUNC` now or then) coloured both times; in key order. A brick
+    /// can be in both this and `changed`.
+    pub fn colour_changed(&self) -> Vec<BrickKey> {
+        let mut keys: Vec<BrickKey> = self
+            .bricks
+            .iter()
+            .filter(|(_, b)| b.meshed.as_ref().is_some_and(|m| colour_stale(b, m)))
+            .map(|(&k, _)| k)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// Sets the colour of every voxel of existing bricks `keys` to `rgb`.
+    #[cfg(test)]
+    pub(crate) fn fill_colour(&mut self, keys: &[BrickKey], rgb: [f32; 3]) {
+        for key in keys {
+            let brick = self.bricks.get_mut(key).expect("allocated brick");
+            let colours = brick.colour.get_or_insert_with(VoxelColours::new);
+            for i in 0..BRICK_VOXELS {
+                colours.0[i] = rgb.map(f16::from_f32);
+            }
+        }
     }
 }

@@ -3,8 +3,11 @@
 
 use half::f16;
 
-use super::samples::{BrickSamples, PADDED_SAMPLES, SELF_REGION, padded_region, region_offset};
-use super::{BrickKey, TRUNC, Tsdf};
+use super::colour::colour_snapshot;
+use super::samples::{
+    BrickSamples, PADDED, PADDED_SAMPLES, SELF_REGION, padded_region, region_offset,
+};
+use super::{BRICK, BrickKey, TRUNC, Tsdf};
 
 /// Mean |Δsdf| (metres) over the near-surface voxels of a brick, or of a
 /// neighbour's layer facing it, since the brick was meshed, from which
@@ -21,11 +24,23 @@ const SIGN_CHANGES: usize = 20;
 const STATUS_CHANGE_BAND: f32 = 0.5;
 
 /// What the mesher saw of a brick: its padded samples, normalised distance
-/// or NaN where unobserved, and which of its 26 neighbours existed (bit
-/// `region_index(offset)`).
+/// or NaN where unobserved, which of its 26 neighbours existed (bit
+/// `region_index(offset)`), and its voxels' colours (`colour_snapshot`).
 pub(super) struct MeshedState {
     sdf: Vec<f16>,
     neighbours: u32,
+    pub(super) colour: Vec<Option<[u8; 3]>>,
+}
+
+impl MeshedState {
+    /// Whether voxel `i` of the brick (`voxel_index` order) was observed
+    /// within `TRUNC` of the surface when meshed.
+    pub(super) fn near_surface(&self, i: usize) -> bool {
+        let b = BRICK as usize;
+        let (x, y, z) = (i % b, (i / b) % b, i / (b * b));
+        let t = self.sdf[(x + 1) + PADDED * ((y + 1) + PADDED * (z + 1))].to_f32();
+        t.abs() < 1.0
+    }
 }
 
 /// Per-region change of padded samples between the meshed state and now.
@@ -131,7 +146,12 @@ impl Tsdf {
                 .collect();
             let neighbours = self.neighbour_mask(key);
             if let Some(brick) = self.bricks.get_mut(&key) {
-                brick.meshed = Some(MeshedState { sdf, neighbours });
+                let colour = colour_snapshot(brick);
+                brick.meshed = Some(MeshedState {
+                    sdf,
+                    neighbours,
+                    colour,
+                });
             }
         }
     }

@@ -27,7 +27,7 @@ mod change_tests;
 #[cfg(test)]
 mod colour_tests;
 #[cfg(test)]
-pub(super) mod fixtures;
+pub(crate) mod fixtures;
 #[cfg(test)]
 mod tests;
 
