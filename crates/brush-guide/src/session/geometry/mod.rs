@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests;
 
-use crate::geometry::depth::render_expected_depth;
+use crate::geometry::depth::{render_colour, render_expected_depth};
 use crate::geometry::mesh::mesh_brick;
 use crate::geometry::tsdf::{BRICK, BrickKey, Tsdf, VOXEL};
 use crate::protocol::{MeshBrick, ServerHeader, encode_frame, encode_mesh_bricks};
@@ -102,13 +102,14 @@ const MAX_BRICKS_PER_ROUND: usize = 24;
 const REFRESH_VIEWS_PER_ROUND: usize = 4;
 /// New keyframes integrated per round at most; further ones wait.
 const MAX_NEW_VIEWS_PER_ROUND: usize = 8;
-/// Expected depth is rendered at the sent image size divided by this.
+/// Expected depth and colour are rendered at the sent image size divided
+/// by this.
 const DEPTH_DOWNSCALE: u32 = 4;
 /// Factor on all TSDF weights per round, so the surface follows the splat.
 const WEIGHT_DECAY: f32 = 0.95;
 
-/// TSDF fused from the splat's expected depth at keyframe poses, meshed
-/// per brick.
+/// TSDF fused from the splat's expected depth and colour at keyframe
+/// poses, meshed per brick.
 pub(super) struct Geometry {
     tsdf: Tsdf,
     /// Views `0..integrated` were integrated at least once.
@@ -155,8 +156,8 @@ impl Geometry {
         views
     }
 
-    /// Decays the TSDF and integrates this round's views; `splats` must
-    /// have Gaussians. Returns the number of views integrated.
+    /// Decays the TSDF and integrates this round's views, depth and colour;
+    /// `splats` must have Gaussians. Returns the number of views integrated.
     pub(super) async fn fuse(
         &mut self,
         splats: &Splats,
@@ -169,7 +170,8 @@ impl Geometry {
             let size = (sizes[i] / DEPTH_DOWNSCALE).max(UVec2::ONE);
             let camera = &views[i].camera;
             let depth = render_expected_depth(splats, camera, size).await;
-            self.tsdf.integrate(&depth, camera);
+            let colour = render_colour(splats, camera, size).await;
+            self.tsdf.integrate(&depth, Some(&colour), camera);
         }
         round.len()
     }

@@ -48,7 +48,7 @@ struct Args {
     dump_scores: Option<PathBuf>,
     /// Write every received `mesh_bricks` round to this directory: each
     /// brick's mesh as `v<version>_brick_<x>_<y>_<z>.ply` (ASCII, world
-    /// metres) and one JSON line per round in `rounds.jsonl` with its bricks
+    /// metres, sRGB vertex colours when sent) and one JSON line per round in `rounds.jsonl` with its bricks
     /// (`removed` for bricks that lost their mesh), frame bytes and
     /// `mesh_ms`.
     #[arg(long)]

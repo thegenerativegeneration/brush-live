@@ -158,7 +158,7 @@ fn decay_scales_weights_down_to_the_floor() {
     let p = vec3(0.025, 0.025, 2.475);
     let depth = depth_image(&cam, plane_z(2.5));
     for _ in 0..9 {
-        tsdf.integrate(&depth, &cam);
+        tsdf.integrate(&depth, None, &cam);
     }
     let before = tsdf.sdf(p).unwrap();
     assert_eq!(voxel_weight(&tsdf, p), 10.0);
@@ -182,7 +182,7 @@ fn weights_are_capped() {
     let (mut tsdf, cam) = plane_setup();
     let depth = depth_image(&cam, plane_z(2.5));
     for _ in 0..30 {
-        tsdf.integrate(&depth, &cam);
+        tsdf.integrate(&depth, None, &cam);
     }
     assert_eq!(voxel_weight(&tsdf, vec3(0.025, 0.025, 2.475)), MAX_WEIGHT);
 }
@@ -301,7 +301,7 @@ fn non_square_image_with_offset_principal_point() {
     let (lo, hi) = (vec3(0.2, -0.4, 1.5), vec3(0.6, -0.1, 1.9));
     let scene = union(aabb(lo, hi), plane_z(2.5));
     let mut tsdf = Tsdf::new();
-    tsdf.integrate(&depth_image_sized(&cam, size, &scene), &cam);
+    tsdf.integrate(&depth_image_sized(&cam, size, &scene), None, &cam);
 
     for (x, y) in [(0.25, -0.35), (0.55, -0.15), (0.4, -0.25)] {
         let on = tsdf.sdf(vec3(x, y, 1.5)).expect("box face observed");
@@ -331,11 +331,11 @@ fn reset_empties() {
 fn depth_beyond_max_depth_is_ignored() {
     let cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 1.0));
     let mut tsdf = Tsdf::new();
-    tsdf.integrate(&depth_image(&cam, plane_z(MAX_DEPTH + 0.5)), &cam);
+    tsdf.integrate(&depth_image(&cam, plane_z(MAX_DEPTH + 0.5)), None, &cam);
     assert!(tsdf.bricks.is_empty(), "no bricks beyond MAX_DEPTH");
 
     let near = MAX_DEPTH - 0.5;
-    tsdf.integrate(&depth_image(&cam, plane_z(near)), &cam);
+    tsdf.integrate(&depth_image(&cam, plane_z(near)), None, &cam);
     let sdf = tsdf.sdf(vec3(0.0, 0.0, near)).expect("observed");
     assert!(sdf.abs() < 0.01, "{sdf}");
 }
@@ -347,5 +347,5 @@ fn integrate_rejects_non_pinhole_cameras() {
     let mut cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 1.0));
     let depth = depth_image(&cam, plane_z(2.0));
     cam.camera_model = CameraModel::KannalaBrandt4(Default::default());
-    Tsdf::new().integrate(&depth, &cam);
+    Tsdf::new().integrate(&depth, None, &cam);
 }

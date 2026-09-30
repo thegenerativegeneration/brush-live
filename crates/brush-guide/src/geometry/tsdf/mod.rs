@@ -12,15 +12,20 @@
 //! of `Open3D`'s `ScalableTSDFVolume`: bricks of `BRICK³` voxels are allocated
 //! only around observed surface points.
 //!
+//! Colour, when given, is fused into the same voxels (`colour`).
+//!
 //! Distances are stored normalised to `[-1, 1]` (units of `TRUNC`), positive
 //! in front of the surface; unobserved voxels read as `+1`.
 
 mod changes;
+mod colour;
 mod projection;
 mod samples;
 
 #[cfg(test)]
 mod change_tests;
+#[cfg(test)]
+mod colour_tests;
 #[cfg(test)]
 pub(super) mod fixtures;
 #[cfg(test)]
@@ -32,8 +37,9 @@ use brush_render::camera::Camera;
 use brush_render::kernels::camera_model::CameraModel;
 use glam::{Affine3A, IVec3, UVec2, Vec3};
 
-use super::depth::DepthImage;
+use super::depth::{ColourImage, DepthImage};
 use changes::MeshedState;
+use colour::VoxelColours;
 use projection::Projection;
 pub use samples::{BrickSamples, PADDED};
 
@@ -77,6 +83,8 @@ struct Brick {
     weight: Vec<f32>,
     /// Observed status per voxel, with hysteresis (`observed_after`).
     observed: Vec<bool>,
+    /// Linear RGB per voxel, once the brick had a coloured observation.
+    colour: Option<VoxelColours>,
     /// State the brick's mesh was made from, set by `Tsdf::mark_meshed`.
     meshed: Option<MeshedState>,
 }
@@ -87,13 +95,15 @@ impl Brick {
             tsdf: vec![1.0; BRICK_VOXELS],
             weight: vec![0.0; BRICK_VOXELS],
             observed: vec![false; BRICK_VOXELS],
+            colour: None,
             meshed: None,
         }
     }
 
     /// Weighted running average of one observation into voxel `i`
-    /// (Zeng et al.: `(w·t + w_obs·d) / (w + w_obs)`), weight capped.
-    fn fuse(&mut self, i: usize, dist: f32, w_obs: f32) {
+    /// (Zeng et al.: `(w·t + w_obs·d) / (w + w_obs)`), weight capped; its
+    /// colour `rgb`, if finite, is averaged with the same weights.
+    fn fuse(&mut self, i: usize, dist: f32, rgb: Option<[f32; 3]>, w_obs: f32) {
         if w_obs <= 0.0 {
             return;
         }
@@ -102,6 +112,11 @@ impl Brick {
         let t_new = (w_old * t_old + w_obs * dist) / w_new;
         self.tsdf[i] = t_new;
         self.set_weight(i, w_new.min(MAX_WEIGHT));
+        if let Some(rgb) = rgb.filter(|c| c.iter().all(|v| v.is_finite())) {
+            self.colour
+                .get_or_insert_with(VoxelColours::new)
+                .fuse(i, rgb, w_old, w_obs);
+        }
     }
 
     fn set_weight(&mut self, i: usize, w: f32) {
@@ -110,8 +125,15 @@ impl Brick {
     }
 
     /// Fuses every voxel of this brick (first global voxel `origin`) that
-    /// projects into `depth` and lies at most `TRUNC` behind the surface.
-    fn fuse_view(&mut self, origin: IVec3, depth: &DepthImage, proj: &Projection) {
+    /// projects into `depth` and lies at most `TRUNC` behind the surface,
+    /// with the colour of its pixel if `colour` is given.
+    fn fuse_view(
+        &mut self,
+        origin: IVec3,
+        depth: &DepthImage,
+        colour: Option<&ColourImage>,
+        proj: &Projection,
+    ) {
         for z in 0..BRICK {
             for y in 0..BRICK {
                 for x in 0..BRICK {
@@ -130,6 +152,7 @@ impl Brick {
                     self.fuse(
                         voxel_index(local),
                         (sdf / TRUNC).min(1.0),
+                        colour.map(|c| c.rgb[pixel]),
                         observation_weight(sdf),
                     );
                 }
@@ -203,19 +226,30 @@ impl Tsdf {
     }
 
     /// Fuses one depth image (depth along the camera's forward axis, NaN
-    /// where empty) seen from `camera`, a pinhole with the image's size.
-    /// Depth beyond `MAX_DEPTH` is ignored.
-    pub fn integrate(&mut self, depth: &DepthImage, camera: &Camera) {
+    /// where empty) seen from `camera`, a pinhole with the image's size,
+    /// and the colour image of the same view if given. Depth beyond
+    /// `MAX_DEPTH` is ignored. Panics if the images differ in size.
+    pub fn integrate(&mut self, depth: &DepthImage, colour: Option<&ColourImage>, camera: &Camera) {
         debug_assert!(
             matches!(camera.camera_model, CameraModel::Pinhole),
             "integrate projects with a pinhole camera"
         );
+        if let Some(c) = colour {
+            assert!(
+                (c.width, c.height) == (depth.width, depth.height),
+                "colour size {}×{} differs from depth size {}×{}",
+                c.width,
+                c.height,
+                depth.width,
+                depth.height
+            );
+        }
         let proj = Projection::new(camera, UVec2::new(depth.width, depth.height));
         let far = self.allocate_around_surface(depth, &proj, &camera.local_to_world());
         if far == 0.0 {
             return;
         }
-        self.fuse_in_frustum(depth, &proj, far);
+        self.fuse_in_frustum(depth, colour, &proj, far);
     }
 
     /// Allocates the bricks within `TRUNC` of every observed surface point;
@@ -259,14 +293,20 @@ impl Tsdf {
         clippy::iter_over_hash_type,
         reason = "per-brick updates are independent"
     )]
-    fn fuse_in_frustum(&mut self, depth: &DepthImage, proj: &Projection, far: f32) {
+    fn fuse_in_frustum(
+        &mut self,
+        depth: &DepthImage,
+        colour: Option<&ColourImage>,
+        proj: &Projection,
+        far: f32,
+    ) {
         let half = 0.5 * BRICK as f32 * VOXEL;
         let radius = half * 3f32.sqrt();
         for (key, brick) in &mut self.bricks {
             let origin = key.0 * BRICK;
             let centre = origin.as_vec3() * VOXEL + half;
             if proj.sees_sphere(centre, radius, far + TRUNC) {
-                brick.fuse_view(origin, depth, proj);
+                brick.fuse_view(origin, depth, colour, proj);
             }
         }
     }

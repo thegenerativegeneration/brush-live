@@ -11,8 +11,8 @@ pub use cells::{
     CELL_BYTES, CELL_FLAG_NORMAL, Cell, decode_cells, encode_cells, oct_decode, oct_encode,
 };
 pub use mesh::{
-    BRICK_MARGIN, MAX_BRICK_VERTICES, MESH_BRICK_REMOVED, MeshBrick, decode_mesh_bricks,
-    encode_mesh_bricks,
+    BRICK_MARGIN, MAX_BRICK_VERTICES, MESH_BRICK_COLOURS, MESH_BRICK_REMOVED, MeshBrick,
+    decode_mesh_bricks, encode_mesh_bricks,
 };
 
 #[derive(Debug, thiserror::Error)]

@@ -1,7 +1,9 @@
 mod test_scene;
 
 use brush_guide::config::GuideConfig;
-use brush_guide::protocol::{ServerHeader, decode_cells, decode_frame, decode_mesh_bricks};
+use brush_guide::protocol::{
+    MeshBrick, ServerHeader, decode_cells, decode_frame, decode_mesh_bricks,
+};
 use brush_guide::session::GuideSession;
 use glam::Vec3;
 use std::time::Duration;
@@ -102,10 +104,13 @@ async fn mesh_bricks_follow_the_first_score_set() {
         panic!("{header:?}")
     };
     assert_eq!(version, msg.version);
-    assert_eq!(
-        decode_mesh_bricks(payload, num_bricks).unwrap().len(),
-        msg.bricks.len()
-    );
+    let decoded = decode_mesh_bricks(payload, num_bricks).unwrap();
+    assert_eq!(decoded.len(), msg.bricks.len());
+    for brick in &decoded {
+        if let MeshBrick::Mesh(m) = brick {
+            assert_eq!(m.colours.len(), m.positions.len(), "brick {:?}", m.key);
+        }
+    }
 
     session.reset().await;
     assert!(session.meshes().borrow().since(0).is_none());

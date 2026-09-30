@@ -2,7 +2,8 @@
 //! Gaussian is coloured with its camera-space depth in R and a constant 1 in
 //! G on a black background, so R = Σ wᵢzᵢ and G = Σ wᵢ and depth = R / G.
 //! The float render path clamps colours to ±100 only, so depth in metres
-//! passes through unscaled.
+//! passes through unscaled. The splat's own colour is rendered alongside
+//! (`render_colour`) at the same size.
 
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::{Splats, TextureMode, render_splats};
@@ -11,6 +12,8 @@ use burn::Tensor;
 use burn::module::{Param, ParamId};
 use burn::tensor::s;
 use glam::Vec3;
+
+use super::colour::srgb_to_linear;
 
 /// Pixels whose accumulated opacity is below this have no depth.
 const MIN_ALPHA: f32 = 0.5;
@@ -78,6 +81,58 @@ pub async fn render_expected_depth(
     }
 }
 
+/// Colour of the splat per pixel as linear RGB in `[0, 1]`, and
+/// accumulated opacity, row-major.
+pub struct ColourImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<[f32; 3]>,
+    pub alpha: Vec<f32>,
+}
+
+/// Renders the colour of `splats` seen from `camera` with their full
+/// spherical harmonics on a black background, divided by the accumulated
+/// opacity and converted from sRGB to linear. Pixels with `alpha < 0.5`,
+/// which have no depth either, get `rgb = NaN`.
+pub async fn render_colour(splats: &Splats, camera: &Camera, size: glam::UVec2) -> ColourImage {
+    let (img, _) = render_splats(
+        splats.clone(),
+        camera,
+        size,
+        Vec3::ZERO,
+        None,
+        TextureMode::Float,
+    )
+    .await;
+    let rgba = img
+        .into_data_async()
+        .await
+        .expect("colour readback")
+        .try_to_vec::<f32>()
+        .expect("f32 colour");
+
+    let (rgb, alpha) = rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&[r, g, b, alpha]| {
+            let rgb = if alpha >= MIN_ALPHA {
+                [r, g, b].map(|c| srgb_to_linear((c / alpha).clamp(0.0, 1.0)))
+            } else {
+                [f32::NAN; 3]
+            };
+            (rgb, alpha)
+        })
+        .unzip();
+
+    ColourImage {
+        width: size.x,
+        height: size.y,
+        rgb,
+        alpha,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,13 +185,24 @@ mod tests {
         opacity: f32,
         device: &Device,
     ) -> Splats {
+        painted(means, spacing, opacity, [0.5; 3], device)
+    }
+
+    /// Like `splats_with_opacity`, every splat of sRGB colour `srgb`.
+    fn painted(
+        means: &[[f32; 3]],
+        spacing: f32,
+        opacity: f32,
+        srgb: [f32; 3],
+        device: &Device,
+    ) -> Splats {
         let n = means.len();
         let (s_xy, s_z) = (spacing.ln(), 0.002f32.ln());
         Splats::from_raw(
             means.iter().flatten().copied().collect(),
             [1.0, 0.0, 0.0, 0.0].repeat(n),
             [s_xy, s_xy, s_z].repeat(n),
-            vec![0.0; n * 3],
+            srgb.map(|c| (c - 0.5) / SH_C0).repeat(n),
             vec![inverse_sigmoid(opacity); n],
             SplatRenderMode::Default,
             device,
@@ -145,7 +211,10 @@ mod tests {
 
     /// Pixels in the central 50 % of the image (both axes).
     fn central(img: &DepthImage) -> impl Iterator<Item = usize> + '_ {
-        let (w, h) = (img.width, img.height);
+        central_of(img.width, img.height)
+    }
+
+    fn central_of(w: u32, h: u32) -> impl Iterator<Item = usize> {
         (h / 4..3 * h / 4).flat_map(move |y| (w / 4..3 * w / 4).map(move |x| (y * w + x) as usize))
     }
 
@@ -271,5 +340,66 @@ mod tests {
         assert!((cam.rotation * Vec3::Z - Vec3::X).length() < 1e-6);
         let img = render_expected_depth(&s, &cam, SIZE).await;
         assert_depth(&img, 2.0);
+    }
+
+    /// sRGB (0.8, 0.5, 0.2) renders as its linear value, at a translucent
+    /// layer too.
+    #[tokio::test]
+    async fn colour_is_linear_and_normalised_by_opacity() {
+        let device = device().await;
+        let srgb = [0.8, 0.5, 0.2];
+        let linear = [0.603_827, 0.214_041, 0.033_105];
+        for opacity in [0.99, 0.4] {
+            let means = layer(2.0, -1.6, 1.6, 1.6, 0.1);
+            let s = painted(&means, 0.05, opacity, srgb, &device);
+            let img = render_colour(&s, &camera(), SIZE).await;
+            assert_eq!(img.rgb.len(), (SIZE.x * SIZE.y) as usize);
+            let mut checked = 0;
+            for i in central_of(img.width, img.height) {
+                let (rgb, a) = (img.rgb[i], img.alpha[i]);
+                if a < 0.5 {
+                    assert!(rgb.iter().all(|c| c.is_nan()), "pixel {i}: {rgb:?}");
+                    continue;
+                }
+                for (c, want) in rgb.iter().zip(linear) {
+                    assert!((c - want).abs() < 0.01, "pixel {i}: {rgb:?}, alpha {a}");
+                }
+                checked += 1;
+            }
+            assert!(checked > 0, "opacity {opacity}");
+        }
+    }
+
+    /// A red splat plane, rendered and fused with its colour, meshes to
+    /// vertices within 5/255 of red.
+    #[tokio::test]
+    async fn red_plane_meshes_red() {
+        use crate::geometry::mesh::mesh_brick;
+        use crate::geometry::tsdf::Tsdf;
+
+        let device = device().await;
+        let s = painted(
+            &layer(2.5, -2.0, 2.0, 2.0, 0.05),
+            0.05,
+            0.99,
+            [1.0, 0.0, 0.0],
+            &device,
+        );
+        let cam = camera();
+        let depth = render_expected_depth(&s, &cam, SIZE).await;
+        let colour = render_colour(&s, &cam, SIZE).await;
+        let mut tsdf = Tsdf::new();
+        tsdf.integrate(&depth, Some(&colour), &cam);
+        let meshes: Vec<_> = tsdf
+            .take_changed()
+            .into_iter()
+            .filter_map(|k| mesh_brick(&tsdf, k))
+            .collect();
+        let colours: Vec<[u8; 3]> = meshes.iter().flat_map(|m| m.colours.clone()).collect();
+        let vertices: usize = meshes.iter().map(|m| m.positions.len()).sum();
+        assert!(vertices > 100 && colours.len() == vertices);
+        for c in colours {
+            assert!(c[0] >= 250 && c[1] <= 5 && c[2] <= 5, "vertex colour {c:?}");
+        }
     }
 }

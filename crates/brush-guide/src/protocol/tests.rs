@@ -172,8 +172,11 @@ fn score_set_header_carries_cell_bytes() {
     assert_eq!(h["cell_bytes"], 19);
 }
 
-/// A 1 m right triangle in brick (1, −2, 0), facing +z, and the removal
-/// of brick (−1, 0, 3): the bricks of the golden fixture.
+/// Vertex colours of the fixture triangle.
+pub(super) const FIXTURE_COLOURS: [[u8; 3]; 3] = [[230, 159, 0], [213, 94, 0], [86, 180, 233]];
+
+/// A 1 m right triangle in brick (1, −2, 0), facing +z, coloured, and the
+/// removal of brick (−1, 0, 3): the bricks of the golden fixture.
 pub(super) fn fixture_bricks() -> [MeshBrick; 2] {
     let key = BrickKey(glam::IVec3::new(1, -2, 0));
     let o = glam::Vec3::new(1.0, -2.0, 0.0);
@@ -184,6 +187,7 @@ pub(super) fn fixture_bricks() -> [MeshBrick; 2] {
                 .map(|p| p.to_array())
                 .to_vec(),
             normals: vec![[0.0, 0.0, 1.0]; 3],
+            colours: FIXTURE_COLOURS.to_vec(),
             indices: vec![0, 1, 2],
         }),
         MeshBrick::Removed(BrickKey(glam::IVec3::new(-1, 0, 3))),

@@ -1,5 +1,6 @@
 //! `mesh_bricks` payload: per brick its key, quantised vertices,
-//! octahedral normals and u16 triangle indices.
+//! octahedral normals, optional 8-bit sRGB vertex colours and u16 triangle
+//! indices.
 
 use super::ProtocolError;
 use super::cells::{oct_decode, oct_encode};
@@ -24,6 +25,8 @@ impl MeshBrick {
 }
 
 pub const MESH_BRICK_REMOVED: u8 = 1;
+/// Brick flag: `u8×3` sRGB per vertex follow the normals.
+pub const MESH_BRICK_COLOURS: u8 = 2;
 
 /// Bytes before a brick's vertex data: key, flags, vertex and index counts.
 pub(super) const MESH_BRICK_HEADER: usize = 21;
@@ -53,7 +56,8 @@ fn dequantise(q: u16) -> f32 {
 pub const MAX_BRICK_VERTICES: usize = u16::MAX as usize + 1;
 
 /// Encodes bricks as the `mesh_bricks` payload. Panics if a mesh has more
-/// than `MAX_BRICK_VERTICES` (65 536) vertices.
+/// than `MAX_BRICK_VERTICES` (65 536) vertices, or colours but not one per
+/// vertex.
 pub fn encode_mesh_bricks<'a>(bricks: impl IntoIterator<Item = &'a MeshBrick>) -> Vec<u8> {
     let mut out = Vec::new();
     for brick in bricks {
@@ -71,7 +75,15 @@ pub fn encode_mesh_bricks<'a>(bricks: impl IntoIterator<Item = &'a MeshBrick>) -
             mesh.key,
             mesh.positions.len()
         );
-        out.push(0);
+        let coloured = !mesh.colours.is_empty();
+        assert!(
+            !coloured || mesh.colours.len() == mesh.positions.len(),
+            "brick {:?} has {} colours for {} vertices",
+            mesh.key,
+            mesh.colours.len(),
+            mesh.positions.len()
+        );
+        out.push(if coloured { MESH_BRICK_COLOURS } else { 0 });
         out.extend_from_slice(&(mesh.positions.len() as u32).to_le_bytes());
         out.extend_from_slice(&(mesh.indices.len() as u32).to_le_bytes());
         let origin = (mesh.key.0 * BRICK).as_vec3() * VOXEL;
@@ -84,6 +96,7 @@ pub fn encode_mesh_bricks<'a>(bricks: impl IntoIterator<Item = &'a MeshBrick>) -
         for &n in &mesh.normals {
             out.extend_from_slice(&oct_encode(glam::Vec3::from(n)));
         }
+        out.extend_from_slice(mesh.colours.as_flattened());
         for &i in &mesh.indices {
             out.extend_from_slice(&(i as u16).to_le_bytes());
         }
@@ -135,15 +148,18 @@ fn decode_brick(rest: &mut &[u8]) -> Result<MeshBrick, ProtocolError> {
     if !num_indices.is_multiple_of(3) {
         return Err(ProtocolError::PartialTriangle(num_indices));
     }
-    decode_mesh(rest, key, num_vertices, num_indices).map(MeshBrick::Mesh)
+    let coloured = flags & MESH_BRICK_COLOURS != 0;
+    decode_mesh(rest, key, num_vertices, num_indices, coloured).map(MeshBrick::Mesh)
 }
 
-/// Decodes the vertex and index data of brick `key` from `rest`.
+/// Decodes the vertex and index data of brick `key` from `rest`, with
+/// vertex colours if `coloured`.
 fn decode_mesh(
     rest: &mut &[u8],
     key: BrickKey,
     num_vertices: usize,
     num_indices: usize,
+    coloured: bool,
 ) -> Result<BrickMesh, ProtocolError> {
     let origin = (key.0 * BRICK).as_vec3() * VOXEL;
     let positions = take(
@@ -166,6 +182,11 @@ fn decode_mesh(
         .iter()
         .map(|&c| oct_decode(c).to_array())
         .collect();
+    let colours = if coloured {
+        take(rest, num_vertices * 3)?.as_chunks::<3>().0.to_vec()
+    } else {
+        Vec::new()
+    };
     let indices: Vec<u32> = take(
         rest,
         num_indices
@@ -187,6 +208,7 @@ fn decode_mesh(
         key,
         positions,
         normals,
+        colours,
         indices,
     })
 }

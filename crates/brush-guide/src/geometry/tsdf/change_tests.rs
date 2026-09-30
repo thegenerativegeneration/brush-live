@@ -19,14 +19,14 @@ fn take_changed_follows_mean_change() {
     // Identical depth on a converged volume changes nothing.
     let same = depth_image(&cam, plane_z(2.5));
     for _ in 0..5 {
-        tsdf.integrate(&same, &cam);
+        tsdf.integrate(&same, None, &cam);
     }
     assert!(tsdf.take_changed().is_empty());
 
     // Weight 6 now: one view of a plane 1 cm further moves the
     // near-surface voxels by 1/7 cm.
     let shifted = depth_image(&cam, plane_z(2.51));
-    tsdf.integrate(&shifted, &cam);
+    tsdf.integrate(&shifted, None, &cam);
     assert!(
         tsdf.take_changed().is_empty(),
         "sub-threshold change reported"
@@ -34,7 +34,7 @@ fn take_changed_follows_mean_change() {
 
     // Converging on the shifted plane moves them by nearly 1 cm.
     for _ in 0..30 {
-        tsdf.integrate(&shifted, &cam);
+        tsdf.integrate(&shifted, None, &cam);
     }
     assert!(
         tsdf.take_changed().contains(&brick),
@@ -43,7 +43,7 @@ fn take_changed_follows_mean_change() {
 
     // A 20 cm jump moves every band voxel by centimetres.
     for _ in 0..3 {
-        tsdf.integrate(&depth_image(&cam, plane_z(2.7)), &cam);
+        tsdf.integrate(&depth_image(&cam, plane_z(2.7)), None, &cam);
     }
     assert!(tsdf.take_changed().contains(&brick));
 }
@@ -156,7 +156,7 @@ fn static_plane_drains_after_the_last_keyframe() {
         for _ in 0..4 {
             let cam = &cams[cursor % cams.len()];
             cursor += 1;
-            tsdf.integrate(&depth_image(cam, plane_z(2.0)), cam);
+            tsdf.integrate(&depth_image(cam, plane_z(2.0)), None, cam);
         }
     }
     assert!(

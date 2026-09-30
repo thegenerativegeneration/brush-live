@@ -1,5 +1,5 @@
 use super::mesh::MESH_BRICK_HEADER;
-use super::tests::fixture_bricks;
+use super::tests::{FIXTURE_COLOURS, fixture_bricks};
 use super::*;
 use crate::geometry::mesh::BrickMesh;
 use crate::geometry::tsdf::BrickKey;
@@ -26,6 +26,7 @@ fn mesh_bricks_round_trip_with_removal() {
             key,
             positions: positions.to_vec(),
             normals: normals.map(|n| n.to_array()).to_vec(),
+            colours: Vec::new(),
             indices: vec![0, 1, 2, 2, 1, 3],
         }),
         MeshBrick::Removed(BrickKey(glam::IVec3::new(7, -8, 9))),
@@ -47,7 +48,31 @@ fn mesh_bricks_round_trip_with_removal() {
     for (n, m) in normals.iter().zip(&mesh.normals) {
         assert!(n.dot(glam::Vec3::from(*m)) > 0.999, "{n} vs {m:?}");
     }
+    assert!(mesh.colours.is_empty());
     assert!(matches!(back[1], MeshBrick::Removed(k) if k.0 == glam::IVec3::new(7, -8, 9)));
+}
+
+#[test]
+fn mesh_bricks_round_trip_with_colours() {
+    let bricks = fixture_bricks();
+    let bytes = encode_mesh_bricks(&bricks);
+    assert_eq!(bytes.len(), 2 * MESH_BRICK_HEADER + 3 * (6 + 2 + 3) + 3 * 2);
+    let back = decode_mesh_bricks(&bytes, 2).unwrap();
+    let MeshBrick::Mesh(mesh) = &back[0] else {
+        panic!("{:?}", back[0])
+    };
+    assert_eq!(mesh.colours, FIXTURE_COLOURS.to_vec());
+    assert_eq!(mesh.indices, vec![0, 1, 2]);
+}
+
+#[test]
+#[should_panic(expected = "colours")]
+fn mesh_bricks_reject_a_colour_count_other_than_the_vertex_count() {
+    let MeshBrick::Mesh(mut mesh) = fixture_bricks()[0].clone() else {
+        unreachable!()
+    };
+    mesh.colours.pop();
+    encode_mesh_bricks(&[MeshBrick::Mesh(mesh)]);
 }
 
 #[test]
@@ -57,7 +82,7 @@ fn mesh_bricks_byte_layout() {
     let word = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
     let half = |i: usize| u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap());
     assert_eq!((int(0), int(4), int(8)), (1, -2, 0));
-    assert_eq!(bytes[12], 0, "flags");
+    assert_eq!(bytes[12], MESH_BRICK_COLOURS, "flags");
     assert_eq!((word(13), word(17)), (3, 3));
     // Vertex (1, 0, 0) in the brick: x at the far side of the box, y and z at its origin.
     let v1 = 21 + 6;
@@ -68,7 +93,9 @@ fn mesh_bricks_byte_layout() {
     );
     let normals = 21 + 18;
     assert_eq!(&bytes[normals..normals + 2], &oct_encode(glam::Vec3::Z));
-    let indices = normals + 6;
+    let colours = normals + 6;
+    assert_eq!(&bytes[colours..colours + 9], FIXTURE_COLOURS.as_flattened());
+    let indices = colours + 9;
     assert_eq!(
         (half(indices), half(indices + 2), half(indices + 4)),
         (0, 1, 2)
@@ -152,6 +179,7 @@ fn mesh_with_vertices(n: usize) -> [MeshBrick; 1] {
         key: BrickKey(glam::IVec3::ZERO),
         positions: vec![[0.5; 3]; n],
         normals: vec![[0.0, 0.0, 1.0]; n],
+        colours: Vec::new(),
         indices: vec![0, 1, (n - 1) as u32],
     })]
 }

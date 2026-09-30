@@ -5,6 +5,7 @@ fn mesh(x: i32) -> MeshBrick {
         key: BrickKey(glam::IVec3::new(x, 0, 0)),
         positions: vec![[x as f32, 0.0, 0.0]; 3],
         normals: vec![[0.0, 0.0, 1.0]; 3],
+        colours: Vec::new(),
         indices: vec![0, 1, 2],
     })
 }

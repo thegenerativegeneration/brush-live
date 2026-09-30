@@ -58,16 +58,33 @@ impl ScoreDump {
     }
 }
 
+/// Writes `mesh` as an ASCII PLY, with `red green blue` vertex properties
+/// if it has colours.
 fn write_ply(path: &Path, mesh: &BrickMesh) -> std::io::Result<()> {
     let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let coloured = !mesh.colours.is_empty();
     writeln!(
         out,
-        "ply\nformat ascii 1.0\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz\nelement face {}\nproperty list uchar uint vertex_indices\nend_header",
+        "ply\nformat ascii 1.0\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz",
         mesh.positions.len(),
+    )?;
+    if coloured {
+        writeln!(
+            out,
+            "property uchar red\nproperty uchar green\nproperty uchar blue"
+        )?;
+    }
+    writeln!(
+        out,
+        "element face {}\nproperty list uchar uint vertex_indices\nend_header",
         mesh.indices.len() / 3
     )?;
-    for (p, n) in mesh.positions.iter().zip(&mesh.normals) {
-        writeln!(out, "{} {} {} {} {} {}", p[0], p[1], p[2], n[0], n[1], n[2])?;
+    for (i, (p, n)) in mesh.positions.iter().zip(&mesh.normals).enumerate() {
+        write!(out, "{} {} {} {} {} {}", p[0], p[1], p[2], n[0], n[1], n[2])?;
+        if let Some([r, g, b]) = mesh.colours.get(i) {
+            write!(out, " {r} {g} {b}")?;
+        }
+        writeln!(out)?;
     }
     for t in mesh.indices.as_chunks::<3>().0 {
         writeln!(out, "3 {} {} {}", t[0], t[1], t[2])?;

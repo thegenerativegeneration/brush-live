@@ -6,7 +6,7 @@ use brush_render::kernels::camera_model::CameraModel;
 use glam::{Mat3, Quat, UVec2, Vec2, Vec3, vec3};
 
 use super::Tsdf;
-use crate::geometry::depth::DepthImage;
+use crate::geometry::depth::{ColourImage, DepthImage};
 
 const SIZE: UVec2 = UVec2::new(128, 128);
 
@@ -67,6 +67,42 @@ pub(super) fn depth_image_sized(
     }
 }
 
+/// Colour image of `camera` at the size of `depth_image`: `paint` (linear
+/// RGB) at the world point where the pixel centre's ray first hits `hit`,
+/// NaN where it hits nothing.
+pub(crate) fn colour_image(
+    camera: &Camera,
+    hit: impl Fn(Vec3, Vec3) -> Option<f32>,
+    paint: impl Fn(Vec3) -> [f32; 3],
+) -> ColourImage {
+    let (f, c) = (camera.focal(SIZE), camera.center(SIZE));
+    let mut rgb = Vec::new();
+    for y in 0..SIZE.y {
+        for x in 0..SIZE.x {
+            let local = vec3(
+                (x as f32 + 0.5 - c.x) / f.x,
+                (y as f32 + 0.5 - c.y) / f.y,
+                1.0,
+            );
+            let dir = camera.rotation * local;
+            rgb.push(match hit(camera.position, dir) {
+                Some(t) => paint(camera.position + t * dir),
+                None => [f32::NAN; 3],
+            });
+        }
+    }
+    let alpha = rgb
+        .iter()
+        .map(|c| if c[0].is_nan() { 0.0 } else { 1.0 })
+        .collect();
+    ColourImage {
+        width: SIZE.x,
+        height: SIZE.y,
+        rgb,
+        alpha,
+    }
+}
+
 pub(crate) fn plane_z(z: f32) -> impl Fn(Vec3, Vec3) -> Option<f32> {
     move |o, d| {
         let t = (z - o.z) / d.z;
@@ -111,7 +147,7 @@ pub(crate) fn integrate(
     hit: &impl Fn(Vec3, Vec3) -> Option<f32>,
 ) {
     for cam in cameras {
-        tsdf.integrate(&depth_image(cam, hit), cam);
+        tsdf.integrate(&depth_image(cam, hit), None, cam);
     }
 }
 
@@ -155,6 +191,6 @@ pub(crate) const ROD_CENTRES: [Vec3; 2] = [Vec3::new(0.025, 0.0, 2.025), Vec3::n
 pub(super) fn plane_setup() -> (Tsdf, Camera) {
     let cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 2.5));
     let mut tsdf = Tsdf::new();
-    tsdf.integrate(&depth_image(&cam, plane_z(2.5)), &cam);
+    tsdf.integrate(&depth_image(&cam, plane_z(2.5)), None, &cam);
     (tsdf, cam)
 }

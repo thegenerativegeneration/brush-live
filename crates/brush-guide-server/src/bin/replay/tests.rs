@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use super::dataset::{DepthMode, Frame, load_depth};
 use super::receive::handle_mesh_bricks;
+use super::viz::mesh_3d;
 
 struct TempDir(PathBuf);
 
@@ -55,6 +56,7 @@ fn mesh_dump_writes_ply_and_round_line() {
             key,
             positions: vec![[1.0, -2.0, 0.0], [2.0, -2.0, 0.0], [1.0, -1.0, 0.0]],
             normals: vec![[0.0, 0.0, 1.0]; 3],
+            colours: vec![[230, 159, 0], [213, 94, 0], [86, 180, 233]],
             indices: vec![0, 1, 2],
         }),
         MeshBrick::Removed(BrickKey(glam::IVec3::new(-1, 0, 3))),
@@ -70,10 +72,29 @@ fn mesh_dump_writes_ply_and_round_line() {
         ply.contains("element vertex 3\n") && ply.ends_with("3 0 1 2\n"),
         "{ply}"
     );
+    assert!(
+        ply.contains("property uchar blue\nelement face 1\n")
+            && ply.contains("\n1 -2 0 0 0 1 230 159 0\n"),
+        "{ply}"
+    );
     let rounds = std::fs::read_to_string(dir.0.join("rounds.jsonl")).unwrap();
     let round: serde_json::Value = serde_json::from_str(rounds.trim()).unwrap();
     assert_eq!(round["version"], 7);
     assert_eq!(round["bricks"][1]["removed"], true);
+}
+
+#[test]
+fn rerun_mesh_carries_vertex_colours_when_the_brick_has_them() {
+    let mut mesh = BrickMesh {
+        key: BrickKey(glam::IVec3::ZERO),
+        positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        normals: vec![[0.0, 0.0, 1.0]; 3],
+        colours: vec![[255, 0, 0]; 3],
+        indices: vec![0, 1, 2],
+    };
+    assert!(mesh_3d(&mesh).vertex_colors.is_some());
+    mesh.colours.clear();
+    assert!(mesh_3d(&mesh).vertex_colors.is_none());
 }
 
 #[test]
