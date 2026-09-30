@@ -39,10 +39,14 @@ pub struct PassOutput {
 }
 
 impl PassOutput {
-    /// Scales the per-Gaussian view counts, e.g. to extrapolate a pass over a
-    /// subset of views to the whole capture. `dir_sum` scales along with
-    /// `weight`, so the angular spread (their ratio) is unchanged.
+    /// Scales the per-view sums (view counts, directions and Fisher), e.g. to
+    /// extrapolate a pass over a subset of views to the whole capture.
+    /// `dir_sum` scales along with `weight`, so the angular spread (their
+    /// ratio) is unchanged.
     pub fn scale_observations(&mut self, factor: f32) {
+        for h in &mut self.fisher {
+            *h = h.map(|v| v * factor);
+        }
         for w in &mut self.weight {
             *w *= factor;
         }
@@ -129,5 +133,25 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
         dir_sum: dir_v.as_chunks::<3>().0.to_vec(),
         weight: read_vec(weight).await,
         max_px_per_m: read_vec(max_ppm).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scale_observations_scales_counts_directions_and_fisher() {
+        let mut out = PassOutput {
+            fisher: vec![[2.0; 36]],
+            dir_sum: vec![[1.0, 0.0, -1.0]],
+            weight: vec![3.0],
+            max_px_per_m: vec![500.0],
+        };
+        out.scale_observations(1.5);
+        assert_eq!(out.fisher[0], [3.0; 36]);
+        assert_eq!(out.dir_sum[0], [1.5, 0.0, -1.5]);
+        assert_eq!(out.weight[0], 4.5);
+        assert_eq!(out.max_px_per_m[0], 500.0);
     }
 }

@@ -8,15 +8,15 @@ use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
 use crate::protocol::{Cell, KeyframeHeader, MeshBrick};
 use crate::schedule::{ScoreScheduler, select_score_views};
-use crate::scores::metrics::{gaussian_metrics, uncertainty_cap};
+use crate::scores::metrics::gaussian_metrics;
 use crate::scores::pass::{PassView, score_pass};
-use crate::scores::voxel::{GaussianScore, ViewCone, VoxelAggregator};
+use crate::scores::voxel::{GaussianScore, RawVoxel, ViewCone, VoxelAggregator};
 use brush_dataset::scene::SceneView;
 use brush_render::gaussian_splats::Splats;
 use burn::module::Module;
 use burn::tensor::{Device, Tensor};
 use glam::{Quat, UVec2, Vec3};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 use web_time::Instant;
@@ -94,7 +94,7 @@ impl Worker {
         let voxels = VoxelAggregator::new(
             config.voxel_size,
             config.min_cell_opacity,
-            uncertainty_cap(config.fisher_ridge()),
+            config.uncertainty_scale(),
         );
         let scheduler = ScoreScheduler::new(config.score_budget, config.min_score_interval_s);
         let rate_window = (clock.elapsed().as_secs_f64(), live.iter());
@@ -197,6 +197,12 @@ impl Worker {
     async fn score_round(&mut self, now: f64) {
         let splats = self.live.splats().expect("views imply splats").clone();
         let cells = self.score_cells(&splats).await;
+        if self.config.dump_raw_uncertainty {
+            let path = self.session_dir.join("raw_uncertainty.jsonl");
+            if let Err(e) = append_raw_round(&path, self.version + 1, self.voxels.raw_round()) {
+                log::warn!("raw uncertainty dump to {}: {e}", path.display());
+            }
+        }
         let scored = self.clock.elapsed().as_secs_f64();
         self.last_score_ms = ((scored - now) * 1000.0) as u32;
         self.version += 1;
@@ -239,12 +245,12 @@ impl Worker {
         })
         .collect();
         let mut out = score_pass(splats, &views, &config.pass).await;
-        // Observation counts are over the sampled views only; rescale so
-        // `CoverageParams::n_target` keeps meaning views of the whole capture.
+        // Observation counts and Fisher sum over the sampled views only;
+        // rescale so `CoverageParams::n_target` keeps meaning views of the
+        // whole capture and σ reflects every view.
         out.scale_observations(num_views as f32 / views.len() as f32);
-        let (coverage, uncertainty) =
-            gaussian_metrics(&out, &config.coverage, config.fisher_ridge());
-        let gaussians = gaussian_scores(splats, &coverage, &uncertainty).await;
+        let (coverage, fisher_pos) = gaussian_metrics(&out, &config.coverage);
+        let gaussians = gaussian_scores(splats, &coverage, &fisher_pos).await;
         let cones = view_cones(self.live.views());
         self.voxels
             .aggregate(&gaussians, &cones, self.clock.elapsed().as_secs_f64())
@@ -291,6 +297,23 @@ fn publish_counts(status_tx: &watch::Sender<StatusMsg>, live: &LiveModel) {
     });
 }
 
+/// One JSON line: the round's version and each voxel as
+/// `[kx, ky, kz, coverage, sigma]` (voxel index, mean coverage, positional
+/// σ in metres, `null` when infinite).
+fn append_raw_round(path: &Path, version: u64, raw: &[RawVoxel]) -> std::io::Result<()> {
+    use std::io::Write;
+    let voxels: Vec<(i32, i32, i32, f32, f32)> = raw
+        .iter()
+        .map(|r| (r.key.x, r.key.y, r.key.z, r.coverage, r.sigma))
+        .collect();
+    let line = serde_json::json!({ "version": version, "voxels": voxels });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{line}")
+}
+
 async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
     t.into_data_async()
         .await
@@ -303,7 +326,7 @@ async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
 async fn gaussian_scores(
     splats: &Splats,
     coverage: &[f32],
-    uncertainty: &[f32],
+    fisher_pos: &[[f32; 9]],
 ) -> Vec<GaussianScore> {
     let means = read_f32(splats.means()).await;
     let opac = read_f32(splats.opacities()).await;
@@ -314,7 +337,7 @@ async fn gaussian_scores(
             pos: Vec3::new(means[i * 3], means[i * 3 + 1], means[i * 3 + 2]),
             opacity: opac[i],
             coverage: coverage[i],
-            uncertainty: uncertainty[i],
+            fisher_pos: fisher_pos[i],
             axis: shortest_axis(&rots[i * 4..i * 4 + 4], &scales[i * 3..i * 3 + 3]),
             flatness: flatness(&scales[i * 3..i * 3 + 3]),
         })

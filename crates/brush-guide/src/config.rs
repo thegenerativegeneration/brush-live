@@ -1,6 +1,7 @@
 use crate::scores::{
     metrics::{CoverageParams, FisherRidge},
     pass::PassConfig,
+    voxel::UncertaintyScale,
 };
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -23,10 +24,20 @@ pub struct GuideConfig {
     pub seed_stride_px: u32,
     pub seed_alpha_threshold: f32,
     pub init_random_count: usize,
-    /// Absolute ridge on the Fisher before its log-determinant.
+    /// Absolute ridge on a voxel's summed position Fisher before inversion.
     pub fisher_lambda: f32,
-    /// Ridge relative to the Fisher's mean eigenvalue (`tr(H)/6`).
+    /// Ridge relative to that Fisher's mean eigenvalue (`tr(H)/3`).
     pub fisher_lambda_rel: f32,
+    /// Pixel noise on [0, 1] RGB that scales a voxel's inverse position
+    /// Fisher to a positional σ in metres.
+    pub sigma_pix: f32,
+    /// Voxel positional σ (metres) sent as uncertainty byte 0.
+    pub sigma_good: f32,
+    /// Voxel positional σ (metres) sent as uncertainty byte 255.
+    pub sigma_bad: f32,
+    /// Appends each round's per-voxel positional σ and coverage to
+    /// `raw_uncertainty.jsonl` in the session directory, for calibration.
+    pub dump_raw_uncertainty: bool,
     pub pass: PassConfig,
     pub coverage: CoverageParams,
     pub seed: u64,
@@ -54,6 +65,10 @@ impl Default for GuideConfig {
             init_random_count: 5000,
             fisher_lambda: 1e-6,
             fisher_lambda_rel: 1e-3,
+            sigma_pix: 0.05,
+            sigma_good: 0.01,
+            sigma_bad: 0.05,
+            dump_raw_uncertainty: false,
             pass: PassConfig::default(),
             coverage: CoverageParams::default(),
             seed: 42,
@@ -67,6 +82,15 @@ impl GuideConfig {
         FisherRidge {
             abs: self.fisher_lambda,
             rel: self.fisher_lambda_rel,
+        }
+    }
+
+    pub fn uncertainty_scale(&self) -> UncertaintyScale {
+        UncertaintyScale {
+            ridge: self.fisher_ridge(),
+            sigma_pix: self.sigma_pix,
+            sigma_good: self.sigma_good,
+            sigma_bad: self.sigma_bad,
         }
     }
 }
