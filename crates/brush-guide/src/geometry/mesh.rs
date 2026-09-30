@@ -128,7 +128,7 @@ mod tests {
     use glam::{IVec3, vec3};
 
     use super::super::tsdf::TRUNC;
-    use super::super::tsdf::tests::{
+    use super::super::tsdf::fixtures::{
         ROD_CENTRES, depth_image, look_at, plane_z, rod_tsdf, thin_sheet_tsdf,
     };
     use super::*;
