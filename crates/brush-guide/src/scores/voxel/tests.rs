@@ -109,6 +109,92 @@ fn scaling_every_sigma_leaves_the_bytes_unchanged() {
     assert_eq!(bytes(1.0), bytes(0.02));
 }
 
+/// Byte of the voxel at unit `x` in `cells`.
+fn byte_at(cells: &[Cell], x: usize) -> u8 {
+    cells
+        .iter()
+        .find(|c| c.center[0].floor() as usize == x)
+        .unwrap()
+        .uncertainty
+}
+
+#[test]
+fn one_voxel_round_maps_to_zero() {
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let cells = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.3)], &[], 0.0);
+    assert_eq!(cells[0].uncertainty, 0);
+}
+
+#[test]
+fn round_of_only_infinite_sigma_maps_to_255() {
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let none = |x: f32| g([x, 0.5, 0.5], 1.0, 0.0, f32::INFINITY);
+    let cells = agg.aggregate(&[none(0.5), none(1.5)], &[], 0.0);
+    assert!(cells.iter().all(|c| c.uncertainty == 255));
+}
+
+#[test]
+fn infinite_sigma_does_not_shift_the_percentiles() {
+    let mut plain = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let mut mixed = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let finite: Vec<_> = (0..20)
+        .map(|i| g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, 0.01 * 1.2f32.powi(i)))
+        .collect();
+    let mut with_inf = finite.clone();
+    with_inf.extend((20..30).map(|i| g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, f32::INFINITY)));
+    let a = plain.aggregate(&finite, &[], 0.0);
+    let b = mixed.aggregate(&with_inf, &[], 0.0);
+    for x in 0..20 {
+        assert_eq!(byte_at(&a, x), byte_at(&b, x), "voxel {x}");
+    }
+    assert!((20..30).all(|x| byte_at(&b, x) == 255));
+}
+
+#[test]
+fn uninformed_voxel_is_infinite_under_the_production_ridge() {
+    let mut agg = VoxelAggregator::new(
+        1.0,
+        0.0,
+        crate::config::GuideConfig::default().uncertainty_scale(),
+    );
+    agg.record_raw(true);
+    let blank = |x: f32| GaussianScore {
+        fisher_pos: [0.0; 9],
+        ..g([x, 0.5, 0.5], 1.0, 0.0, 1.0)
+    };
+    let nan = GaussianScore {
+        fisher_pos: [f32::NAN; 9],
+        ..g([1.5, 0.5, 0.5], 1.0, 0.0, 1.0)
+    };
+    let mut gs = vec![blank(0.5), nan];
+    gs.extend((2..12).map(|i| g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, 0.01 * 1.3f32.powi(i))));
+    let cells = agg.aggregate(&gs, &[], 0.0);
+    let raw = |x: i32| agg.raw_round().iter().find(|r| r.key.x == x).unwrap().sigma;
+    assert_eq!(raw(0), f32::INFINITY, "all-zero information");
+    assert_eq!(raw(1), f32::INFINITY, "only non-finite blocks");
+    assert_eq!(byte_at(&cells, 0), 255);
+    assert_eq!(byte_at(&cells, 1), 255);
+    assert_eq!(byte_at(&cells, 2), 0, "lowest finite σ is the round's p5");
+    assert_eq!(
+        byte_at(&cells, 11),
+        255,
+        "highest finite σ is the round's p95"
+    );
+}
+
+#[test]
+fn degenerate_range_keeps_voxels_above_it_visible() {
+    // 19 equal voxels put p5 and p95 on the same value; the 20th is higher.
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let mut gs: Vec<_> = (0..19)
+        .map(|i| g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, 0.1))
+        .collect();
+    gs.push(g([19.5, 0.5, 0.5], 1.0, 0.0, 0.5));
+    let cells = agg.aggregate(&gs, &[], 0.0);
+    assert!((0..19).all(|x| byte_at(&cells, x) == 0));
+    assert_eq!(byte_at(&cells, 19), 255);
+}
+
 #[test]
 fn uniform_round_maps_to_zero() {
     let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
@@ -135,6 +221,7 @@ fn splitting_a_gaussian_keeps_the_voxel_sigma() {
     };
     let sigma = |gs: &[GaussianScore]| {
         let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+        agg.record_raw(true);
         agg.aggregate(gs, &[], 0.0);
         agg.raw_round()[0].sigma
     };
@@ -155,6 +242,7 @@ fn more_gaussians_observing_a_voxel_lower_its_sigma() {
     let sigma = |n: usize| {
         let gs: Vec<_> = (0..n).map(|_| g([0.5; 3], 1.0, 0.0, 0.2)).collect();
         let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+        agg.record_raw(true);
         agg.aggregate(&gs, &[], 0.0);
         agg.raw_round()[0].sigma
     };
@@ -198,6 +286,7 @@ fn reset_clears_uncertainty_history() {
 #[test]
 fn raw_round_records_sigma_and_coverage_per_voxel() {
     let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    agg.record_raw(true);
     agg.aggregate(
         &[
             g([0.5; 3], 1.0, 1.0, 0.1),
@@ -251,6 +340,7 @@ fn voxel_without_information_keeps_coverage_and_is_maximally_uncertain() {
 #[test]
 fn nan_scores_count_as_uncovered_and_uninformative() {
     let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    agg.record_raw(true);
     let nan = GaussianScore {
         fisher_pos: [f32::NAN; 9],
         ..g([0.5; 3], 1.0, f32::NAN, 1.0)
@@ -301,145 +391,4 @@ fn non_finite_position_or_opacity_is_skipped() {
     assert_eq!(cells[0].coverage, 255);
 }
 
-#[test]
-fn flat_patch_gets_normal_facing_the_cameras() {
-    // Patch at z = 0.5 inside voxel [0,1)^3; Gaussian axes point ±z (unsigned).
-    let gs: Vec<_> = (0..20)
-        .map(|i| {
-            let x = 0.1 + 0.04 * i as f32;
-            ga(
-                [x, 0.9 - 0.04 * i as f32, 0.5],
-                0.8,
-                if i % 2 == 0 {
-                    [0.0, 0.0, 1.0]
-                } else {
-                    [0.0, 0.0, -1.0]
-                },
-            )
-        })
-        .collect();
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    let above = agg.aggregate(&gs, &[cam([0.5, 0.5, 3.0], [0.0, 0.0, -1.0])], 0.0);
-    assert!(Vec3::from(above[0].normal.unwrap()).dot(Vec3::Z) > 0.99);
-    let below = agg.aggregate(&gs, &[cam([0.5, 0.5, -3.0], [0.0, 0.0, 1.0])], 0.0);
-    assert!(Vec3::from(below[0].normal.unwrap()).dot(Vec3::NEG_Z) > 0.99);
-}
-
-#[test]
-fn crease_voxel_has_no_normal() {
-    let gs: Vec<_> = (0..10)
-        .map(|i| {
-            ga(
-                [0.5, 0.5, 0.5],
-                0.8,
-                if i < 5 {
-                    [1.0, 0.0, 0.0]
-                } else {
-                    [0.0, 0.0, 1.0]
-                },
-            )
-        })
-        .collect();
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    assert_eq!(agg.aggregate(&gs, &[], 0.0)[0].normal, None);
-}
-
-#[test]
-fn light_voxel_has_no_normal() {
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    assert_eq!(
-        agg.aggregate(&[ga([0.5, 0.5, 0.5], 0.2, [0.0, 0.0, 1.0])], &[], 0.0)[0].normal,
-        None
-    );
-}
-
-#[test]
-fn center_is_opacity_weighted_mean() {
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    let c = agg.aggregate(
-        &[
-            ga([0.2, 0.5, 0.5], 0.9, [0.0, 0.0, 1.0]),
-            ga([0.8, 0.5, 0.5], 0.1, [0.0, 0.0, 1.0]),
-        ],
-        &[],
-        0.0,
-    );
-    assert!((c[0].center[0] - 0.26).abs() < 1e-5);
-}
-
-#[test]
-fn density_sums_opacity_and_saturates() {
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    let three: Vec<_> = (0..3)
-        .map(|_| ga([0.5, 0.5, 0.5], 0.5, [0.0, 0.0, 1.0]))
-        .collect();
-    assert_eq!(agg.aggregate(&three, &[], 0.0)[0].density, 48);
-    let many: Vec<_> = (0..10)
-        .map(|_| ga([0.5, 0.5, 0.5], 1.0, [0.0, 0.0, 1.0]))
-        .collect();
-    assert_eq!(agg.aggregate(&many, &[], 0.0)[0].density, 255);
-}
-
-#[test]
-fn unseen_voxel_orients_toward_nearest_camera() {
-    let gs: Vec<_> = (0..5)
-        .map(|_| ga([0.5, 0.5, 0.5], 0.8, [0.0, 0.0, 1.0]))
-        .collect();
-    // Camera looks away (+x) from the voxel, so it does not "see" it; nearest-camera fallback applies.
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    let c = agg.aggregate(&gs, &[cam([0.5, 0.5, -4.0], [1.0, 0.0, 0.0])], 0.0);
-    assert!(Vec3::from(c[0].normal.unwrap()).dot(Vec3::NEG_Z) > 0.99);
-}
-
-#[test]
-fn round_gaussians_do_not_vote_on_the_normal() {
-    // 20 round Gaussians whose arbitrary shortest axes point along x, plus
-    // 3 flat ones along z: the normal comes from the flat ones.
-    let mut gs: Vec<_> = (0..20)
-        .map(|_| GaussianScore {
-            flatness: 0.02,
-            ..ga([0.5, 0.5, 0.5], 0.8, [1.0, 0.0, 0.0])
-        })
-        .collect();
-    gs.extend((0..3).map(|_| ga([0.5, 0.5, 0.5], 0.8, [0.0, 0.0, 1.0])));
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    let c = agg.aggregate(&gs, &[cam([0.5, 0.5, 3.0], [0.0, 0.0, -1.0])], 0.0);
-    assert!(Vec3::from(c[0].normal.unwrap()).dot(Vec3::Z) > 0.99);
-}
-
-#[test]
-fn only_round_gaussians_give_no_normal() {
-    let gs: Vec<_> = (0..20)
-        .map(|_| GaussianScore {
-            flatness: 0.0,
-            ..ga([0.5, 0.5, 0.5], 0.8, [0.0, 0.0, 1.0])
-        })
-        .collect();
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    let c = agg.aggregate(&gs, &[], 0.0);
-    assert_eq!(c[0].normal, None);
-    assert_eq!(c[0].density, 255, "density stays opacity-weighted");
-}
-
-#[test]
-fn weight_rule_uses_opacity_mass_and_a_smaller_flat_mass() {
-    let round = |n: usize| {
-        (0..n).map(|_| GaussianScore {
-            flatness: 0.0,
-            ..ga([0.5, 0.5, 0.5], 0.8, [1.0, 0.0, 0.0])
-        })
-    };
-    let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    // Opacity mass 1.0, flat mass 0.2: enough for a normal.
-    let mut gs: Vec<_> = round(1).collect();
-    gs.push(ga([0.5, 0.5, 0.5], 0.2, [0.0, 0.0, 1.0]));
-    let c = agg.aggregate(&gs, &[cam([0.5, 0.5, 3.0], [0.0, 0.0, -1.0])], 0.0);
-    assert!(Vec3::from(c[0].normal.unwrap()).dot(Vec3::Z) > 0.99);
-    // Opacity mass 1.8, flat mass 0.05: too little orientation.
-    let mut gs: Vec<_> = round(2).collect();
-    gs.push(GaussianScore {
-        flatness: 0.25,
-        ..ga([0.5, 0.5, 0.5], 0.2, [0.0, 0.0, 1.0])
-    });
-    assert_eq!(agg.aggregate(&gs, &[], 0.0)[0].normal, None);
-}
+mod normals;

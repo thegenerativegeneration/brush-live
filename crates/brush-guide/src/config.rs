@@ -29,7 +29,8 @@ pub struct GuideConfig {
     /// Ridge relative to that Fisher's mean eigenvalue (`tr(H)/3`).
     pub fisher_lambda_rel: f32,
     /// Pixel noise on [0, 1] RGB that scales a voxel's inverse position
-    /// Fisher to a positional σ in metres.
+    /// Fisher to a positional σ in metres. Only the raw dump sees the
+    /// scale; the uncertainty byte ranks σ within a round and ignores it.
     pub sigma_pix: f32,
     /// Appends each round's per-voxel positional σ and coverage to
     /// `raw_uncertainty.jsonl` in the session directory, for calibration.

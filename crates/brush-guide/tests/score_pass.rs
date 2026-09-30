@@ -213,6 +213,8 @@ async fn view_weight_scales_counts_directions_and_fisher() {
         assert!((3.0 * a - b).abs() < 1e-5, "{a} vs {b}");
     }
     assert_eq!(one.max_px_per_m[0], three.max_px_per_m[0]);
+    // Probes come from the process-global backend RNG, shared with tests
+    // running in parallel, so the Fisher comparison is statistical.
     let trace = |h: &[f32; 36]| (0..6).map(|i| h[i * 6 + i]).sum::<f32>();
     let ratio = trace(&three.fisher[0]) / trace(&one.fisher[0]);
     assert!((2.4..3.6).contains(&ratio), "Fisher ratio {ratio}");

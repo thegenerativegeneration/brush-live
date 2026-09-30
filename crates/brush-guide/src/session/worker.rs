@@ -91,11 +91,12 @@ impl Worker {
     fn new(config: GuideConfig, device: Device, session_dir: PathBuf, channels: Channels) -> Self {
         let clock = Instant::now();
         let live = LiveModel::new(config.clone(), device.clone());
-        let voxels = VoxelAggregator::new(
+        let mut voxels = VoxelAggregator::new(
             config.voxel_size,
             config.min_cell_opacity,
             config.uncertainty_scale(),
         );
+        voxels.record_raw(config.dump_raw_uncertainty);
         let scheduler = ScoreScheduler::new(config.score_budget, config.min_score_interval_s);
         let rate_window = (clock.elapsed().as_secs_f64(), live.iter());
         Self {
@@ -197,16 +198,16 @@ impl Worker {
     async fn score_round(&mut self, now: f64) {
         let splats = self.live.splats().expect("views imply splats").clone();
         let cells = self.score_cells(&splats).await;
-        if self.config.dump_raw_uncertainty {
-            let path = self.session_dir.join("raw_uncertainty.jsonl");
-            if let Err(e) = append_raw_round(&path, self.version + 1, self.voxels.raw_round()) {
-                log::warn!("raw uncertainty dump to {}: {e}", path.display());
-            }
-        }
         let scored = self.clock.elapsed().as_secs_f64();
         self.last_score_ms = ((scored - now) * 1000.0) as u32;
         self.version += 1;
         let version = self.version;
+        if self.config.dump_raw_uncertainty {
+            let path = self.session_dir.join("raw_uncertainty.jsonl");
+            if let Err(e) = append_raw_round(&path, version, self.voxels.raw_round()) {
+                log::warn!("raw uncertainty dump to {}: {e}", path.display());
+            }
+        }
 
         let (bricks, pending, num_fused) = self.mesh_round(&splats).await;
         let end = self.clock.elapsed().as_secs_f64();

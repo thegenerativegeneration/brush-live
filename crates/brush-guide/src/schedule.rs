@@ -33,10 +33,6 @@ impl ScoreScheduler {
 /// Newest views always scored in a round, when the capture exceeds the limit.
 pub const SCORE_RECENT_VIEWS: usize = 40;
 
-/// Indices (ascending) of at most `max_views` of `num_views` views to score:
-/// the newest `SCORE_RECENT_VIEWS` plus one seeded random pick from each of
-/// `max_views - SCORE_RECENT_VIEWS` equal strata over the older views, so a
-/// round's cost stays bounded as the capture grows.
 /// Horvitz–Thompson weight of view `index` when selected by
 /// [`select_score_views`]: 1 for a view scored in every round, otherwise the
 /// size of its stratum (the inverse of its chance of being picked), so the
@@ -58,6 +54,10 @@ pub fn score_view_weight(index: usize, num_views: usize, max_views: usize) -> f3
     ((j + 1) * older / strata - j * older / strata) as f32
 }
 
+/// Indices (ascending) of at most `max_views` of `num_views` views to score:
+/// the newest `SCORE_RECENT_VIEWS` plus one seeded random pick from each of
+/// `max_views - SCORE_RECENT_VIEWS` equal strata over the older views, so a
+/// round's cost stays bounded as the capture grows.
 pub fn select_score_views(num_views: usize, max_views: usize, seed: u64) -> Vec<usize> {
     use rand::{RngExt as _, SeedableRng};
     let max_views = max_views.max(1);
@@ -156,6 +156,31 @@ mod tests {
         for (i, t) in total.iter().enumerate() {
             let mean = t / rounds as f64;
             assert!((mean - 1.0).abs() < 0.2, "view {i}: {mean}");
+        }
+    }
+
+    #[test]
+    fn older_weight_is_the_length_of_the_stratum_holding_the_view() {
+        // 460 and 347 older views over 80 strata give strata of 5 and 6 (or
+        // 4 and 5) views; 81 older over 80 gives one stratum of 2.
+        for (n, max) in [(500, 120), (387, 120), (121, 120), (300, 41)] {
+            let recent = SCORE_RECENT_VIEWS.min(max);
+            let (older, strata) = (n - recent, max - recent);
+            let mut sizes = std::collections::BTreeSet::new();
+            for j in 0..strata {
+                let range = j * older / strata..(j + 1) * older / strata;
+                sizes.insert(range.len());
+                for i in range.clone() {
+                    assert_eq!(
+                        score_view_weight(i, n, max),
+                        range.len() as f32,
+                        "n {n}, max {max}, view {i} in stratum {j}"
+                    );
+                }
+            }
+            if older % strata != 0 {
+                assert_eq!(sizes.len(), 2, "n {n}: strata of two sizes");
+            }
         }
     }
 

@@ -49,6 +49,7 @@ pub struct VoxelAggregator {
     first_seen: HashMap<IVec3, f64>,
     /// EMA (α = 0.3 on the new round) of the sent uncertainty byte per voxel.
     unc_ema: HashMap<IVec3, f32>,
+    record_raw: bool,
     raw: Vec<RawVoxel>,
 }
 
@@ -141,14 +142,27 @@ fn log_sigma_range(sigmas: &[f32]) -> (f32, f32) {
 }
 
 /// `clamp((ln σ − lo) / (hi − lo), 0, 1) · 255`, rounded; 255 for a
-/// non-finite σ, 0 for an empty range.
+/// non-finite σ. For an empty range, 255 above it and 0 at or below.
 fn uncertainty_byte(sigma: f32, (lo, hi): (f32, f32)) -> u8 {
     if !sigma.is_finite() {
         255
     } else if hi > lo {
         (((sigma.ln() - lo) / (hi - lo)).clamp(0.0, 1.0) * 255.0).round() as u8
+    } else if sigma.ln() > hi {
+        255
     } else {
         0
+    }
+}
+
+/// Positional σ of a voxel's summed position Fisher; infinite when it holds
+/// no information, so the ridge alone never yields a finite σ.
+fn voxel_sigma(info: &[f64; 9], scale: &UncertaintyScale) -> f32 {
+    let trace = info[0] + info[4] + info[8];
+    if trace > 0.0 {
+        position_sigma(info, scale.ridge, scale.sigma_pix)
+    } else {
+        f32::INFINITY
     }
 }
 
@@ -177,11 +191,21 @@ impl VoxelAggregator {
             scale,
             first_seen: HashMap::new(),
             unc_ema: HashMap::new(),
+            record_raw: false,
             raw: Vec::new(),
         }
     }
 
-    /// Per-voxel raw scores of the latest `aggregate` call.
+    /// Whether `aggregate` keeps each voxel's raw scores for `raw_round`.
+    pub fn record_raw(&mut self, on: bool) {
+        self.record_raw = on;
+        if !on {
+            self.raw = Vec::new();
+        }
+    }
+
+    /// Per-voxel raw scores of the latest `aggregate` call; empty unless
+    /// recording is on.
     pub fn raw_round(&self) -> &[RawVoxel] {
         &self.raw
     }
@@ -234,7 +258,7 @@ impl VoxelAggregator {
         let voxels: Vec<(IVec3, Acc, f32)> = acc
             .into_iter()
             .map(|(key, a)| {
-                let sigma = position_sigma(&a.info, sc.ridge, sc.sigma_pix);
+                let sigma = voxel_sigma(&a.info, &sc);
                 (key, a, sigma)
             })
             .collect();
@@ -245,11 +269,13 @@ impl VoxelAggregator {
             .into_iter()
             .map(|(key, a, sigma)| {
                 let first = *self.first_seen.entry(key).or_insert(now_s);
-                self.raw.push(RawVoxel {
-                    key,
-                    coverage: a.cov / a.w,
-                    sigma,
-                });
+                if self.record_raw {
+                    self.raw.push(RawVoxel {
+                        key,
+                        coverage: a.cov / a.w,
+                        sigma,
+                    });
+                }
                 let u8_unc = uncertainty_byte(sigma, range);
                 let prev = *self.unc_ema.get(&key).unwrap_or(&(u8_unc as f32));
                 let smoothed = 0.3 * u8_unc as f32 + 0.7 * prev;
