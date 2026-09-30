@@ -15,9 +15,11 @@ use glam::{UVec2, Vec3};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// Bricks whose mesh changed, sent after the score set of the same round.
+/// Bricks whose mesh changed since the reader's last message, in their
+/// latest state: cumulative over every round recorded since then.
 pub struct MeshBricksMsg {
-    /// Version of the score set this follows.
+    /// Version of the last round included. A reader may take several rounds
+    /// in one message, so this can be newer than the score set it follows.
     pub version: u64,
     pub mesh_ms: u32,
     pub bricks: Vec<Arc<MeshBrick>>,
@@ -98,6 +100,8 @@ impl MeshLog {
 const MAX_BRICKS_PER_ROUND: usize = 24;
 /// Older keyframes re-integrated per round besides the new ones.
 const REFRESH_VIEWS_PER_ROUND: usize = 4;
+/// New keyframes integrated per round at most; further ones wait.
+const MAX_NEW_VIEWS_PER_ROUND: usize = 8;
 /// Expected depth is rendered at the sent image size divided by this.
 const DEPTH_DOWNSCALE: u32 = 4;
 /// Factor on all TSDF weights per round, so the surface follows the splat.
@@ -135,7 +139,8 @@ impl Geometry {
     }
 
     /// Views to integrate this round: up to `REFRESH_VIEWS_PER_ROUND` older
-    /// views, rotating, then every view added since the last round.
+    /// views, rotating, then up to `MAX_NEW_VIEWS_PER_ROUND` views not
+    /// integrated yet, oldest first; the rest wait for later rounds.
     fn views_for_round(&mut self, num_views: usize) -> Vec<usize> {
         let older = self.integrated.min(num_views);
         let mut views = Vec::new();
@@ -144,8 +149,9 @@ impl Geometry {
             views.push(self.cursor);
             self.cursor += 1;
         }
-        views.extend(older..num_views);
-        self.integrated = num_views;
+        let new_end = num_views.min(older + MAX_NEW_VIEWS_PER_ROUND);
+        views.extend(older..new_end);
+        self.integrated = new_end;
         views
     }
 

@@ -48,8 +48,12 @@ fn dequantise(q: u16) -> f32 {
     q as f32 / 65535.0 * QUANT_SPAN - BRICK_MARGIN
 }
 
-/// Encodes bricks as the `mesh_bricks` payload. Panics if a mesh has 65 536
-/// vertices or more (a brick has at most 21³).
+/// Most vertices a brick's mesh may have: u16 indices address 0..=65 535.
+/// A brick has at most 21³ = 9 261.
+pub const MAX_BRICK_VERTICES: usize = u16::MAX as usize + 1;
+
+/// Encodes bricks as the `mesh_bricks` payload. Panics if a mesh has more
+/// than `MAX_BRICK_VERTICES` (65 536) vertices.
 pub fn encode_mesh_bricks<'a>(bricks: impl IntoIterator<Item = &'a MeshBrick>) -> Vec<u8> {
     let mut out = Vec::new();
     for brick in bricks {
@@ -62,8 +66,8 @@ pub fn encode_mesh_bricks<'a>(bricks: impl IntoIterator<Item = &'a MeshBrick>) -
             continue;
         };
         assert!(
-            mesh.positions.len() <= u16::MAX as usize + 1,
-            "brick {:?} has {} vertices, more than u16 indices address",
+            mesh.positions.len() <= MAX_BRICK_VERTICES,
+            "brick {:?} has {} vertices, more than 65 536 (u16 indices)",
             mesh.key,
             mesh.positions.len()
         );
@@ -98,7 +102,8 @@ fn take<'a>(rest: &mut &'a [u8], n: usize) -> Result<&'a [u8], ProtocolError> {
 
 /// Decodes a `mesh_bricks` payload of `num_bricks` bricks. Positions come
 /// back in world metres, within half a quantisation step (8 µm) of the
-/// encoded ones.
+/// encoded ones. Rejects a removed brick with non-zero counts, an index
+/// count that is not a multiple of 3 and indices past the vertices.
 pub fn decode_mesh_bricks(bytes: &[u8], num_bricks: u32) -> Result<Vec<MeshBrick>, ProtocolError> {
     let mut rest = bytes;
     let bricks = (0..num_bricks)
@@ -122,8 +127,24 @@ fn decode_brick(rest: &mut &[u8]) -> Result<MeshBrick, ProtocolError> {
     let num_vertices = u32::from_le_bytes(h[13..17].try_into().unwrap()) as usize;
     let num_indices = u32::from_le_bytes(h[17..21].try_into().unwrap()) as usize;
     if flags & MESH_BRICK_REMOVED != 0 {
+        if num_vertices != 0 || num_indices != 0 {
+            return Err(ProtocolError::RemovedBrickWithData);
+        }
         return Ok(MeshBrick::Removed(key));
     }
+    if !num_indices.is_multiple_of(3) {
+        return Err(ProtocolError::PartialTriangle(num_indices));
+    }
+    decode_mesh(rest, key, num_vertices, num_indices).map(MeshBrick::Mesh)
+}
+
+/// Decodes the vertex and index data of brick `key` from `rest`.
+fn decode_mesh(
+    rest: &mut &[u8],
+    key: BrickKey,
+    num_vertices: usize,
+    num_indices: usize,
+) -> Result<BrickMesh, ProtocolError> {
     let origin = (key.0 * BRICK).as_vec3() * VOXEL;
     let positions = take(
         rest,
@@ -145,7 +166,7 @@ fn decode_brick(rest: &mut &[u8]) -> Result<MeshBrick, ProtocolError> {
         .iter()
         .map(|&c| oct_decode(c).to_array())
         .collect();
-    let indices = take(
+    let indices: Vec<u32> = take(
         rest,
         num_indices
             .checked_mul(2)
@@ -156,10 +177,16 @@ fn decode_brick(rest: &mut &[u8]) -> Result<MeshBrick, ProtocolError> {
     .iter()
     .map(|&c| u16::from_le_bytes(c) as u32)
     .collect();
-    Ok(MeshBrick::Mesh(BrickMesh {
+    if let Some(&index) = indices.iter().find(|&&i| i as usize >= num_vertices) {
+        return Err(ProtocolError::IndexOutOfRange {
+            index,
+            num_vertices,
+        });
+    }
+    Ok(BrickMesh {
         key,
         positions,
         normals,
         indices,
-    }))
+    })
 }

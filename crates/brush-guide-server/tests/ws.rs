@@ -110,19 +110,27 @@ async fn end_to_end() {
         .await
         .unwrap();
     }
-    // Every score set is followed by the mesh bricks of the same version.
-    let mut awaiting_mesh: Option<u64> = None;
+    // Mesh bricks follow a score set with a version at least the score
+    // set's; by the next score set the previous one's round has been sent.
+    let (mut last_score, mut last_mesh) = (None, 0u64);
     let mut saw_mesh = false;
     while acks.len() < 3 || !saw_mesh || !saw_error {
         match next_header(&mut ws).await {
             ServerHeader::Ack { keyframe_id } => acks.push(keyframe_id),
             ServerHeader::Error { .. } => saw_error = true,
             ServerHeader::ScoreSet { version, .. } => {
-                assert_eq!(awaiting_mesh, None, "mesh bricks before the next score set");
-                awaiting_mesh = Some(version);
+                if let Some(prev) = last_score {
+                    assert!(last_mesh >= prev, "round {prev} never sent as mesh bricks");
+                }
+                last_score = Some(version);
             }
             ServerHeader::MeshBricks { version, .. } => {
-                assert_eq!(awaiting_mesh.take(), Some(version));
+                let score = last_score.expect("mesh bricks after a score set");
+                assert!(
+                    version >= score,
+                    "mesh bricks v{version} after score set v{score}"
+                );
+                last_mesh = version;
                 saw_mesh = true;
             }
             _ => {}

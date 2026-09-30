@@ -139,8 +139,8 @@ impl GuideSession {
     }
 
     /// Brick meshes. A round's bricks are recorded before its score set is
-    /// published, so after a score set `since` yields the bricks of the
-    /// same version.
+    /// published, so after a score set `since` yields bricks of at least
+    /// that version; later rounds may already be included.
     pub fn meshes(&self) -> watch::Receiver<MeshLog> {
         self.meshes.clone()
     }

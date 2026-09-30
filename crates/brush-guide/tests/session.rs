@@ -81,7 +81,14 @@ async fn mesh_bricks_follow_the_first_score_set() {
         .borrow()
         .since(0)
         .expect("mesh bricks recorded with the score set");
-    assert_eq!(msg.version, set.version);
+    // Rounds after the score set may already be recorded: the version is
+    // at least the score set's.
+    assert!(
+        msg.version >= set.version,
+        "{} < {}",
+        msg.version,
+        set.version
+    );
     assert!(!msg.bricks.is_empty(), "at least one brick");
 
     let frame = msg.to_frame();
@@ -94,7 +101,7 @@ async fn mesh_bricks_follow_the_first_score_set() {
     else {
         panic!("{header:?}")
     };
-    assert_eq!(version, set.version);
+    assert_eq!(version, msg.version);
     assert_eq!(
         decode_mesh_bricks(payload, num_bricks).unwrap().len(),
         msg.bricks.len()

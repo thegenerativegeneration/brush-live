@@ -115,7 +115,10 @@ async fn get_or_start(shared: &Shared, session_id: &str) -> GuideSession {
 
 /// Forwards the session's score sets as they change, each followed by the
 /// mesh bricks changed since the last ones this connection sent (all of
-/// them on a new connection), and its status every second.
+/// them on a new connection), and its status every second. Rounds recorded
+/// before a score set is read are coalesced into one `mesh_bricks` whose
+/// version is newer than that score set's; a score set whose round was
+/// already sent that way is followed by none.
 fn spawn_pusher(session: &GuideSession, out: mpsc::Sender<Message>) -> JoinHandle<()> {
     let mut scores = session.scores();
     let meshes = session.meshes();

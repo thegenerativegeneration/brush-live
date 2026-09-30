@@ -106,3 +106,69 @@ fn mesh_bricks_header_json() {
         serde_json::json!({"type": "mesh_bricks", "version": 5, "num_bricks": 2, "mesh_ms": 40})
     );
 }
+
+fn triangle_with_indices(indices: Vec<u32>) -> [MeshBrick; 1] {
+    let MeshBrick::Mesh(mut mesh) = fixture_bricks()[0].clone() else {
+        unreachable!()
+    };
+    mesh.indices = indices;
+    [MeshBrick::Mesh(mesh)]
+}
+
+#[test]
+fn mesh_bricks_reject_a_removed_brick_with_counts() {
+    let mut bytes = encode_mesh_bricks(&fixture_bricks()[1..]);
+    assert!(decode_mesh_bricks(&bytes, 1).is_ok());
+    bytes[13] = 3;
+    assert!(matches!(
+        decode_mesh_bricks(&bytes, 1),
+        Err(ProtocolError::RemovedBrickWithData)
+    ));
+}
+
+#[test]
+fn mesh_bricks_reject_an_index_count_not_a_multiple_of_three() {
+    let bytes = encode_mesh_bricks(&triangle_with_indices(vec![0, 1, 2, 0]));
+    assert!(matches!(
+        decode_mesh_bricks(&bytes, 1),
+        Err(ProtocolError::PartialTriangle(4))
+    ));
+}
+
+#[test]
+fn mesh_bricks_reject_indices_past_the_vertices() {
+    let bytes = encode_mesh_bricks(&triangle_with_indices(vec![0, 1, 3]));
+    assert!(matches!(
+        decode_mesh_bricks(&bytes, 1),
+        Err(ProtocolError::IndexOutOfRange {
+            index: 3,
+            num_vertices: 3
+        })
+    ));
+}
+
+fn mesh_with_vertices(n: usize) -> [MeshBrick; 1] {
+    [MeshBrick::Mesh(BrickMesh {
+        key: BrickKey(glam::IVec3::ZERO),
+        positions: vec![[0.5; 3]; n],
+        normals: vec![[0.0, 0.0, 1.0]; n],
+        indices: vec![0, 1, (n - 1) as u32],
+    })]
+}
+
+#[test]
+fn mesh_bricks_encode_up_to_65536_vertices() {
+    let bytes = encode_mesh_bricks(&mesh_with_vertices(65_536));
+    let back = decode_mesh_bricks(&bytes, 1).unwrap();
+    let MeshBrick::Mesh(mesh) = &back[0] else {
+        panic!("{:?}", back[0].key())
+    };
+    assert_eq!(mesh.positions.len(), 65_536);
+    assert_eq!(mesh.indices, vec![0, 1, 65_535]);
+}
+
+#[test]
+#[should_panic(expected = "more than 65 536")]
+fn mesh_bricks_reject_more_than_65536_vertices() {
+    encode_mesh_bricks(&mesh_with_vertices(65_537));
+}
