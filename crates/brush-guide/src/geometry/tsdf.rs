@@ -26,9 +26,11 @@ pub const VOXEL: f32 = 0.05;
 pub const TRUNC: f32 = 0.15;
 pub const BRICK: i32 = 20;
 pub const MAX_WEIGHT: f32 = 20.0;
+/// Voxels whose fusion weight has decayed below this read as unobserved.
+pub const MIN_WEIGHT: f32 = 0.1;
 
-/// A brick is reported by `take_changed` once the summed |Δsdf| of its
-/// voxels since its last report, divided by `BRICK³`, exceeds this (metres).
+/// A brick is reported by `take_changed` once the mean |Δsdf| of its
+/// near-surface voxels since its last report exceeds this (metres).
 const CHANGE_THRESHOLD: f32 = 0.005;
 
 const BRICK_VOXELS: usize = (BRICK * BRICK * BRICK) as usize;
@@ -56,10 +58,11 @@ impl PartialOrd for BrickKey {
 struct Brick {
     /// Normalised distance per voxel, x fastest: `x + BRICK·(y + BRICK·z)`.
     tsdf: Vec<f32>,
-    /// Fusion weight per voxel; 0 means unobserved.
+    /// Fusion weight per voxel; below `MIN_WEIGHT` means unobserved.
     weight: Vec<f32>,
-    /// Σ |Δsdf| in metres since the brick was last reported.
-    change: f32,
+    /// `observed_sdf` of every voxel when `take_changed` last reported the
+    /// brick (all `1.0` before the first report).
+    reported_sdf: Vec<f32>,
     /// Whether `take_changed` has reported this brick before.
     reported: bool,
 }
@@ -69,7 +72,7 @@ impl Brick {
         Self {
             tsdf: vec![1.0; BRICK_VOXELS],
             weight: vec![0.0; BRICK_VOXELS],
-            change: 0.0,
+            reported_sdf: vec![1.0; BRICK_VOXELS],
             reported: false,
         }
     }
@@ -85,7 +88,45 @@ impl Brick {
         let t_new = (w_old * t_old + w_obs * dist) / w_new;
         self.tsdf[i] = t_new;
         self.weight[i] = w_new.min(MAX_WEIGHT);
-        self.change += (t_new - t_old).abs() * TRUNC;
+    }
+
+    /// Normalised distance of voxel `i` as the mesher sees it: `1.0` where
+    /// unobserved.
+    fn observed_sdf(&self, i: usize) -> f32 {
+        if self.weight[i] >= MIN_WEIGHT {
+            self.tsdf[i]
+        } else {
+            1.0
+        }
+    }
+
+    /// Mean |Δsdf| in metres since the last report over the voxels near the
+    /// surface (observed with |sdf| < `TRUNC`) now or at the last report,
+    /// and whether there are any such voxels now.
+    fn change_since_report(&self) -> (f32, bool) {
+        let (mut sum, mut count, mut near_now) = (0.0, 0usize, false);
+        for (i, &before) in self.reported_sdf.iter().enumerate() {
+            let now = self.observed_sdf(i);
+            let near = now.abs() < 1.0;
+            near_now |= near;
+            if near || before.abs() < 1.0 {
+                sum += (now - before).abs();
+                count += 1;
+            }
+        }
+        let mean = if count == 0 {
+            0.0
+        } else {
+            sum / count as f32 * TRUNC
+        };
+        (mean, near_now)
+    }
+
+    fn mark_reported(&mut self) {
+        for i in 0..BRICK_VOXELS {
+            self.reported_sdf[i] = self.observed_sdf(i);
+        }
+        self.reported = true;
     }
 }
 
@@ -300,7 +341,8 @@ impl Tsdf {
     }
 
     /// Signed distance in metres at `world`, trilinear between voxel centres;
-    /// `None` unless all eight surrounding voxels are observed.
+    /// `None` unless all eight surrounding voxels are observed (weight at
+    /// least `MIN_WEIGHT`).
     pub fn sdf(&self, world: Vec3) -> Option<f32> {
         let g = world / VOXEL - 0.5;
         let base = g.floor();
@@ -310,7 +352,7 @@ impl Tsdf {
         for corner in 0..8 {
             let o = IVec3::new(corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
             let (t, w) = self.voxel(base + o)?;
-            if w <= 0.0 {
+            if w < MIN_WEIGHT {
                 return None;
             }
             let o = o.as_vec3();
@@ -320,20 +362,22 @@ impl Tsdf {
         Some(sum * TRUNC)
     }
 
-    /// Bricks to re-mesh, in key order: those whose summed |Δsdf| since their
-    /// last report averages more than 5 mm over the brick's voxels, and every
-    /// brick changed since allocation but never reported yet, so a surface
-    /// that clips only a few voxels of a new brick is still meshed. Their
-    /// change counters restart.
+    /// Bricks to re-mesh, in key order: those whose |Δsdf| since their last
+    /// report averages more than 5 mm over their near-surface voxels
+    /// (observed, |sdf| < `TRUNC`, now or at the last report), and every
+    /// never-reported brick that has near-surface voxels, so a surface that
+    /// clips only a few voxels of a new brick is still meshed. Reported
+    /// bricks measure later changes from their state now.
     pub fn take_changed(&mut self) -> Vec<BrickKey> {
-        let threshold = CHANGE_THRESHOLD * BRICK_VOXELS as f32;
         let mut keys: Vec<BrickKey> = self
             .bricks
             .iter_mut()
-            .filter(|(_, b)| b.change > threshold || (!b.reported && b.change > 0.0))
+            .filter(|(_, b)| {
+                let (mean, near_now) = b.change_since_report();
+                mean > CHANGE_THRESHOLD || (!b.reported && near_now)
+            })
             .map(|(key, b)| {
-                b.change = 0.0;
-                b.reported = true;
+                b.mark_reported();
                 *key
             })
             .collect();
@@ -347,6 +391,7 @@ impl Tsdf {
     /// `x + PADDED·(y + PADDED·z)` (x fastest, the order of
     /// `ndshape::ConstShape3u32<PADDED, PADDED, PADDED>` used by
     /// `fast-surface-nets`), holding voxel `key·BRICK + (x−1, y−1, z−1)`.
+    /// Voxels below `MIN_WEIGHT` read as unobserved (weight 0, distance 1).
     /// `None` if the brick does not exist.
     pub fn brick_samples(&self, key: BrickKey) -> Option<BrickSamples> {
         if !self.bricks.contains_key(&key) {
@@ -362,7 +407,7 @@ impl Tsdf {
             for y in 0..PADDED as i32 {
                 for x in 0..PADDED as i32 {
                     let (t, w) = match self.voxel(origin + IVec3::new(x, y, z)) {
-                        Some((t, w)) if w > 0.0 => (t, w),
+                        Some((t, w)) if w >= MIN_WEIGHT => (t, w),
                         _ => (1.0, 0.0),
                     };
                     samples.sdf.push(t);
@@ -377,6 +422,30 @@ impl Tsdf {
         self.bricks.clear();
     }
 
+    /// Volume over bricks `keys` holding `sdf(voxel centre)` (metres,
+    /// `None` for unobserved) with weight 1.
+    #[cfg(test)]
+    pub(crate) fn from_sdf(keys: &[BrickKey], sdf: impl Fn(Vec3) -> Option<f32>) -> Self {
+        let mut tsdf = Self::new();
+        for &key in keys {
+            let mut brick = Brick::new();
+            for z in 0..BRICK {
+                for y in 0..BRICK {
+                    for x in 0..BRICK {
+                        let local = IVec3::new(x, y, z);
+                        if let Some(d) = sdf(voxel_centre(key.0 * BRICK + local)) {
+                            let i = voxel_index(local);
+                            brick.tsdf[i] = (d / TRUNC).clamp(-1.0, 1.0);
+                            brick.weight[i] = 1.0;
+                        }
+                    }
+                }
+            }
+            tsdf.bricks.insert(key, brick);
+        }
+        tsdf
+    }
+
     /// Normalised distance and weight of global voxel `g`, if its brick exists.
     fn voxel(&self, g: IVec3) -> Option<(f32, f32)> {
         let (key, local) = split_voxel(g);
@@ -387,7 +456,7 @@ impl Tsdf {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use brush_render::kernels::camera_model::CameraModel;
     use glam::{Mat3, Quat, UVec2, Vec2, vec3};
@@ -395,30 +464,38 @@ mod tests {
     const SIZE: UVec2 = UVec2::new(128, 128);
 
     /// Pinhole camera at `pos` looking at `target`, 60° fov; local +Z forward, +Y down.
-    fn look_at(pos: Vec3, target: Vec3) -> Camera {
+    pub(crate) fn look_at(pos: Vec3, target: Vec3) -> Camera {
+        let fov = 60f64.to_radians();
+        look_at_with(pos, target, fov, fov, Vec2::splat(0.5))
+    }
+
+    fn look_at_with(pos: Vec3, target: Vec3, fov_x: f64, fov_y: f64, center_uv: Vec2) -> Camera {
         let forward = (target - pos).normalize();
         let right = Vec3::Y.cross(forward).normalize();
         let down = forward.cross(right);
         let rotation = Quat::from_mat3(&Mat3::from_cols(right, down, forward));
-        let fov = 60f64.to_radians();
-        Camera::new(
-            pos,
-            rotation,
-            fov,
-            fov,
-            Vec2::splat(0.5),
-            CameraModel::Pinhole,
-        )
+        Camera::new(pos, rotation, fov_x, fov_y, center_uv, CameraModel::Pinhole)
+    }
+
+    pub(crate) fn depth_image(
+        camera: &Camera,
+        hit: impl Fn(Vec3, Vec3) -> Option<f32>,
+    ) -> DepthImage {
+        depth_image_sized(camera, SIZE, hit)
     }
 
     /// Ray-casts `hit` per pixel centre. `hit(origin, dir)` returns the ray
     /// parameter of the first hit; `dir` has unit camera-space z, so that
     /// parameter is the depth along the camera's forward axis.
-    fn depth_image(camera: &Camera, hit: impl Fn(Vec3, Vec3) -> Option<f32>) -> DepthImage {
-        let (f, c) = (camera.focal(SIZE), camera.center(SIZE));
+    fn depth_image_sized(
+        camera: &Camera,
+        size: UVec2,
+        hit: impl Fn(Vec3, Vec3) -> Option<f32>,
+    ) -> DepthImage {
+        let (f, c) = (camera.focal(size), camera.center(size));
         let mut depth = Vec::new();
-        for y in 0..SIZE.y {
-            for x in 0..SIZE.x {
+        for y in 0..size.y {
+            for x in 0..size.x {
                 let local = vec3(
                     (x as f32 + 0.5 - c.x) / f.x,
                     (y as f32 + 0.5 - c.y) / f.y,
@@ -433,14 +510,14 @@ mod tests {
             .map(|d| if d.is_nan() { 0.0 } else { 1.0 })
             .collect();
         DepthImage {
-            width: SIZE.x,
-            height: SIZE.y,
+            width: size.x,
+            height: size.y,
             depth,
             alpha,
         }
     }
 
-    fn plane_z(z: f32) -> impl Fn(Vec3, Vec3) -> Option<f32> {
+    pub(crate) fn plane_z(z: f32) -> impl Fn(Vec3, Vec3) -> Option<f32> {
         move |o, d| {
             let t = (z - o.z) / d.z;
             (t > 0.0).then_some(t)
@@ -448,7 +525,7 @@ mod tests {
     }
 
     /// Axis-aligned box, entry point of the slab test.
-    fn aabb(min: Vec3, max: Vec3) -> impl Fn(Vec3, Vec3) -> Option<f32> {
+    pub(crate) fn aabb(min: Vec3, max: Vec3) -> impl Fn(Vec3, Vec3) -> Option<f32> {
         move |o, d| {
             let inv = d.recip();
             let (t0, t1) = ((min - o) * inv, (max - o) * inv);
@@ -478,7 +555,11 @@ mod tests {
         }
     }
 
-    fn integrate(tsdf: &mut Tsdf, cameras: &[Camera], hit: &impl Fn(Vec3, Vec3) -> Option<f32>) {
+    pub(crate) fn integrate(
+        tsdf: &mut Tsdf,
+        cameras: &[Camera],
+        hit: &impl Fn(Vec3, Vec3) -> Option<f32>,
+    ) {
         for cam in cameras {
             tsdf.integrate(&depth_image(cam, hit), cam);
         }
@@ -562,8 +643,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn thin_sheet_seen_from_both_sides_keeps_a_zero_crossing() {
+    /// A 5 mm sheet at z = 2 m, 1.2 m square, fused from both sides.
+    pub(crate) fn thin_sheet_tsdf() -> Tsdf {
         let target = vec3(0.0, 0.0, 2.0);
         let cams = [
             look_at(Vec3::ZERO, target),
@@ -572,6 +653,12 @@ mod tests {
         let mut tsdf = Tsdf::new();
         let sheet = aabb(vec3(-0.6, -0.6, 1.9975), vec3(0.6, 0.6, 2.0025));
         integrate(&mut tsdf, &cams, &sheet);
+        tsdf
+    }
+
+    #[test]
+    fn thin_sheet_seen_from_both_sides_keeps_a_zero_crossing() {
+        let tsdf = thin_sheet_tsdf();
 
         for (x, y) in [(0.0, 0.0), (0.21, -0.13), (-0.4, 0.33)] {
             let crossings = zero_crossings(
@@ -590,11 +677,11 @@ mod tests {
         }
     }
 
-    /// A square rod of side `width` along y through `center` inside a 5 m
-    /// room, fused from four sides at 1.5 m; zero crossings along x and z at
-    /// three heights. The room walls give every pixel a depth, so free space
-    /// around the rod is observed as it would be in a real scene.
-    fn rod_crossings(center: Vec3, width: f32) -> Vec<(Vec3, Vec<Vec3>)> {
+    /// A square rod of side `width` along y through `center`, 1 m long,
+    /// inside a 5 m room, fused from four sides at 1.5 m. The room walls give
+    /// every pixel a depth, so free space around the rod is observed as it
+    /// would be in a real scene.
+    pub(crate) fn rod_tsdf(center: Vec3, width: f32) -> Tsdf {
         let cams = [
             look_at(center - 1.5 * Vec3::Z, center),
             look_at(center + 1.5 * Vec3::X, center),
@@ -608,7 +695,12 @@ mod tests {
             room(center - 2.5, center + 2.5),
         );
         integrate(&mut tsdf, &cams, &scene);
+        tsdf
+    }
 
+    /// Zero crossings of the rod of `rod_tsdf` along x and z at three heights.
+    fn rod_crossings(center: Vec3, width: f32) -> Vec<(Vec3, Vec<Vec3>)> {
+        let tsdf = rod_tsdf(center, width);
         let mut all = Vec::new();
         for y in [0.0, 0.12, -0.27] {
             for dir in [Vec3::X, Vec3::Z] {
@@ -621,7 +713,8 @@ mod tests {
     }
 
     /// Rod axes on a line of voxel centres and midway between them.
-    const ROD_CENTRES: [Vec3; 2] = [Vec3::new(0.025, 0.0, 2.025), Vec3::new(0.0, 0.0, 2.0)];
+    pub(crate) const ROD_CENTRES: [Vec3; 2] =
+        [Vec3::new(0.025, 0.0, 2.025), Vec3::new(0.0, 0.0, 2.0)];
 
     #[test]
     fn rod_seen_from_four_sides_keeps_a_zero_crossing() {
@@ -701,12 +794,22 @@ mod tests {
         }
         assert!(tsdf.take_changed().is_empty());
 
-        // Weight 6 now: a 1 cm shift moves the ~2400 band voxels by 1/7 cm, a
-        // brick mean of ~0.4 mm.
-        tsdf.integrate(&depth_image(&cam, plane_z(2.51)), &cam);
+        // Weight 6 now: one view of a plane 1 cm further moves the
+        // near-surface voxels by 1/7 cm.
+        let shifted = depth_image(&cam, plane_z(2.51));
+        tsdf.integrate(&shifted, &cam);
         assert!(
             tsdf.take_changed().is_empty(),
             "sub-threshold change reported"
+        );
+
+        // Converging on the shifted plane moves them by nearly 1 cm.
+        for _ in 0..30 {
+            tsdf.integrate(&shifted, &cam);
+        }
+        assert!(
+            tsdf.take_changed().contains(&brick),
+            "1 cm shift of a converged plane not reported"
         );
 
         // A 20 cm jump moves every band voxel by centimetres.
@@ -773,6 +876,62 @@ mod tests {
                 // Up to one voxel behind the plane observations count fully.
                 assert_eq!(samples.weight[sample_index(x, y, 10)], 1.0, "({x},{y},10)");
             }
+        }
+    }
+
+    #[test]
+    fn weights_below_min_weight_read_unobserved() {
+        let (mut tsdf, _) = plane_setup();
+        let key = BrickKey(IVec3::new(0, 0, 2));
+        let p = vec3(0.025, 0.025, 2.475);
+        let i = sample_index(0, 0, 9);
+        tsdf.take_changed();
+
+        tsdf.decay(MIN_WEIGHT);
+        tsdf.take_changed();
+        assert!(tsdf.sdf(p).is_some(), "weight at MIN_WEIGHT is observed");
+        assert_eq!(tsdf.brick_samples(key).unwrap().weight[i], MIN_WEIGHT);
+
+        tsdf.decay(0.9);
+        assert_eq!(tsdf.sdf(p), None);
+        let samples = tsdf.brick_samples(key).unwrap();
+        assert_eq!((samples.sdf[i], samples.weight[i]), (1.0, 0.0));
+        assert!(
+            tsdf.take_changed().contains(&key),
+            "surface decayed away is a change"
+        );
+    }
+
+    /// A 160×120 image with the principal point off centre and different
+    /// horizontal and vertical fov: a box in front of a wall, seen from one
+    /// pose, lands where it is.
+    #[test]
+    fn non_square_image_with_offset_principal_point() {
+        let size = UVec2::new(160, 120);
+        let cam = look_at_with(
+            Vec3::ZERO,
+            Vec3::Z,
+            70f64.to_radians(),
+            50f64.to_radians(),
+            Vec2::new(0.4, 0.6),
+        );
+        let (lo, hi) = (vec3(0.2, -0.4, 1.5), vec3(0.6, -0.1, 1.9));
+        let scene = union(aabb(lo, hi), plane_z(2.5));
+        let mut tsdf = Tsdf::new();
+        tsdf.integrate(&depth_image_sized(&cam, size, &scene), &cam);
+
+        for (x, y) in [(0.25, -0.35), (0.55, -0.15), (0.4, -0.25)] {
+            let on = tsdf.sdf(vec3(x, y, 1.5)).expect("box face observed");
+            assert!(on.abs() < 0.01, "box face ({x},{y}): sdf {on}");
+        }
+        // Beside the box the rays reach the wall: free space at the face depth.
+        for (x, y) in [(0.1, -0.25), (0.7, -0.25), (0.4, -0.5), (0.4, 0.0)] {
+            let beside = tsdf.sdf(vec3(x, y, 1.5)).expect("free space observed");
+            assert!(beside > 0.1, "beside the box ({x},{y}): sdf {beside}");
+        }
+        for (x, y) in [(-0.3, 0.3), (1.0, 0.5), (-0.6, -0.9), (0.1, -0.25)] {
+            let wall = tsdf.sdf(vec3(x, y, 2.5)).expect("wall observed");
+            assert!(wall.abs() < 0.01, "wall ({x},{y}): sdf {wall}");
         }
     }
 
