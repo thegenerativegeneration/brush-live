@@ -1,6 +1,6 @@
 use glam::Vec3;
 
-use super::worker::{flatness, shortest_axis};
+use super::splat_read::{flatness, shortest_axis};
 use super::*;
 
 /// Exercises the channel-closed check directly, without spinning up the

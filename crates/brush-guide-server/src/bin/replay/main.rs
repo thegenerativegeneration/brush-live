@@ -46,6 +46,10 @@ struct Args {
     /// `nx, ny, nz = 0, 0, 0` when the cell has no normal.
     #[arg(long)]
     dump_scores: Option<PathBuf>,
+    /// With `--dump-scores`, skip score sets arriving less than this many
+    /// seconds after the last dumped one.
+    #[arg(long, default_value_t = 0.0)]
+    dump_every: f32,
     /// Write every received `mesh_bricks` round to this directory: each
     /// brick's mesh as `v<version>_brick_<x>_<y>_<z>.ply` (ASCII, world
     /// metres, sRGB vertex colours when sent) and one JSON line per round in `rounds.jsonl` with its bricks
@@ -105,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
             .transpose()?,
         mesh_dump: args.dump_mesh.clone(),
         stop_on_splat: args.finish_after.is_some(),
+        dump_every_s: args.dump_every,
+        started: started.into_std(),
+        last_dump: None,
     };
     let receiver = tokio::spawn(receiver.run(source));
 

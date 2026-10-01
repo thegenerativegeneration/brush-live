@@ -1,6 +1,7 @@
 use brush_guide::config::GuideConfig;
 use brush_guide::protocol::{ClientHeader, ServerHeader, decode_frame, encode_frame};
 use brush_guide::session::{GuideSession, SessionError};
+use brush_guide::warmup::Warmup;
 use burn::tensor::Device;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -39,17 +40,27 @@ struct Shared {
     device: Device,
     root: PathBuf,
     sessions: Sessions,
+    /// Sessions take no commands until this turns true (GPU warm-up).
+    ready: Option<watch::Receiver<bool>>,
 }
 
+/// Serves on `listener`. With `config.warmup`, a GPU warm-up starts at once
+/// on its own thread; connections are accepted meanwhile and their sessions
+/// queue keyframes until it is done.
 pub async fn serve(
     listener: TcpListener,
     config: GuideConfig,
     device: Device,
     root: PathBuf,
 ) -> anyhow::Result<()> {
-    serve_with(listener, config, device, root, Timeouts::default()).await
+    let warmup = config
+        .warmup
+        .then(|| Warmup::spawn(config.clone(), device.clone()));
+    let ready = warmup.as_ref().map(Warmup::ready);
+    serve_inner(listener, config, device, root, Timeouts::default(), ready).await
 }
 
+/// Serves without a warm-up.
 pub async fn serve_with(
     listener: TcpListener,
     config: GuideConfig,
@@ -57,12 +68,24 @@ pub async fn serve_with(
     root: PathBuf,
     timeouts: Timeouts,
 ) -> anyhow::Result<()> {
+    serve_inner(listener, config, device, root, timeouts, None).await
+}
+
+async fn serve_inner(
+    listener: TcpListener,
+    config: GuideConfig,
+    device: Device,
+    root: PathBuf,
+    timeouts: Timeouts,
+    ready: Option<watch::Receiver<bool>>,
+) -> anyhow::Result<()> {
     let shared = Shared {
         timeouts,
         config,
         device,
         root,
         sessions: Arc::default(),
+        ready,
     };
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -103,10 +126,11 @@ async fn get_or_start(shared: &Shared, session_id: &str) -> GuideSession {
     if !alive {
         map.insert(
             session_id.to_owned(),
-            GuideSession::start(
+            GuideSession::start_when(
                 shared.config.clone(),
                 shared.device.clone(),
                 shared.root.join(session_id),
+                shared.ready.clone(),
             ),
         );
     }

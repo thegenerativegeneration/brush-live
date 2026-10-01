@@ -391,4 +391,5 @@ fn non_finite_position_or_opacity_is_skipped() {
     assert_eq!(cells[0].coverage, 255);
 }
 
+mod legacy;
 mod normals;

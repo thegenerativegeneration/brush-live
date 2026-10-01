@@ -10,5 +10,6 @@ pub mod schedule;
 pub mod seed;
 pub mod session;
 pub mod timing;
+pub mod warmup;
 
 pub mod scores;

@@ -30,10 +30,24 @@ pub struct GuideConfig {
     pub all_loader_rebuild_every: usize,
     /// Decoded-frame cache per scene loader, in bytes.
     pub loader_cache_bytes: u64,
+    /// Share of wall time for voxel rounds (score set from the splat
+    /// parameters, TSDF fusion, meshing).
     pub score_budget: f32,
+    /// Minimum start-to-start interval of voxel rounds.
     pub min_score_interval_s: f32,
-    /// Views per scoring round: the newest 40 plus a stratified sample of the rest.
-    pub max_score_views: usize,
+    /// Share of wall time for Fisher passes (coverage and uncertainty).
+    pub fisher_budget: f32,
+    /// Minimum start-to-start interval of Fisher passes.
+    pub min_fisher_interval_s: f32,
+    /// Views per Fisher pass at most: the newest third plus one view per
+    /// stratum of the rest, rotating (`schedule::ViewSample`).
+    pub max_fisher_views: usize,
+    /// Fewest views a Fisher pass is shortened to so it ends before the next
+    /// voxel round is due.
+    pub min_fisher_views: usize,
+    /// Run a render, backward and depth render on dummy splats at server
+    /// start so GPU autotuning happens before the first session.
+    pub warmup: bool,
     pub sh_degree: u32,
     pub seed_stride_px: u32,
     pub seed_alpha_threshold: f32,
@@ -74,7 +88,11 @@ impl Default for GuideConfig {
             loader_cache_bytes: 1 << 30,
             score_budget: 0.25,
             min_score_interval_s: 2.0,
-            max_score_views: 120,
+            fisher_budget: 0.1,
+            min_fisher_interval_s: 3.0,
+            max_fisher_views: 30,
+            min_fisher_views: 12,
+            warmup: true,
             sh_degree: 1,
             seed_stride_px: 8,
             seed_alpha_threshold: 0.5,

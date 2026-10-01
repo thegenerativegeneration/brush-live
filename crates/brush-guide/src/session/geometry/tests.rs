@@ -78,13 +78,23 @@ fn rounds_integrate_new_views_and_rotate_through_older_ones() {
     assert_eq!(g.views_for_round(6), vec![1, 2, 3, 4]);
 }
 
-/// A row of 30 bricks along x holding the plane z = 0.5.
+/// The cap the queueing tests below are written for.
+const CAP: usize = 24;
+
+#[test]
+fn default_cap_is_96_bricks_per_round() {
+    assert_eq!(Geometry::new().max_bricks, 96);
+}
+
+/// A row of 30 bricks along x holding the plane z = 0.5, meshed at most
+/// `CAP` per round.
 fn plane_row() -> Geometry {
     let keys: Vec<BrickKey> = (0..30)
         .map(|x| BrickKey(glam::IVec3::new(x, 0, 0)))
         .collect();
     Geometry {
         tsdf: Tsdf::from_sdf(&keys, |p| Some(p.z - 0.5)),
+        max_bricks: CAP,
         ..Geometry::new()
     }
 }
@@ -149,7 +159,7 @@ fn meshing_queue_is_fair_among_bricks_meshed_before() {
     for round in 0..2 {
         let (bricks, pending) = g.mesh_changed(eye);
         assert_eq!(pending, 30, "round {round}");
-        assert_eq!(bricks.len(), MAX_BRICKS_PER_ROUND, "round {round}");
+        assert_eq!(bricks.len(), CAP, "round {round}");
         far_meshed.extend(bricks.iter().map(|b| b.key().0.x).filter(|&x| x < 6));
         // The near bricks move by 2 cm again (alternating).
         let z = if round % 2 == 0 { 0.5 } else { 0.52 };
@@ -247,7 +257,7 @@ fn colour_only_changes_wait_behind_geometry_changes() {
     g.tsdf.fill_colour(&row(0..4), [1.0, 0.0, 0.0]);
     g.tsdf.fill_sdf(&row(5..30), |p| Some(p.z - 0.52));
     let (bricks, pending) = g.mesh_changed(eye);
-    assert_eq!((bricks.len(), pending), (MAX_BRICKS_PER_ROUND, 30));
+    assert_eq!((bricks.len(), pending), (CAP, 30));
     let xs: Vec<i32> = bricks.iter().map(|b| b.key().0.x).collect();
     assert!(xs.iter().all(|&x| x >= 4), "geometry first: {xs:?}");
 

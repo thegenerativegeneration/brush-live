@@ -3,6 +3,21 @@ use crate::scores::metrics::{FisherRidge, position_sigma};
 use glam::{IVec3, Mat3, Vec3};
 use std::collections::HashMap;
 
+/// What the voxel round needs of one Gaussian; read from the splat
+/// parameters, no render.
+#[derive(Clone, Copy, Debug)]
+pub struct SplatGeom {
+    pub pos: Vec3,
+    pub opacity: f32,
+    /// Unit direction of the Gaussian's shortest scale axis in world space (sign arbitrary).
+    pub axis: Vec3,
+    /// `1 − s_min / s_mid` of the sorted scales: 0 for a round Gaussian, whose
+    /// `axis` carries no orientation, towards 1 for a flat disc. Scales the
+    /// Gaussian's vote on the voxel normal.
+    pub flatness: f32,
+}
+
+/// One Gaussian with the Fisher pass's scores.
 #[derive(Clone, Copy, Debug)]
 pub struct GaussianScore {
     pub pos: Vec3,
@@ -10,12 +25,19 @@ pub struct GaussianScore {
     pub coverage: f32,
     /// Position block of the Gaussian's Fisher, row-major 3×3.
     pub fisher_pos: [f32; 9],
-    /// Unit direction of the Gaussian's shortest scale axis in world space (sign arbitrary).
     pub axis: Vec3,
-    /// `1 − s_min / s_mid` of the sorted scales: 0 for a round Gaussian, whose
-    /// `axis` carries no orientation, towards 1 for a flat disc. Scales the
-    /// Gaussian's vote on the voxel normal.
     pub flatness: f32,
+}
+
+impl GaussianScore {
+    pub fn geom(&self) -> SplatGeom {
+        SplatGeom {
+            pos: self.pos,
+            opacity: self.opacity,
+            axis: self.axis,
+            flatness: self.flatness,
+        }
+    }
 }
 
 /// A keyframe camera approximated as a cone for "does this camera see the voxel".
@@ -42,15 +64,32 @@ const MIN_NORMAL_WEIGHT: f32 = 0.3;
 /// a voxel of only round Gaussians has no orientation.
 const MIN_FLAT_WEIGHT: f32 = 0.1;
 
+/// Coverage byte of a voxel no Fisher pass has scored yet ("unseen").
+pub const UNINFORMED_COVERAGE: u8 = 0;
+/// Uncertainty byte of a voxel without information: no Fisher pass has
+/// scored it yet, or its summed Fisher is zero.
+pub const UNINFORMED_UNCERTAINTY: u8 = 255;
+
+/// Builds score-set cells in two parts: [`Self::update_fisher`] takes a
+/// Fisher pass and keeps each voxel's coverage and smoothed uncertainty
+/// byte; [`Self::cells`] builds the cells from the splat parameters alone
+/// and attaches the latest Fisher bytes per voxel.
 pub struct VoxelAggregator {
     voxel_size: f32,
     min_opacity: f32,
     scale: UncertaintyScale,
     first_seen: HashMap<IVec3, f64>,
-    /// EMA (α = 0.3 on the new round) of the sent uncertainty byte per voxel.
-    unc_ema: HashMap<IVec3, f32>,
+    /// Per voxel, as of the latest Fisher pass that scored it.
+    fisher: HashMap<IVec3, FisherBytes>,
     record_raw: bool,
     raw: Vec<RawVoxel>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FisherBytes {
+    coverage: u8,
+    /// EMA (α = 0.3 on the new pass) of the uncertainty byte.
+    unc_ema: f32,
 }
 
 /// How a voxel's summed position Fisher becomes its positional σ.
@@ -71,11 +110,17 @@ pub struct RawVoxel {
     pub sigma: f32,
 }
 
-struct Acc {
+/// A voxel's Fisher-pass sums.
+struct FisherAcc {
     w: f32,
     cov: f32,
     /// Σ opacity · position Fisher over Gaussians with a finite block.
     info: [f64; 9],
+}
+
+/// A voxel's geometry sums.
+struct GeomAcc {
+    w: f32,
     pos: Vec3,
     /// Σ opacity · flatness · a aᵀ over Gaussians with a usable axis.
     tensor: Mat3,
@@ -83,13 +128,11 @@ struct Acc {
     axis_w: f32,
 }
 
-impl Acc {
+impl GeomAcc {
     // glam's Mat3::default() is the identity, so the accumulator is built explicitly.
     fn new() -> Self {
         Self {
             w: 0.0,
-            cov: 0.0,
-            info: [0.0; 9],
             pos: Vec3::ZERO,
             tensor: Mat3::ZERO,
             axis_w: 0.0,
@@ -190,13 +233,13 @@ impl VoxelAggregator {
             min_opacity,
             scale,
             first_seen: HashMap::new(),
-            unc_ema: HashMap::new(),
+            fisher: HashMap::new(),
             record_raw: false,
             raw: Vec::new(),
         }
     }
 
-    /// Whether `aggregate` keeps each voxel's raw scores for `raw_round`.
+    /// Whether `update_fisher` keeps each voxel's raw scores for `raw_round`.
     pub fn record_raw(&mut self, on: bool) {
         self.record_raw = on;
         if !on {
@@ -204,7 +247,7 @@ impl VoxelAggregator {
         }
     }
 
-    /// Per-voxel raw scores of the latest `aggregate` call; empty unless
+    /// Per-voxel raw scores of the latest `update_fisher` call; empty unless
     /// recording is on.
     pub fn raw_round(&self) -> &[RawVoxel] {
         &self.raw
@@ -212,28 +255,37 @@ impl VoxelAggregator {
 
     pub fn reset(&mut self) {
         self.first_seen.clear();
-        self.unc_ema.clear();
+        self.fisher.clear();
     }
 
-    pub fn aggregate(
-        &mut self,
-        gaussians: &[GaussianScore],
-        cameras: &[ViewCone],
-        now_s: f64,
-    ) -> Vec<Cell> {
-        let mut acc: HashMap<IVec3, Acc> = HashMap::new();
+    /// The voxel a Gaussian counts towards, if it is opaque enough: the
+    /// occupancy rule both parts share.
+    fn key(&self, pos: Vec3, opacity: f32) -> Option<IVec3> {
+        let visible = opacity.is_finite() && opacity >= self.min_opacity;
+        (visible && pos.is_finite()).then(|| (pos / self.voxel_size).floor().as_ivec3())
+    }
+
+    /// Takes one Fisher pass: per voxel, the opacity-weighted mean coverage
+    /// and the positional σ of the summed position Fisher, mapped to a byte
+    /// between this pass's 5th and 95th percentile of `ln σ` and smoothed
+    /// per voxel across passes. Voxels this pass does not hold keep their
+    /// previous bytes. Returns the number of voxels scored.
+    pub fn update_fisher(&mut self, gaussians: &[GaussianScore]) -> usize {
+        let mut acc: HashMap<IVec3, FisherAcc> = HashMap::new();
         for g in gaussians {
-            let visible = g.opacity.is_finite() && g.opacity >= self.min_opacity;
-            if !visible || !g.pos.is_finite() {
+            let Some(key) = self.key(g.pos, g.opacity) else {
                 continue;
-            }
+            };
             let coverage = if g.coverage.is_finite() {
                 g.coverage
             } else {
                 0.0
             };
-            let key = (g.pos / self.voxel_size).floor().as_ivec3();
-            let a = acc.entry(key).or_insert_with(Acc::new);
+            let a = acc.entry(key).or_insert(FisherAcc {
+                w: 0.0,
+                cov: 0.0,
+                info: [0.0; 9],
+            });
             a.w += g.opacity;
             a.cov += g.opacity * coverage;
             if g.fisher_pos.iter().all(|v| v.is_finite()) {
@@ -241,6 +293,54 @@ impl VoxelAggregator {
                     *s += f64::from(g.opacity) * f64::from(h);
                 }
             }
+        }
+
+        let sc = self.scale;
+        let voxels: Vec<(IVec3, FisherAcc, f32)> = acc
+            .into_iter()
+            .map(|(key, a)| {
+                let sigma = voxel_sigma(&a.info, &sc);
+                (key, a, sigma)
+            })
+            .collect();
+        let sigmas: Vec<f32> = voxels.iter().map(|v| v.2).collect();
+        let range = log_sigma_range(&sigmas);
+        self.raw.clear();
+        let scored = voxels.len();
+        for (key, a, sigma) in voxels {
+            if self.record_raw {
+                self.raw.push(RawVoxel {
+                    key,
+                    coverage: a.cov / a.w,
+                    sigma,
+                });
+            }
+            let u8_unc = f32::from(uncertainty_byte(sigma, range));
+            let prev = self.fisher.get(&key).map_or(u8_unc, |f| f.unc_ema);
+            self.fisher.insert(
+                key,
+                FisherBytes {
+                    coverage: ((a.cov / a.w).clamp(0.0, 1.0) * 255.0).round() as u8,
+                    unc_ema: 0.3 * u8_unc + 0.7 * prev,
+                },
+            );
+        }
+        scored
+    }
+
+    /// The score set's cells from the splat parameters: centre, density and
+    /// normal from this call's Gaussians, age from each voxel's first
+    /// appearance here, coverage and uncertainty from the latest Fisher pass
+    /// that scored the voxel ([`UNINFORMED_COVERAGE`] and
+    /// [`UNINFORMED_UNCERTAINTY`] if none has).
+    pub fn cells(&mut self, gaussians: &[SplatGeom], cameras: &[ViewCone], now_s: f64) -> Vec<Cell> {
+        let mut acc: HashMap<IVec3, GeomAcc> = HashMap::new();
+        for g in gaussians {
+            let Some(key) = self.key(g.pos, g.opacity) else {
+                continue;
+            };
+            let a = acc.entry(key).or_insert_with(GeomAcc::new);
+            a.w += g.opacity;
             a.pos += g.opacity * g.pos;
             let axis_w = if g.flatness.is_finite() {
                 g.opacity * g.flatness.clamp(0.0, 1.0)
@@ -253,50 +353,41 @@ impl VoxelAggregator {
                 a.axis_w += axis_w;
             }
         }
-
-        let sc = self.scale;
-        let voxels: Vec<(IVec3, Acc, f32)> = acc
-            .into_iter()
+        acc.into_iter()
             .map(|(key, a)| {
-                let sigma = voxel_sigma(&a.info, &sc);
-                (key, a, sigma)
-            })
-            .collect();
-        let sigmas: Vec<f32> = voxels.iter().map(|v| v.2).collect();
-        let range = log_sigma_range(&sigmas);
-        self.raw.clear();
-        voxels
-            .into_iter()
-            .map(|(key, a, sigma)| {
                 let first = *self.first_seen.entry(key).or_insert(now_s);
-                if self.record_raw {
-                    self.raw.push(RawVoxel {
-                        key,
-                        coverage: a.cov / a.w,
-                        sigma,
-                    });
-                }
-                let u8_unc = uncertainty_byte(sigma, range);
-                let prev = *self.unc_ema.get(&key).unwrap_or(&(u8_unc as f32));
-                let smoothed = 0.3 * u8_unc as f32 + 0.7 * prev;
-                self.unc_ema.insert(key, smoothed);
+                let (coverage, uncertainty) = self.fisher.get(&key).map_or(
+                    (UNINFORMED_COVERAGE, UNINFORMED_UNCERTAINTY),
+                    |f| (f.coverage, f.unc_ema.round() as u8),
+                );
                 let center = a.pos / a.w;
                 let normal = (a.w >= MIN_NORMAL_WEIGHT && a.axis_w >= MIN_FLAT_WEIGHT)
                     .then(|| dominant_axis(a.tensor))
                     .flatten()
                     .filter(|(_, planarity)| *planarity >= MIN_PLANARITY)
                     .map(|(n, _)| orient(n, center, cameras).to_array());
-                let density = (a.w * 32.0).round().min(255.0) as u8;
                 Cell {
                     center: center.to_array(),
-                    coverage: ((a.cov / a.w).clamp(0.0, 1.0) * 255.0).round() as u8,
-                    uncertainty: smoothed.round() as u8,
+                    coverage,
+                    uncertainty,
                     age: (now_s - first).clamp(0.0, 255.0) as u8,
                     normal,
-                    density,
+                    density: (a.w * 32.0).round().min(255.0) as u8,
                 }
             })
             .collect()
+    }
+
+    /// A Fisher pass and the cells of the same Gaussians, as one call.
+    pub fn aggregate(
+        &mut self,
+        gaussians: &[GaussianScore],
+        cameras: &[ViewCone],
+        now_s: f64,
+    ) -> Vec<Cell> {
+        self.update_fisher(gaussians);
+        let geoms: Vec<SplatGeom> = gaussians.iter().map(GaussianScore::geom).collect();
+        self.cells(&geoms, cameras, now_s)
     }
 }
 

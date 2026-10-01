@@ -18,6 +18,11 @@ pub(crate) struct Receiver {
     pub(crate) mesh_dump: Option<PathBuf>,
     /// Return once the server answers `finish` with `splat`.
     pub(crate) stop_on_splat: bool,
+    /// Dump a score set only this many seconds after the last dumped one.
+    pub(crate) dump_every_s: f32,
+    /// When the replay connected; received frames are stamped relative to it.
+    pub(crate) started: std::time::Instant,
+    pub(crate) last_dump: Option<std::time::Instant>,
 }
 
 impl Receiver {
@@ -42,6 +47,12 @@ impl Receiver {
         let Ok((header, payload)) = decode_frame::<ServerHeader>(bytes) else {
             return false;
         };
+        if matches!(
+            header,
+            ServerHeader::ScoreSet { .. } | ServerHeader::MeshBricks { .. }
+        ) {
+            eprint!("[{:8.2} s] ", self.started.elapsed().as_secs_f64());
+        }
         match header {
             ServerHeader::ScoreSet {
                 version,
@@ -94,8 +105,14 @@ impl Receiver {
             return;
         }
         let cells = decode_cells(payload).unwrap_or_default();
-        if let Some(dump) = self.score_dump.as_mut() {
+        let due = self
+            .last_dump
+            .is_none_or(|t| t.elapsed().as_secs_f32() >= self.dump_every_s);
+        if let Some(dump) = self.score_dump.as_mut()
+            && due
+        {
             dump.write(version, voxel_size, &cells);
+            self.last_dump = Some(std::time::Instant::now());
         }
         log_score_set(&self.rec, version, voxel_size, &cells, self.mode);
     }

@@ -96,8 +96,10 @@ impl MeshLog {
     }
 }
 
-/// Bricks meshed per round at most; further changed bricks wait.
-const MAX_BRICKS_PER_ROUND: usize = 24;
+/// Bricks meshed per round at most; further changed bricks wait. At about
+/// 0.3 ms of meshing per brick the round stays cheap; the phone paces what
+/// it applies on its own (`BrickStore`, a few bricks per overlay tick).
+const MAX_BRICKS_PER_ROUND: usize = 96;
 /// Older keyframes re-integrated per round besides the new ones.
 const REFRESH_VIEWS_PER_ROUND: usize = 4;
 /// New keyframes integrated per round at most; further ones wait.
@@ -124,6 +126,8 @@ pub(super) struct Geometry {
     stale_since: HashMap<BrickKey, u64>,
     /// Meshing rounds so far.
     round: u64,
+    /// Bricks meshed per round at most.
+    max_bricks: usize,
 }
 
 impl Geometry {
@@ -136,6 +140,7 @@ impl Geometry {
             visited: HashSet::new(),
             stale_since: HashMap::new(),
             round: 0,
+            max_bricks: MAX_BRICKS_PER_ROUND,
         }
     }
 
@@ -199,7 +204,7 @@ impl Geometry {
         round.len()
     }
 
-    /// Meshes up to `MAX_BRICKS_PER_ROUND` stale bricks, those whose
+    /// Meshes up to `max_bricks` stale bricks, those whose
     /// geometry changed before those whose colour alone changed, and marks
     /// them meshed; the rest stay stale for later rounds. A brick that had
     /// a mesh and has none now is returned as removed. Also returns how
@@ -251,7 +256,7 @@ impl Geometry {
         (bricks, pending)
     }
 
-    /// The first `MAX_BRICKS_PER_ROUND` of `stale` (geometry changed),
+    /// The first `max_bricks` of `stale` (geometry changed),
     /// then of `repainted` (only colour changed). Within each, bricks never
     /// meshed come first, then those stale for the most rounds, then those
     /// nearest to `eye`, so near bricks that keep changing cannot starve
@@ -280,7 +285,7 @@ impl Geometry {
         stale.sort_by(order);
         repainted.sort_by(order);
         stale.extend(repainted);
-        stale.truncate(MAX_BRICKS_PER_ROUND);
+        stale.truncate(self.max_bricks);
         for k in &stale {
             self.stale_since.remove(k);
             self.visited.insert(*k);

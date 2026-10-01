@@ -1,22 +1,23 @@
 //! The session worker: trains on incoming keyframes and, when the
-//! scheduler says so, runs a round of scoring, TSDF fusion and meshing.
+//! scheduler says so, runs a voxel round (score set from the splat
+//! parameters, TSDF fusion, meshing) or a Fisher pass (coverage and
+//! uncertainty per voxel, eviction importance).
+
+mod fisher;
 
 use super::geometry::{Geometry, MeshLog};
+use super::splat_read::{SplatRead, view_cones};
 use super::{Command, ScoreSetMsg, StatusMsg};
 use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
 use crate::protocol::{Cell, KeyframeHeader, MeshBrick};
-use crate::schedule::{ScoreScheduler, score_view_weight, select_score_views};
-use crate::scores::importance::importances;
-use crate::scores::metrics::gaussian_metrics;
-use crate::scores::pass::{PassView, score_pass};
-use crate::scores::voxel::{GaussianScore, RawVoxel, ViewCone, VoxelAggregator};
-use brush_dataset::scene::SceneView;
+use crate::schedule::{Cadence, FisherCost, Round, RoundScheduler};
+use crate::scores::voxel::{RawVoxel, VoxelAggregator};
 use brush_render::gaussian_splats::Splats;
 use burn::module::Module;
-use burn::tensor::{Device, Tensor};
-use glam::{Quat, UVec2, Vec3};
+use burn::tensor::Device;
+use glam::UVec2;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -28,13 +29,24 @@ pub(super) struct Channels {
     pub(super) status: watch::Sender<StatusMsg>,
 }
 
+/// Runs the session. With `ready`, waits for it to turn true (the server's
+/// GPU warm-up) before taking commands; they queue meanwhile.
 pub(super) async fn worker(
     config: GuideConfig,
     device: Device,
     session_dir: PathBuf,
     mut rx: mpsc::Receiver<Command>,
     channels: Channels,
+    ready: Option<watch::Receiver<bool>>,
 ) {
+    if let Some(mut ready) = ready {
+        let t = Instant::now();
+        let _ = ready.wait_for(|r| *r).await;
+        let waited = t.elapsed().as_secs_f64();
+        if waited > 0.05 {
+            log::info!("session waited {waited:.1} s for the GPU warm-up");
+        }
+    }
     let mut w = Worker::new(config, device, session_dir, channels);
     loop {
         // With nothing to train, block for the next command; otherwise just drain.
@@ -71,14 +83,17 @@ pub(super) async fn worker(
         w.acc.train_s += t.elapsed().as_secs_f64();
         w.acc.steps += 1;
         let now = w.clock.elapsed().as_secs_f64();
-        if w.scheduler.due(now) {
+        if let Some(round) = w.scheduler.next(now, w.fisher_cost()) {
             let t = Instant::now();
             if let Some(s) = w.live.splats() {
                 crate::timing::sync_splats(s).await;
             }
             w.acc.train_s += t.elapsed().as_secs_f64();
             let now = w.clock.elapsed().as_secs_f64();
-            w.score_round(now).await;
+            match round {
+                Round::Voxel => w.voxel_round(now).await,
+                Round::Fisher(max_views) => w.fisher_pass(now, max_views).await,
+            }
         }
         w.publish_status();
         brush_async::yield_now().await;
@@ -93,7 +108,11 @@ struct Worker {
     clock: Instant,
     live: LiveModel,
     voxels: VoxelAggregator,
-    scheduler: ScoreScheduler,
+    scheduler: RoundScheduler,
+    /// Fisher passes so far; rotates their view sample.
+    fisher_passes: u64,
+    /// Cost of the last Fisher pass and the splat count it ran at.
+    fisher_cost: Option<(FisherCost, u32)>,
     geometry: Geometry,
     /// Version of the last score set.
     version: u64,
@@ -128,7 +147,7 @@ impl Worker {
             config.uncertainty_scale(),
         );
         voxels.record_raw(config.dump_raw_uncertainty);
-        let scheduler = ScoreScheduler::new(config.score_budget, config.min_score_interval_s);
+        let scheduler = scheduler(&config);
         let rate_window = (clock.elapsed().as_secs_f64(), live.iter());
         Self {
             config,
@@ -139,6 +158,8 @@ impl Worker {
             live,
             voxels,
             scheduler,
+            fisher_passes: 0,
+            fisher_cost: None,
             geometry: Geometry::new(),
             version: 0,
             last_score_ms: 0,
@@ -215,7 +236,9 @@ impl Worker {
         self.live = LiveModel::new(config.clone(), self.device.clone());
         self.voxels.reset();
         self.geometry = Geometry::new();
-        self.scheduler = ScoreScheduler::new(config.score_budget, config.min_score_interval_s);
+        self.scheduler = scheduler(config);
+        self.fisher_passes = 0;
+        self.fisher_cost = None;
         self.sizes.clear();
         self.finished = false;
         self.evicted_at_round = 0;
@@ -227,9 +250,10 @@ impl Worker {
         self.channels.status.send_replace(StatusMsg::default());
     }
 
-    /// Scores the splats, fuses and meshes the TSDF, and publishes the
-    /// round's bricks, then its score set. `now` is when the round started.
-    async fn score_round(&mut self, now: f64) {
+    /// Builds the score set from the splat parameters, fuses and meshes the
+    /// TSDF, and publishes the round's bricks, then its score set. `start`
+    /// is when the round started.
+    async fn voxel_round(&mut self, start: f64) {
         let acc = std::mem::take(&mut self.acc);
         let refine = self.live.take_refine_stats();
         log::debug!(
@@ -247,17 +271,11 @@ impl Worker {
             self.live.splats().map_or(0, |s| s.num_splats())
         );
         let splats = self.live.splats().expect("views imply splats").clone();
-        let cells = self.score_cells(&splats).await;
+        let cells = self.cells(&splats).await;
         let scored = self.clock.elapsed().as_secs_f64();
-        self.last_score_ms = ((scored - now) * 1000.0) as u32;
+        self.last_score_ms = ((scored - start) * 1000.0) as u32;
         self.version += 1;
         let version = self.version;
-        if self.config.dump_raw_uncertainty {
-            let path = self.session_dir.join("raw_uncertainty.jsonl");
-            if let Err(e) = append_raw_round(&path, version, self.voxels.raw_round()) {
-                log::warn!("raw uncertainty dump to {}: {e}", path.display());
-            }
-        }
 
         let (bricks, pending, num_fused) = self.mesh_round(&splats).await;
         let end = self.clock.elapsed().as_secs_f64();
@@ -265,12 +283,14 @@ impl Worker {
         let evicted = self.live.num_evicted() - self.evicted_at_round;
         self.evicted_at_round = self.live.num_evicted();
         log::info!(
-            "round {version}: {} bricks sent of {pending} stale, {num_fused} views fused, {mesh_ms} ms; \
-             {} splats, {evicted} evicted since last round",
+            "round {version} at {start:.2} s: {} cells in {} ms; {} bricks sent of {pending} stale, \
+             {num_fused} views fused, {mesh_ms} ms; {} splats, {evicted} evicted since last round",
+            cells.len(),
+            self.last_score_ms,
             bricks.len(),
             splats.num_splats()
         );
-        self.scheduler.record(end, end - now);
+        self.scheduler.voxel.record(start, end - start);
         self.channels
             .meshes
             .send_modify(|log| log.record(version, mesh_ms, bricks));
@@ -284,65 +304,41 @@ impl Worker {
             })));
     }
 
-    /// Voxel cells of this round's score pass over a sample of the views.
-    async fn score_cells(&mut self, splats: &Splats) -> Vec<Cell> {
-        let config = &self.config;
-        let num_views = self.live.views().len();
-        let t = Instant::now();
-        let views: Vec<PassView> = select_score_views(
-            num_views,
-            config.max_score_views,
-            config.seed.wrapping_add(self.version),
-        )
-        .into_iter()
-        .map(|i| PassView {
-            camera: self.live.views()[i].camera,
-            img_size: self.sizes[i],
-            // Sums over the sample estimate sums over every view, so
-            // `CoverageParams::n_target` and σ refer to the whole capture.
-            weight: score_view_weight(i, num_views, config.max_score_views),
-        })
-        .collect();
-        let t_select = t.elapsed().as_secs_f64();
-        let t = Instant::now();
-        let out = score_pass(splats, &views, &config.pass).await;
-        let t_pass = t.elapsed().as_secs_f64();
-        let t = Instant::now();
-        let (coverage, fisher_pos) = gaussian_metrics(&out, &config.coverage);
-        let t_metrics = t.elapsed().as_secs_f64();
+    /// The score set's cells from the splat parameters, with each voxel's
+    /// coverage and uncertainty from the latest Fisher pass that scored it.
+    async fn cells(&mut self, splats: &Splats) -> Vec<Cell> {
         let t = Instant::now();
         let read = SplatRead::new(splats).await;
         let t_read = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        if config.evict {
-            let importance = importances(&out, &read.rots, &read.scales);
-            self.live.set_importance(&importance);
-        }
-        let t_importance = t.elapsed().as_secs_f64();
-        let t = Instant::now();
-        let gaussians = gaussian_scores(&read, &coverage, &fisher_pos);
+        let geoms = read.geoms();
         let cones = view_cones(self.live.views());
         let t_prep = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let cells = self
             .voxels
-            .aggregate(&gaussians, &cones, self.clock.elapsed().as_secs_f64());
+            .cells(&geoms, &cones, self.clock.elapsed().as_secs_f64());
         log::debug!(
             target: crate::timing::TARGET,
-            "score: {} views, select {:.1} ms, pass {:.0} ms, metrics {:.0} ms, splat readback {:.0} ms, \
-             importance {:.0} ms, gaussian prep {:.0} ms ({} cones), voxel aggregate {:.0} ms, {} cells",
-            views.len(),
-            t_select * 1e3,
-            t_pass * 1e3,
-            t_metrics * 1e3,
+            "cells: splat readback {:.0} ms, gaussian prep {:.0} ms ({} cones), voxel aggregate {:.0} ms, {} cells",
             t_read * 1e3,
-            t_importance * 1e3,
             t_prep * 1e3,
             cones.len(),
             t.elapsed().as_secs_f64() * 1e3,
             cells.len()
         );
         cells
+    }
+
+    /// The last Fisher pass's cost, scaled to the current splat count.
+    fn fisher_cost(&self) -> Option<FisherCost> {
+        let (c, n) = self.fisher_cost?;
+        let now = self.live.splats().map_or(n, Splats::num_splats);
+        let k = f64::from(now.max(1)) / f64::from(n.max(1));
+        Some(FisherCost {
+            per_view_s: c.per_view_s * k,
+            fixed_s: c.fixed_s * k,
+        })
     }
 
     /// Fuses and meshes the TSDF: the bricks to publish, how many were
@@ -379,6 +375,15 @@ impl Worker {
     }
 }
 
+fn scheduler(config: &GuideConfig) -> RoundScheduler {
+    RoundScheduler::new(
+        Cadence::new(config.score_budget, config.min_score_interval_s),
+        Cadence::new(config.fisher_budget, config.min_fisher_interval_s),
+        config.max_fisher_views,
+        config.min_fisher_views,
+    )
+}
+
 fn publish_counts(status_tx: &watch::Sender<StatusMsg>, live: &LiveModel) {
     status_tx.send_modify(|s| {
         s.num_keyframes = live.views().len() as u32;
@@ -401,98 +406,4 @@ fn append_raw_round(path: &Path, version: u64, raw: &[RawVoxel]) -> std::io::Res
         .append(true)
         .open(path)?;
     writeln!(file, "{line}")
-}
-
-async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
-    t.into_data_async()
-        .await
-        .expect("splat readback")
-        .try_to_vec::<f32>()
-        .expect("f32 splat data")
-}
-
-/// Splat parameters read back once per round, flat per splat.
-struct SplatRead {
-    means: Vec<f32>,
-    opac: Vec<f32>,
-    rots: Vec<f32>,
-    scales: Vec<f32>,
-}
-
-impl SplatRead {
-    async fn new(splats: &Splats) -> Self {
-        Self {
-            means: read_f32(splats.means()).await,
-            opac: read_f32(splats.opacities()).await,
-            rots: read_f32(splats.rotations()).await,
-            scales: read_f32(splats.scales()).await,
-        }
-    }
-}
-
-/// Per-Gaussian inputs of the voxel aggregation.
-fn gaussian_scores(
-    read: &SplatRead,
-    coverage: &[f32],
-    fisher_pos: &[[f32; 9]],
-) -> Vec<GaussianScore> {
-    let SplatRead {
-        means,
-        opac,
-        rots,
-        scales,
-    } = read;
-    (0..opac.len())
-        .map(|i| GaussianScore {
-            pos: Vec3::new(means[i * 3], means[i * 3 + 1], means[i * 3 + 2]),
-            opacity: opac[i],
-            coverage: coverage[i],
-            fisher_pos: fisher_pos[i],
-            axis: shortest_axis(&rots[i * 4..i * 4 + 4], &scales[i * 3..i * 3 + 3]),
-            flatness: flatness(&scales[i * 3..i * 3 + 3]),
-        })
-        .collect()
-}
-
-fn view_cones(views: &[SceneView]) -> Vec<ViewCone> {
-    views
-        .iter()
-        .map(|v| {
-            let c = &v.camera;
-            ViewCone {
-                position: c.position,
-                forward: c.rotation * Vec3::Z,
-                cos_half_fov: (0.5 * c.fov_x.max(c.fov_y) as f32).cos(),
-            }
-        })
-        .collect()
-}
-
-/// World direction of the Gaussian's shortest scale axis; zero for a
-/// degenerate rotation.
-pub(super) fn shortest_axis(r: &[f32], s: &[f32]) -> Vec3 {
-    // Brush stores rotations as [w, x, y, z].
-    let q = Quat::from_xyzw(r[1], r[2], r[3], r[0]);
-    if !q.is_finite() || q.length_squared() == 0.0 {
-        return Vec3::ZERO;
-    }
-    let k = if s[0] <= s[1] && s[0] <= s[2] {
-        0
-    } else if s[1] <= s[2] {
-        1
-    } else {
-        2
-    };
-    q.normalize() * Vec3::AXES[k]
-}
-
-/// `1 − s_min / s_mid` of the Gaussian's scales: 0 when round (or
-/// degenerate), towards 1 for a flat disc.
-pub(super) fn flatness(s: &[f32]) -> f32 {
-    let mut v = [s[0], s[1], s[2]];
-    v.sort_by(f32::total_cmp);
-    if !(v[0].is_finite() && v[1].is_finite()) || v[1] <= 0.0 {
-        return 0.0;
-    }
-    (1.0 - v[0] / v[1]).clamp(0.0, 1.0)
 }

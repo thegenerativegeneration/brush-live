@@ -186,3 +186,36 @@ async fn finish_writes_ply_and_pauses_training_until_next_keyframe() {
     );
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keyframes_queue_until_the_warm_up_is_done() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-session-ready-{}", std::process::id()));
+    let (ready_tx, ready) = tokio::sync::watch::channel(false);
+    let session = GuideSession::start_when(GuideConfig::default(), device, dir.clone(), Some(ready));
+    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+    let pusher = session.clone();
+    let push = tokio::spawn(async move { pusher.push_keyframe(h, p).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!push.is_finished(), "the keyframe waits for the warm-up");
+    assert_eq!(session.status().borrow().num_keyframes, 0);
+    ready_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(60), push)
+        .await
+        .expect("acked once warm")
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.status().borrow().num_keyframes, 1);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_up_runs_the_session_kernels_on_dummy_splats() {
+    let device = test_scene::device().await.autodiff();
+    let config = GuideConfig {
+        max_splats: 4096,
+        ..GuideConfig::default()
+    };
+    let secs = brush_guide::warmup::warm_up(&config, &device).await;
+    assert!(secs > 0.0 && secs.is_finite());
+}

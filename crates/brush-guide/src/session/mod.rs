@@ -1,4 +1,5 @@
 mod geometry;
+mod splat_read;
 #[cfg(test)]
 mod tests;
 mod worker;
@@ -90,6 +91,18 @@ pub struct GuideSession {
 impl GuideSession {
     /// `device` must be the autodiff device.
     pub fn start(config: GuideConfig, device: Device, session_dir: PathBuf) -> Self {
+        Self::start_when(config, device, session_dir, None)
+    }
+
+    /// Like [`Self::start`], but the worker takes no commands until `ready`
+    /// turns true (e.g. the server's GPU warm-up); commands queue meanwhile
+    /// and status messages already flow.
+    pub fn start_when(
+        config: GuideConfig,
+        device: Device,
+        session_dir: PathBuf,
+        ready: Option<watch::Receiver<bool>>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(64);
         let (scores_tx, scores) = watch::channel(None);
         let (meshes_tx, meshes) = watch::channel(MeshLog::default());
@@ -101,7 +114,7 @@ impl GuideSession {
             status: status_tx,
         };
         actor
-            .run(move || worker(config, device, session_dir, rx, channels))
+            .run(move || worker(config, device, session_dir, rx, channels, ready))
             .detach();
         Self {
             tx,
