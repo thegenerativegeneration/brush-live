@@ -72,8 +72,8 @@ pub fn warmup_sizes(max_splats: u32) -> Vec<u32> {
     sizes
 }
 
-/// Runs, at each of `warmup_sizes(config.max_splats)`: two training steps,
-/// a one-view Fisher pass (render and backward), and the expected-depth and
+/// Runs, at each of `warmup_sizes(config.max_splats)`: two training steps
+/// and a refine, a one-view Fisher pass (render and backward), and the expected-depth and
 /// colour renders of TSDF fusion. `device` is the autodiff device. Returns
 /// the seconds it took.
 pub async fn warm_up(config: &GuideConfig, device: &Device) -> f64 {
@@ -163,7 +163,9 @@ async fn train_steps(
         let (stepped, _) = trainer.step(batch.clone(), splats.train()).await;
         splats = stepped.valid();
     }
-    splats
+    // A cold refine took 2.4 s in the first session after a cache wipe.
+    let (refined, _) = trainer.refine(train_config.refine_every, splats).await;
+    refined
 }
 
 #[cfg(test)]
