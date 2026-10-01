@@ -15,16 +15,22 @@ struct Args {
     /// Disable Bonjour advertisement.
     #[arg(long)]
     no_mdns: bool,
+    /// Overrides GuideConfig's max_splats cap.
+    #[arg(long)]
+    max_splats: Option<u32>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    let config: GuideConfig = match &args.config {
+    let mut config: GuideConfig = match &args.config {
         Some(p) => serde_json::from_slice(&std::fs::read(p)?)?,
         None => GuideConfig::default(),
     };
+    if let Some(max_splats) = args.max_splats {
+        config.max_splats = max_splats;
+    }
     let device = brush_process::burn_init_setup().await.autodiff();
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await?;
     log::info!("listening on {}", listener.local_addr()?);
