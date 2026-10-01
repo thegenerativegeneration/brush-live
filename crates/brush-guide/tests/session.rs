@@ -172,10 +172,17 @@ async fn finish_writes_ply_and_pauses_training_until_next_keyframe() {
 
     let (h, p) = test_scene::keyframe(1, Vec3::new(1.0, 0.0, 2.0));
     session.push_keyframe(h, p).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // A scoring round under GPU contention can delay the first published
+    // rate by several seconds, so poll against a generous deadline.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while session.status().borrow().train_iters_per_s <= 0.0
+        && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert!(
         session.status().borrow().train_iters_per_s > 0.0,
-        "training resumed"
+        "training resumed within 20 s"
     );
     std::fs::remove_dir_all(dir).ok();
 }
