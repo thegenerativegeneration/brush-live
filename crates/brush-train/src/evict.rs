@@ -1,9 +1,17 @@
 //! Eviction keeps an open-ended (live) training run within `max_splats`.
 //!
-//! When refine wants to grow or split past the budget, or new keyframe seeds
-//! were dropped for lack of room, the least important splats in the whole
-//! model are pruned down to `max_splats · (1 − headroom)`. Splitting and
-//! growth may then fill up to `max_splats · (1 − headroom / 2)`; the last
+//! Eviction only makes room for newly observed areas. A 1 m cell counts as
+//! newly observed for `recent_refines` refines after a keyframe seeded at
+//! least [`MIN_CELL_SEEDS`] splats in it, i.e. the model was still
+//! transparent there. Split and growth candidates inside those cells that
+//! the budget blocks add up as a backlog; at a refine with fresh scores the
+//! least important splats in the whole model are pruned, as many as that
+//! backlog but at most down to `max_splats · (1 − headroom)`, and that
+//! refine splits and grows only inside the recent cells. Dropped keyframe
+//! seeds evict down to that target directly. Once no keyframe has seeded a
+//! cell for `recent_refines` refines nothing is evicted, so the model
+//! settles when capture stops or only revisits covered areas. Splitting and
+//! growth may fill up to `max_splats · (1 − headroom / 2)`; the last
 //! `headroom / 2` stays free for seeding new keyframes.
 //!
 //! Importance is supplied from outside (`set_importance`) per splat and is
@@ -27,7 +35,13 @@ pub struct EvictConfig {
     pub min_age: u32,
     /// Most of a 1 m cell's splats one eviction may take.
     pub max_cell_fraction: f32,
+    /// Refines a seeded cell stays newly observed for.
+    pub recent_refines: u32,
 }
+
+/// Seeds one keyframe must place in a cell to mark it newly observed, so a
+/// few seeds in a small hole of a covered area do not count.
+pub const MIN_CELL_SEEDS: usize = 8;
 
 /// Edge of the cells `EvictConfig::max_cell_fraction` applies to, in metres.
 pub const EVICT_CELL_M: f32 = 1.0;
@@ -53,24 +67,105 @@ pub fn growth_limit(max_splats: u32, headroom: f32) -> u32 {
     max_splats.saturating_sub(reserve)
 }
 
+/// The [`EVICT_CELL_M`] cell containing `p`.
+pub fn cell_of(p: glam::Vec3) -> glam::IVec3 {
+    (p / EVICT_CELL_M).floor().as_ivec3()
+}
+
+/// Cells newly observed by recent keyframes (see the module docs).
+#[derive(Default)]
+pub struct RecentCells {
+    /// Cell → refine count when a keyframe last seeded it.
+    stamps: hashbrown::HashMap<glam::IVec3, u32>,
+    refines: u32,
+    last_seeded: Option<u32>,
+    /// Blocked split/growth demand inside recent cells since the last eviction.
+    pub backlog: u32,
+}
+
+impl RecentCells {
+    /// Records one keyframe's seed positions (flat xyz, before the budget
+    /// drops any).
+    pub fn note_keyframe(&mut self, seed_means: &[f32]) {
+        let mut counts: hashbrown::HashMap<glam::IVec3, usize> = hashbrown::HashMap::new();
+        for p in seed_means.as_chunks::<3>().0 {
+            *counts.entry(cell_of(glam::Vec3::from_array(*p))).or_default() += 1;
+        }
+        for (cell, n) in counts {
+            if n >= MIN_CELL_SEEDS {
+                self.stamps.insert(cell, self.refines);
+                self.last_seeded = Some(self.refines);
+            }
+        }
+    }
+
+    /// Advances to the next refine.
+    pub fn tick(&mut self) {
+        self.refines += 1;
+    }
+
+    /// Whether any cell was seeded within the last `window` refines.
+    pub fn active(&self, window: u32) -> bool {
+        self.last_seeded
+            .is_some_and(|r| self.refines - r < window)
+    }
+
+    /// Whether `p` lies in a cell seeded within the last `window` refines.
+    pub fn contains(&self, p: glam::Vec3, window: u32) -> bool {
+        self.stamps
+            .get(&cell_of(p))
+            .is_some_and(|&r| self.refines - r < window)
+    }
+
+    /// Per splat (flat xyz `means`), whether it lies in a recent cell.
+    pub fn mask(&self, means: &[f32], window: u32) -> Vec<bool> {
+        means
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| self.contains(glam::Vec3::from_array(*p), window))
+            .collect()
+    }
+}
+
+/// Split and growth demand inside recent cells: the force-split candidates
+/// plus `growth_select_fraction` of the high-gradient candidates, the same
+/// ratio refine applies to the whole model.
+pub fn recent_demand(
+    in_recent: &[bool],
+    oversized: &[bool],
+    above_threshold: &[bool],
+    growth_select_fraction: f32,
+) -> u32 {
+    let count = |mask: &[bool]| {
+        in_recent
+            .iter()
+            .zip(mask)
+            .filter(|&(&r, &m)| r && m)
+            .count()
+    };
+    let grow = (count(above_threshold) as f32 * growth_select_fraction).round() as u32;
+    count(oversized) as u32 + grow
+}
+
 /// Splats to evict at a refine with `current` splats, when split and growth
-/// want `demand` more and `seed_shortfall` seeds were dropped since the last
-/// refine. Zero unless growth is blocked.
+/// inside recent cells want `recent_demand` more and `seed_shortfall` seeds
+/// were dropped since the last refine. Evicts what the free room up to the
+/// growth limit cannot hold, at most down to the target; dropped seeds
+/// evict down to the target.
 pub fn evict_count(
     current: u32,
-    demand: u32,
+    recent_demand: u32,
     seed_shortfall: u32,
     max_splats: u32,
     headroom: f32,
 ) -> u32 {
-    let blocked = (demand > 0
-        && current.saturating_add(demand) > growth_limit(max_splats, headroom))
-        || seed_shortfall > 0;
-    if blocked {
-        current.saturating_sub(evict_target(max_splats, headroom))
-    } else {
-        0
+    let cap = current.saturating_sub(evict_target(max_splats, headroom));
+    if seed_shortfall > 0 {
+        return cap;
     }
+    let free = growth_limit(max_splats, headroom).saturating_sub(current);
+    recent_demand.saturating_sub(free).min(cap)
 }
 
 /// Per-splat age (refines survived) and importance, row-aligned with the splats.
@@ -140,6 +235,7 @@ pub(crate) struct Eviction {
     pub life: Option<SplatLife>,
     pub protect: Option<ProtectCone>,
     pub seed_shortfall: u32,
+    pub recent: RecentCells,
     /// An importance set arrived since the last eviction.
     pub fresh: bool,
 }
@@ -151,6 +247,7 @@ impl Eviction {
             life: None,
             protect: None,
             seed_shortfall: 0,
+            recent: RecentCells::default(),
             fresh: false,
         }
     }
@@ -205,6 +302,7 @@ fn in_cone(means: Tensor<2>, cone: ProtectCone) -> Tensor<1, Bool> {
 pub(crate) async fn select_evictions(
     life: &SplatLife,
     means: Tensor<2>,
+    means_cpu: &[f32],
     exclude: Tensor<1, Bool>,
     protect: Option<ProtectCone>,
     config: &EvictConfig,
@@ -226,8 +324,7 @@ pub(crate) async fn select_evictions(
         .clone()
         .mask_fill(eligible.bool_not(), f32::INFINITY);
     let scores = read_f32(ranked).await;
-    let means = read_f32(means).await;
-    let picked = pick_evictions(&scores, &means, count as usize, config.max_cell_fraction);
+    let picked = pick_evictions(&scores, means_cpu, count as usize, config.max_cell_fraction);
     let mut evict = vec![false; n];
     for &i in &picked {
         evict[i] = true;
@@ -236,12 +333,25 @@ pub(crate) async fn select_evictions(
     (mask, picked.len() as u32)
 }
 
-async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
+pub(crate) async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
     t.into_data_async()
         .await
         .expect("evict readback")
         .try_into_vec::<f32>()
         .expect("f32 readback")
+}
+
+pub(crate) async fn read_bool(t: Tensor<1, Bool>) -> Vec<bool> {
+    t.int()
+        .into_data_async()
+        .await
+        .expect("evict readback")
+        .convert::<i32>()
+        .try_into_vec::<i32>()
+        .expect("mask readback")
+        .into_iter()
+        .map(|v| v != 0)
+        .collect()
 }
 
 /// Up to `count` indices in ascending `scores` order, skipping infinite
@@ -253,10 +363,7 @@ pub(crate) fn pick_evictions(
     count: usize,
     max_cell_fraction: f32,
 ) -> Vec<usize> {
-    let cell = |i: usize| {
-        let m = glam::Vec3::from_slice(&means[i * 3..i * 3 + 3]);
-        (m / EVICT_CELL_M).floor().as_ivec3()
-    };
+    let cell = |i: usize| cell_of(glam::Vec3::from_slice(&means[i * 3..i * 3 + 3]));
     let mut quota: hashbrown::HashMap<glam::IVec3, usize> = hashbrown::HashMap::new();
     for i in 0..scores.len() {
         *quota.entry(cell(i)).or_default() += 1;
@@ -322,19 +429,95 @@ mod tests {
     }
 
     #[test]
-    fn evicts_to_target_only_when_blocked() {
+    fn evicts_blocked_recent_demand_up_to_the_target() {
         // Room left for the demand: nothing.
         assert_eq!(evict_count(90_000, 5_000, 0, 100_000, 0.1), 0);
-        // Demand crosses the growth limit: down to the target.
-        assert_eq!(evict_count(94_000, 2_000, 0, 100_000, 0.1), 4_000);
-        assert_eq!(evict_count(100_000, 1, 0, 100_000, 0.1), 10_000);
-        // Dropped seeds trigger it too, even without growth demand.
+        // What the free room below the growth limit cannot hold.
+        assert_eq!(evict_count(94_000, 2_000, 0, 100_000, 0.1), 1_000);
+        assert_eq!(evict_count(95_000, 300, 0, 100_000, 0.1), 300);
+        // Capped at the target.
+        assert_eq!(evict_count(100_000, 50_000, 0, 100_000, 0.1), 10_000);
+        // Dropped seeds evict down to the target, even without demand.
         assert_eq!(evict_count(99_000, 0, 10, 100_000, 0.1), 9_000);
-        // Over the growth limit but nothing wants to grow: nothing.
+        // Over the growth limit but nothing new wants to grow: nothing.
         assert_eq!(evict_count(100_000, 0, 0, 100_000, 0.1), 0);
         // Already below the target: nothing to evict.
         assert_eq!(evict_count(80_000, 50_000, 7, 100_000, 0.1), 0);
         // Above the budget (e.g. loaded over cap) without overflow.
         assert_eq!(evict_count(120_000, u32::MAX, 0, 100_000, 0.1), 30_000);
+    }
+
+    fn seeds_at(p: [f32; 3], n: usize) -> Vec<f32> {
+        p.repeat(n)
+    }
+
+    #[test]
+    fn recent_cells_need_enough_seeds_and_expire() {
+        let mut cells = RecentCells::default();
+        assert!(!cells.active(3));
+        // A keyframe without seeds (revisiting a covered area) marks nothing.
+        cells.note_keyframe(&[]);
+        assert!(!cells.active(3));
+        // A few seeds in a hole do not count either.
+        cells.note_keyframe(&seeds_at([0.5, 0.5, 0.5], MIN_CELL_SEEDS - 1));
+        assert!(!cells.active(3));
+        assert!(!cells.contains(glam::vec3(0.5, 0.5, 0.5), 3));
+
+        cells.note_keyframe(&seeds_at([-4.5, 0.2, 3.1], MIN_CELL_SEEDS));
+        assert!(cells.active(3));
+        assert!(cells.contains(glam::vec3(-4.1, 0.9, 3.9), 3));
+        assert!(!cells.contains(glam::vec3(-3.9, 0.9, 3.9), 3));
+        // Recent for the window's refines, then not.
+        cells.tick();
+        cells.tick();
+        assert!(cells.active(3));
+        assert!(cells.contains(glam::vec3(-4.5, 0.2, 3.1), 3));
+        cells.tick();
+        assert!(!cells.active(3));
+        assert!(!cells.contains(glam::vec3(-4.5, 0.2, 3.1), 3));
+    }
+
+    #[test]
+    fn demand_counts_only_candidates_in_recent_cells() {
+        let in_recent = [true, true, false, false, true];
+        let oversized = [true, false, true, false, false];
+        let above = [true, true, true, true, true];
+        // 1 oversized + round(3 · 0.5) high-gradient.
+        assert_eq!(recent_demand(&in_recent, &oversized, &above, 0.5), 3);
+        // Growth off (empty mask) leaves the force-splits.
+        assert_eq!(recent_demand(&in_recent, &oversized, &[], 0.5), 1);
+        assert_eq!(recent_demand(&[false; 5], &oversized, &above, 0.5), 0);
+    }
+
+    /// A toy run at a 1000-splat budget: every refine every cell wants 50
+    /// more splats (Brush's growth demand never reaches zero). Keyframes
+    /// seed a new cell during refines 0..10 only; cells stay recent for 5
+    /// refines; each refine has fresh scores.
+    #[test]
+    fn evictions_settle_once_keyframes_stop() {
+        let (max, headroom, window) = (1_000, 0.1, 5);
+        let mut cells = RecentCells::default();
+        let mut current = 950u32;
+        let mut evicted = Vec::new();
+        for refine in 0..40 {
+            if refine < 10 {
+                cells.note_keyframe(&seeds_at([refine as f32 + 0.5, 0.0, 0.0], 20));
+            }
+            let mut n = 0;
+            if cells.active(window) {
+                let in_recent: Vec<bool> = (0..10)
+                    .map(|c| cells.contains(glam::vec3(c as f32 + 0.5, 0.0, 0.0), window))
+                    .collect();
+                cells.backlog += recent_demand(&in_recent, &[true; 10], &[], 1.0) * 50;
+                n = evict_count(current, cells.backlog, 0, max, headroom);
+                cells.backlog = 0;
+            }
+            evicted.push(n);
+            cells.tick();
+            // Growth refills up to the growth limit.
+            current = growth_limit(max, headroom);
+        }
+        assert!(evicted[..14].iter().all(|&n| n > 0), "{evicted:?}");
+        assert!(evicted[14..].iter().all(|&n| n == 0), "{evicted:?}");
     }
 }

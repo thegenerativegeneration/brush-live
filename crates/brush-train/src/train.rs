@@ -3,7 +3,10 @@ use std::f32::consts::FRAC_1_SQRT_2;
 use crate::{
     adam_scaled::{AdamScaled, AdamState},
     config::TrainConfig,
-    evict::{EvictConfig, Eviction, ProtectCone, SplatLife, growth_demand, select_evictions},
+    evict::{
+        EvictConfig, Eviction, ProtectCone, SplatLife, growth_demand, read_bool, read_f32,
+        recent_demand, select_evictions,
+    },
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
@@ -256,6 +259,14 @@ impl SplatTrainer {
         }
     }
 
+    /// Records a keyframe's seed positions (flat xyz, all seeds before the
+    /// budget drops any); cells it seeds count as newly observed.
+    pub fn note_keyframe_seeds(&mut self, seed_means: &[f32]) {
+        if let Some(e) = self.evict.as_mut() {
+            e.recent.note_keyframe(seed_means);
+        }
+    }
+
     /// The count splitting and growth may fill up to.
     fn growth_cap(&self) -> u32 {
         match &self.evict {
@@ -280,21 +291,61 @@ impl SplatTrainer {
             return (dead, 0);
         };
         life.tick();
+        let window = ev.config.recent_refines;
+        let active = ev.recent.active(window);
+        if !active {
+            ev.recent.backlog = 0;
+            if ev.seed_shortfall == 0 {
+                return (dead, 0);
+            }
+        }
+        let current = splats.num_splats();
+        let mut means = None;
+        if active {
+            let num_dead = dead
+                .clone()
+                .int()
+                .sum()
+                .into_scalar_async::<i32>()
+                .await
+                .expect("dead count readback") as u32;
+            let demand = growth_demand(refiner, &self.config, iter, num_dead).await;
+            let limit = crate::evict::growth_limit(self.config.max_splats, ev.config.headroom);
+            if current.saturating_add(demand) > limit {
+                let m = read_f32(splats.means()).await;
+                let in_recent = ev.recent.mask(&m, window);
+                let oversized = if self.config.split_at_screen_size > 0.0 {
+                    read_bool(refiner.above_screen_size(self.config.split_at_screen_size)).await
+                } else {
+                    vec![]
+                };
+                let growing =
+                    iter >= self.config.growth_start_iter && iter < self.config.growth_stop_iter;
+                let above = if growing {
+                    read_bool(refiner.above_threshold(self.config.growth_grad_threshold)).await
+                } else {
+                    vec![]
+                };
+                let recent = recent_demand(
+                    &in_recent,
+                    &oversized,
+                    &above,
+                    self.config.growth_select_fraction,
+                );
+                ev.recent.backlog = ev.recent.backlog.saturating_add(recent);
+                means = Some(m);
+            } else {
+                ev.recent.backlog = 0;
+            }
+        }
         if !ev.fresh {
             return (dead, 0);
         }
         let shortfall = std::mem::take(&mut ev.seed_shortfall);
-        let num_dead = dead
-            .clone()
-            .int()
-            .sum()
-            .into_scalar_async::<i32>()
-            .await
-            .expect("dead count readback") as u32;
-        let demand = growth_demand(refiner, &self.config, iter, num_dead).await;
+        let backlog = ev.recent.backlog;
         let want = crate::evict::evict_count(
-            splats.num_splats(),
-            demand,
+            current,
+            backlog,
             shortfall,
             self.config.max_splats,
             ev.config.headroom,
@@ -302,9 +353,14 @@ impl SplatTrainer {
         if want == 0 {
             return (dead, 0);
         }
+        let means = match means {
+            Some(m) => m,
+            None => read_f32(splats.means()).await,
+        };
         let (mask, count) = select_evictions(
             life,
             splats.means(),
+            &means,
             dead.clone(),
             ev.protect,
             &ev.config,
@@ -313,10 +369,10 @@ impl SplatTrainer {
         .await;
         if count > 0 {
             ev.fresh = false;
+            ev.recent.backlog = 0;
         }
         log::info!(
-            "evict: {count} of {want} wanted (demand {demand}, seed shortfall {shortfall}, {} splats)",
-            splats.num_splats()
+            "evict: {count} of {want} wanted (recent backlog {backlog}, seed shortfall {shortfall}, {current} splats)"
         );
         (dead.bool_or(mask), count)
     }
@@ -704,6 +760,20 @@ impl SplatTrainer {
             prune_points(splats, &mut optim, refiner, life, prune_mask).await;
         let num_dead = pruned_count.saturating_sub(num_evicted);
         let mut split_inds = HashSet::new();
+        // After an eviction, the freed room goes to newly observed cells only.
+        let recent_mask = match self.evict.as_mut() {
+            Some(e) => {
+                let mask = if num_evicted > 0 {
+                    let means = read_f32(splats.means()).await;
+                    Some(e.recent.mask(&means, e.config.recent_refines))
+                } else {
+                    None
+                };
+                e.recent.tick();
+                mask
+            }
+            None => None,
+        };
 
         // Always replace dead gaussians, so that the pruned budget is reused.
         // Evicted ones are not replaced: freeing their budget is the point.
@@ -744,6 +814,9 @@ impl SplatTrainer {
                     if budget == 0 {
                         break;
                     }
+                    if recent_mask.as_ref().is_some_and(|m| !m[ind as usize]) {
+                        continue;
+                    }
                     if split_inds.insert(ind) {
                         budget -= 1;
                     }
@@ -779,14 +852,26 @@ impl SplatTrainer {
             // If still growing, sample from indices which are over the threshold.
             if grow_count > 0 {
                 let weights = above_threshold.float() * refiner.refine_weight_norm.clone();
-                let weights = weights
+                let mut weights = weights
                     .into_data_async()
                     .await
                     .expect("Failed to get weights")
                     .try_into_vec::<f32>()
                     .expect("Failed to read weights");
-                let growth_inds = multinomial_sample(&mut self.rng, &weights, grow_count);
-                split_inds.extend(growth_inds);
+                if let Some(mask) = &recent_mask {
+                    for (w, &recent) in weights.iter_mut().zip(mask) {
+                        if !recent {
+                            *w = 0.0;
+                        }
+                    }
+                }
+                // Sampling is without replacement, so it needs that many candidates.
+                let candidates = weights.iter().filter(|w| w.is_finite() && **w > 0.0).count();
+                let grow_count = grow_count.min(candidates as u32);
+                if grow_count > 0 {
+                    let growth_inds = multinomial_sample(&mut self.rng, &weights, grow_count);
+                    split_inds.extend(growth_inds);
+                }
             }
         }
 

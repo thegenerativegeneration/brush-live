@@ -53,6 +53,11 @@ struct Args {
     /// `mesh_ms`.
     #[arg(long)]
     dump_mesh: Option<PathBuf>,
+    /// Send `finish` this many seconds after connecting (once all frames are
+    /// sent), wait for the server's `splat` reply and exit. The server writes
+    /// the model to `<root>/<session_id>/splat.ply`.
+    #[arg(long)]
+    finish_after: Option<f32>,
 }
 
 #[tokio::main]
@@ -67,11 +72,12 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (ws, _) = tokio_tungstenite::connect_async(&args.server).await?;
+    let started = tokio::time::Instant::now();
     let (mut sink, source) = ws.split();
     let session_id = format!("replay-{}", std::process::id());
     sink.send(Message::binary(encode_frame(
         &ClientHeader::Hello {
-            session_id,
+            session_id: session_id.clone(),
             device_model: "replay".into(),
             has_lidar: false,
         },
@@ -94,12 +100,21 @@ async fn main() -> anyhow::Result<()> {
             .map(ScoreDump::open)
             .transpose()?,
         mesh_dump: args.dump_mesh.clone(),
+        stop_on_splat: args.finish_after.is_some(),
     };
     let receiver = tokio::spawn(receiver.run(source));
 
     send_keyframes(&args, &t, &points, &mut sink, &rec).await?;
-    println!("All frames sent. Leave running to watch scores settle; Ctrl-C to quit.");
+    if let Some(after) = args.finish_after {
+        tokio::time::sleep_until(started + Duration::from_secs_f32(after)).await;
+        sink.send(Message::binary(encode_frame(&ClientHeader::Finish, &[])))
+            .await?;
+        println!("finish sent; session {session_id}");
+    } else {
+        println!("All frames sent. Leave running to watch scores settle; Ctrl-C to quit.");
+    }
     receiver.await?;
+    rec.flush_blocking()?;
     Ok(())
 }
 

@@ -19,6 +19,10 @@ pub struct GuideConfig {
     pub evict_min_age: u32,
     /// Most of a 1 m cell's splats one eviction may take.
     pub evict_max_cell_fraction: f32,
+    /// Refines a cell seeded by a keyframe counts as newly observed for;
+    /// eviction only makes room there, so it stops this many refines after
+    /// the last keyframe that seeded anything.
+    pub evict_recent_refines: u32,
     pub recent_window: usize,
     pub recent_fraction: f32,
     pub refine_every: u32,
@@ -61,6 +65,7 @@ impl Default for GuideConfig {
             evict_headroom: 0.1,
             evict_min_age: 3,
             evict_max_cell_fraction: 0.3,
+            evict_recent_refines: 10,
             recent_window: 20,
             recent_fraction: 0.7,
             refine_every: 100,

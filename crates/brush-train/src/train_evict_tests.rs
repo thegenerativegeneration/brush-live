@@ -64,6 +64,7 @@ async fn trainer_at_budget(min_age: u32) -> (SplatTrainer, Splats) {
         headroom: 0.1,
         min_age,
         max_cell_fraction: 1.0,
+        recent_refines: 2,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
     (trainer, s.valid())
@@ -208,9 +209,12 @@ async fn eviction_then_split_fills_to_growth_limit() {
         headroom: 0.1,
         min_age: 0,
         max_cell_fraction: 1.0,
+        recent_refines: 2,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
     trainer.set_importance(&importance());
+    // A keyframe seeded the splats' cell, so their split demand is new.
+    trainer.note_keyframe_seeds(&rows(s.means()).await.concat());
 
     let (s, stats) = trainer.refine(1, s.valid()).await;
     // 60 → evict to 54 → split up to the growth limit 57.
@@ -275,4 +279,67 @@ async fn evicts_once_per_importance_set_and_nan_keeps_scores() {
     // 54 is the target already: nothing to evict, even when blocked.
     assert_eq!(stats.num_evicted, 0);
     assert_eq!(s.num_splats() as usize, N - 6);
+}
+
+/// Like [`eviction_then_split_fills_to_growth_limit`]: every splat wants a
+/// force-split, the model is at its 60-splat budget and scored.
+async fn split_trainer_at_budget() -> (SplatTrainer, Splats) {
+    let device: Device = brush_cube::test_helpers::test_device().await.into();
+    let device = device.autodiff();
+    let mut config = TrainConfig::parse_from(["test"]);
+    config.max_splats = N as u32;
+    config.growth_grad_threshold = f32::MAX;
+    config.split_at_screen_size = 1e-6;
+    let base = splats(N, &device);
+    let bounds = get_splat_bounds(base.clone(), BOUND_PERCENTILE).await;
+    let mut trainer = SplatTrainer::new(&config, &device, bounds);
+    trainer.enable_eviction(EvictConfig {
+        headroom: 0.1,
+        min_age: 0,
+        max_cell_fraction: 1.0,
+        recent_refines: 2,
+    });
+    let (s, _) = trainer.step(batch(), base.train()).await;
+    trainer.set_importance(&importance());
+    (trainer, s.valid())
+}
+
+#[tokio::test]
+async fn blocked_demand_without_new_keyframe_evicts_nothing() {
+    let (mut trainer, s) = split_trainer_at_budget().await;
+    let (s, stats) = trainer.refine(1, s).await;
+    assert_eq!(stats.num_evicted, 0);
+    assert_eq!(stats.num_split_oversized, 0);
+    assert_eq!(s.num_splats() as usize, N);
+}
+
+#[tokio::test]
+async fn keyframe_elsewhere_does_not_evict_for_old_demand() {
+    let (mut trainer, s) = split_trainer_at_budget().await;
+    // Seeds in a far cell: the blocked demand is all in the old cell.
+    trainer.note_keyframe_seeds(&[5.5, 5.5, 5.5].repeat(16));
+    let (s, stats) = trainer.refine(1, s).await;
+    assert_eq!(stats.num_evicted, 0);
+    assert_eq!(s.num_splats() as usize, N);
+}
+
+#[tokio::test]
+async fn evictions_stop_once_the_keyframe_window_passes() {
+    // Cells stay recent for 2 refines; every refine has fresh scores.
+    let (mut trainer, s) = split_trainer_at_budget().await;
+    trainer.note_keyframe_seeds(&rows(s.means()).await.concat());
+    let (mut s, stats) = trainer.refine(1, s).await;
+    // 60 → 54, split back to the growth limit 57.
+    assert_eq!(stats.num_evicted, 6);
+    for iter in 2..6 {
+        let (stepped, _) = trainer.step(batch(), s.train()).await;
+        let n = stepped.num_splats() as usize;
+        trainer.set_importance(&vec![1.0; n]);
+        let (next, stats) = trainer.refine(iter, stepped.valid()).await;
+        // Still in the window: 57 → 54 → 57. Then steady.
+        let expect = if iter == 2 { 3 } else { 0 };
+        assert_eq!(stats.num_evicted, expect, "refine {iter}");
+        assert_eq!(next.num_splats(), 57);
+        s = next;
+    }
 }

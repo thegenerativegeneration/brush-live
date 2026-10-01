@@ -16,24 +16,31 @@ pub(crate) struct Receiver {
     pub(crate) mode: Mode,
     pub(crate) score_dump: Option<ScoreDump>,
     pub(crate) mesh_dump: Option<PathBuf>,
+    /// Return once the server answers `finish` with `splat`.
+    pub(crate) stop_on_splat: bool,
 }
 
 impl Receiver {
-    /// Handles binary frames until the connection ends.
+    /// Handles binary frames until the connection ends, or until `splat`
+    /// with `stop_on_splat`.
     pub(crate) async fn run<E>(
         mut self,
         mut source: impl Stream<Item = Result<Message, E>> + Unpin,
     ) {
         while let Some(Ok(msg)) = source.next().await {
-            if let Message::Binary(bytes) = msg {
-                self.handle(&bytes);
+            if let Message::Binary(bytes) = msg
+                && self.handle(&bytes)
+                && self.stop_on_splat
+            {
+                return;
             }
         }
     }
 
-    fn handle(&mut self, bytes: &[u8]) {
+    /// Returns true for `splat`.
+    fn handle(&mut self, bytes: &[u8]) -> bool {
         let Ok((header, payload)) = decode_frame::<ServerHeader>(bytes) else {
-            return;
+            return false;
         };
         match header {
             ServerHeader::ScoreSet {
@@ -70,8 +77,13 @@ impl Receiver {
                 Err(e) => eprintln!("bad mesh_bricks v{version}: {e}"),
             },
             ServerHeader::Error { message } => eprintln!("server error: {message}"),
+            ServerHeader::Splat { ply_len } => {
+                eprintln!("splat written on the server ({ply_len} bytes)");
+                return true;
+            }
             _ => {}
         }
+        false
     }
 
     fn score_set(&mut self, version: u64, voxel_size: f32, cell_bytes: u32, payload: &[u8]) {

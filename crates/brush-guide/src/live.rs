@@ -149,6 +149,7 @@ impl LiveModel {
                         headroom: self.config.evict_headroom,
                         min_age: self.config.evict_min_age,
                         max_cell_fraction: self.config.evict_max_cell_fraction,
+                        recent_refines: self.config.evict_recent_refines,
                     });
                 }
                 self.trainer = Some(trainer);
@@ -204,7 +205,11 @@ impl LiveModel {
 
     /// Keeps a seeded random subset of `seeds` that fits under `max_splats`
     /// next to `current` existing splats.
+    /// Also marks the cells `seeds` fall in as newly observed for eviction.
     fn cap_seeds(&mut self, seeds: Seeds, current: u32) -> Seeds {
+        if let Some(t) = self.trainer.as_mut() {
+            t.note_keyframe_seeds(&seeds.means);
+        }
         let room = self.config.max_splats.saturating_sub(current) as usize;
         if seeds.colors.len() <= room {
             return seeds;
