@@ -65,6 +65,10 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let t: Transforms =
         serde_json::from_slice(&std::fs::read(args.dataset.join("transforms.json"))?)?;
+    if t.frames.is_empty() {
+        println!("transforms.json has no frames (empty segment); skipping");
+        return Ok(());
+    }
     let points = feature_points(&args.dataset, &t);
     let rec = match &args.save {
         Some(path) => rerun::RecordingStreamBuilder::new("capture-guidance-replay").save(path)?,
