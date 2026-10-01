@@ -8,6 +8,7 @@ use brush_render::gaussian_splats::{SplatRenderMode, Splats, TextureMode, render
 use brush_render::sh::rgb_to_sh;
 use brush_serde::SplatData;
 use brush_train::config::TrainConfig;
+use brush_train::evict::{EvictConfig, ProtectCone};
 use brush_train::train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds};
 use brush_train::{RandomSplatsConfig, create_random_splats, to_init_splats};
 use burn::module::Module;
@@ -47,6 +48,8 @@ pub struct LiveModel {
     views_in_recent: usize,
     views_in_all: usize,
     iter: u32,
+    /// Splats evicted to stay within the budget, in total.
+    num_evicted: u64,
     rng: rand::rngs::StdRng,
 }
 
@@ -78,6 +81,7 @@ impl LiveModel {
             views_in_recent: 0,
             views_in_all: 0,
             iter: 0,
+            num_evicted: 0,
             rng,
         }
     }
@@ -97,6 +101,19 @@ impl LiveModel {
 
     pub fn last_keyframe_id(&self) -> Option<u64> {
         self.last_id
+    }
+
+    /// Splats evicted to stay within the budget since the model started.
+    pub fn num_evicted(&self) -> u64 {
+        self.num_evicted
+    }
+
+    /// Per-splat eviction importance in current splat order (see
+    /// `scores::importance`). No-op without eviction.
+    pub fn set_importance(&mut self, importance: &[f32]) {
+        if let Some(t) = self.trainer.as_mut() {
+            t.set_importance(importance);
+        }
     }
 
     /// Number of training steps taken.
@@ -127,6 +144,13 @@ impl LiveModel {
                     self.config.seed,
                 );
                 trainer.set_view_cams(self.view_cams.clone());
+                if self.config.evict {
+                    trainer.enable_eviction(EvictConfig {
+                        headroom: self.config.evict_headroom,
+                        min_age: self.config.evict_min_age,
+                        max_cell_fraction: self.config.evict_max_cell_fraction,
+                    });
+                }
                 self.trainer = Some(trainer);
                 init
             }
@@ -145,6 +169,9 @@ impl LiveModel {
             }
         };
         self.splats = Some(splats);
+        if let Some(t) = self.trainer.as_mut() {
+            t.set_protect_cone(Some(view_cone(&kf.view.camera)));
+        }
 
         self.views.push(kf.view);
         self.last_id = Some(kf.id);
@@ -181,6 +208,9 @@ impl LiveModel {
         let room = self.config.max_splats.saturating_sub(current) as usize;
         if seeds.colors.len() <= room {
             return seeds;
+        }
+        if let Some(t) = self.trainer.as_mut() {
+            t.note_seed_shortfall((seeds.colors.len() - room) as u32);
         }
         let mut keep = rand::seq::index::sample(&mut self.rng, seeds.colors.len(), room).into_vec();
         keep.sort_unstable();
@@ -299,8 +329,19 @@ impl LiveModel {
         let mut splats = stepped.valid();
         self.iter += 1;
         if self.iter.is_multiple_of(self.config.refine_every) {
-            splats = trainer.refine(self.iter, splats).await.0;
+            let (refined, stats) = trainer.refine(self.iter, splats).await;
+            splats = refined;
+            self.num_evicted += u64::from(stats.num_evicted);
         }
         self.splats = Some(splats);
+    }
+}
+
+/// The camera's viewing cone, as `session::worker` approximates a view.
+fn view_cone(c: &brush_render::camera::Camera) -> ProtectCone {
+    ProtectCone {
+        position: c.position,
+        forward: c.rotation * Vec3::Z,
+        cos_half_fov: (0.5 * c.fov_x.max(c.fov_y) as f32).cos(),
     }
 }

@@ -16,12 +16,9 @@ pub async fn decimate_to_count(mut splats: Splats, scores: &[f32], target_count:
         return splats;
     }
 
-    let mut indexed: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let keep_indices: Vec<i32> = indexed[..target_count as usize]
-        .iter()
-        .map(|(i, _)| *i as i32)
+    let keep_indices: Vec<i32> = top_k_indices(scores, target_count as usize)
+        .into_iter()
+        .map(|i| i as i32)
         .collect();
 
     let device = splats.device();
@@ -37,6 +34,15 @@ pub async fn decimate_to_count(mut splats: Splats, scores: &[f32], target_count:
         .map(|o| o.select(0, keep_tensor.clone()));
 
     splats
+}
+
+/// Indices of the `k` highest scores, highest first. NaN compares equal to
+/// everything, so its rank is unspecified.
+pub fn top_k_indices(scores: &[f32], k: usize) -> Vec<usize> {
+    let mut indexed: Vec<(usize, f32)> = scores.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.truncate(k);
+    indexed.into_iter().map(|(i, _)| i).collect()
 }
 
 /// Log-determinant of a 6x6 positive semi-definite matrix via Cholesky decomposition.

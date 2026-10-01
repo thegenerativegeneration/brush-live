@@ -10,6 +10,15 @@ pub struct GuideConfig {
     pub voxel_size: f32,
     pub min_cell_opacity: f32,
     pub max_splats: u32,
+    /// Evict the least important splats when growth hits `max_splats`
+    /// (see `brush_train::evict`). Off: growth stops at the cap.
+    pub evict: bool,
+    /// Fraction of `max_splats` one eviction frees.
+    pub evict_headroom: f32,
+    /// Refines a splat must survive before it can be evicted.
+    pub evict_min_age: u32,
+    /// Most of a 1 m cell's splats one eviction may take.
+    pub evict_max_cell_fraction: f32,
     pub recent_window: usize,
     pub recent_fraction: f32,
     pub refine_every: u32,
@@ -48,6 +57,10 @@ impl Default for GuideConfig {
             voxel_size: 0.10,
             min_cell_opacity: 0.1,
             max_splats: 1_500_000,
+            evict: false,
+            evict_headroom: 0.1,
+            evict_min_age: 3,
+            evict_max_cell_fraction: 0.3,
             recent_window: 20,
             recent_fraction: 0.7,
             refine_every: 100,

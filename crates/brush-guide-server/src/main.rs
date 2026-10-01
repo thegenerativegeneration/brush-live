@@ -18,6 +18,13 @@ struct Args {
     /// Overrides GuideConfig's max_splats cap.
     #[arg(long)]
     max_splats: Option<u32>,
+    /// Evict the least important splats when growth hits the cap, instead of
+    /// stopping growth.
+    #[arg(long)]
+    evict: bool,
+    /// Fraction of the cap one eviction frees (with --evict).
+    #[arg(long)]
+    evict_headroom: Option<f32>,
 }
 
 #[tokio::main]
@@ -30,6 +37,12 @@ async fn main() -> anyhow::Result<()> {
     };
     if let Some(max_splats) = args.max_splats {
         config.max_splats = max_splats;
+    }
+    if args.evict {
+        config.evict = true;
+    }
+    if let Some(h) = args.evict_headroom {
+        config.evict_headroom = h;
     }
     let device = brush_process::burn_init_setup().await.autodiff();
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await?;

@@ -10,6 +10,8 @@ pub struct RefineStats {
     pub num_pruned: u32,
     /// Subset of `num_pruned` whose params went non-finite (NaN/Inf).
     pub num_pruned_non_finite: u32,
+    /// Subset of `num_pruned` evicted to stay within the budget.
+    pub num_evicted: u32,
     pub total_splats: u32,
 }
 

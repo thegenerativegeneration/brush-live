@@ -3,6 +3,7 @@ use std::f32::consts::FRAC_1_SQRT_2;
 use crate::{
     adam_scaled::{AdamScaled, AdamState},
     config::TrainConfig,
+    evict::{EvictConfig, Eviction, ProtectCone, SplatLife, growth_demand, select_evictions},
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
@@ -86,6 +87,8 @@ pub struct SplatTrainer {
     /// Mip-Splatting 3D filter. Empty disables it. The floor itself lives on
     /// the splats (recomputed at each refine), not here.
     view_cams: Vec<(glam::Vec3, f32)>,
+    /// Keeps the splat count within `max_splats` by evicting; `None` caps growth as Brush does.
+    evict: Option<Eviction>,
     #[cfg(not(target_family = "wasm"))]
     lpips: Option<lpips::LpipsModel>,
 }
@@ -194,6 +197,7 @@ impl SplatTrainer {
             max_sh_degree: 0,
             rng: rand::rngs::StdRng::seed_from_u64(seed),
             view_cams: Vec::new(),
+            evict: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
         }
@@ -208,6 +212,113 @@ impl SplatTrainer {
     /// the Mip-Splatting 3D filter (gated on `config.min_scale_factor > 0`).
     pub fn set_view_cams(&mut self, view_cams: Vec<(glam::Vec3, f32)>) {
         self.view_cams = view_cams;
+    }
+
+    /// Turns on eviction (see [`crate::evict`]). Call before training starts.
+    pub fn enable_eviction(&mut self, config: EvictConfig) {
+        self.evict = Some(Eviction::new(config));
+    }
+
+    /// Per-splat importance for eviction, in splat order; higher is kept
+    /// longer, NaN keeps the previous value. Ignored without eviction or
+    /// when the length does not match.
+    pub fn set_importance(&mut self, importance: &[f32]) {
+        let Some(e) = self.evict.as_mut() else {
+            return;
+        };
+        let Some(life) = e.life.as_mut() else {
+            return;
+        };
+        if importance.len() != life.len() {
+            log::warn!(
+                "importance for {} splats, model has {}; ignored",
+                importance.len(),
+                life.len()
+            );
+            return;
+        }
+        life.set_importance(importance);
+        e.fresh = true;
+    }
+
+    /// Splats inside `cone` are never evicted.
+    pub fn set_protect_cone(&mut self, cone: Option<ProtectCone>) {
+        if let Some(e) = self.evict.as_mut() {
+            e.protect = cone;
+        }
+    }
+
+    /// Records seeds dropped because the budget was full; the next refine
+    /// evicts to make room.
+    pub fn note_seed_shortfall(&mut self, dropped: u32) {
+        if let Some(e) = self.evict.as_mut() {
+            e.seed_shortfall = e.seed_shortfall.saturating_add(dropped);
+        }
+    }
+
+    /// The count splitting and growth may fill up to.
+    fn growth_cap(&self) -> u32 {
+        match &self.evict {
+            Some(e) => crate::evict::growth_limit(self.config.max_splats, e.config.headroom),
+            None => self.config.max_splats,
+        }
+    }
+
+    /// Adds this refine's evictions to the `dead` prune mask. Returns the
+    /// mask and the number evicted.
+    async fn add_evictions(
+        &mut self,
+        iter: u32,
+        splats: &Splats,
+        refiner: &RefineRecord,
+        dead: Tensor<1, Bool>,
+    ) -> (Tensor<1, Bool>, u32) {
+        let Some(ev) = self.evict.as_mut() else {
+            return (dead, 0);
+        };
+        let Some(life) = ev.life.as_mut() else {
+            return (dead, 0);
+        };
+        life.tick();
+        if !ev.fresh {
+            return (dead, 0);
+        }
+        let shortfall = std::mem::take(&mut ev.seed_shortfall);
+        let num_dead = dead
+            .clone()
+            .int()
+            .sum()
+            .into_scalar_async::<i32>()
+            .await
+            .expect("dead count readback") as u32;
+        let demand = growth_demand(refiner, &self.config, iter, num_dead).await;
+        let want = crate::evict::evict_count(
+            splats.num_splats(),
+            demand,
+            shortfall,
+            self.config.max_splats,
+            ev.config.headroom,
+        );
+        if want == 0 {
+            return (dead, 0);
+        }
+        let (mask, count) = select_evictions(
+            life,
+            splats.means(),
+            dead.clone(),
+            ev.protect,
+            &ev.config,
+            want,
+        )
+        .await;
+        if count > 0 {
+            ev.fresh = false;
+        }
+        log::info!(
+            "evict: {count} of {want} wanted (demand {demand}, seed shortfall {shortfall}, {} splats)",
+            splats.num_splats()
+        );
+        (dead.bool_or(mask), count)
     }
 
     /// Add `new` splats to `splats`, keeping optimizer and refine state aligned.
@@ -232,7 +343,11 @@ impl SplatTrainer {
         };
         let new_means = new.means().inner();
         let new = new.bake_min_scale();
-        let (nt, ns, no) = (new.transforms.val(), new.sh_coeffs.val(), new.raw_opacities.val());
+        let (nt, ns, no) = (
+            new.transforms.val(),
+            new.sh_coeffs.val(),
+            new.raw_opacities.val(),
+        );
 
         let mut splats = if let Some(optim) = self.optim.as_mut() {
             map_splats_and_opt(
@@ -268,6 +383,9 @@ impl SplatTrainer {
 
         if let Some(record) = self.refine_record.take() {
             self.refine_record = Some(record.pad(n));
+        }
+        if let Some(life) = self.evict.as_mut().and_then(|e| e.life.as_mut()) {
+            life.pad(n);
         }
         splats
     }
@@ -393,6 +511,11 @@ impl SplatTrainer {
                     .refine_record
                     .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
                 record.gather_stats(refine_weight, visible.clone(), max_radius);
+                if let Some(e) = self.evict.as_mut() {
+                    e.life.get_or_insert_with(|| {
+                        SplatLife::new(splats.num_splats() as usize, &device)
+                    });
+                }
             });
 
             (grads, visible, opacities, diff_out.num_visible, loss_inner)
@@ -573,12 +696,18 @@ impl SplatTrainer {
             .bool_or(bound_mask)
             .bool_or(non_finite_mask);
 
+        let (prune_mask, num_evicted) = self
+            .add_evictions(iter, &splats, &refiner, prune_mask)
+            .await;
+        let life = self.evict.as_mut().and_then(|e| e.life.as_mut());
         let (mut splats, refiner, pruned_count) =
-            prune_points(splats, &mut optim, refiner, prune_mask).await;
+            prune_points(splats, &mut optim, refiner, life, prune_mask).await;
+        let num_dead = pruned_count.saturating_sub(num_evicted);
         let mut split_inds = HashSet::new();
 
         // Always replace dead gaussians, so that the pruned budget is reused.
-        if pruned_count > 0 {
+        // Evicted ones are not replaced: freeing their budget is the point.
+        if num_dead > 0 {
             // Replacement weighting: opacity × visibility.
             let vis_f = refiner.vis_mask().float();
             let resampled_weights = splats.opacities() * vis_f.clone();
@@ -588,8 +717,7 @@ impl SplatTrainer {
                 .expect("Failed to get weights")
                 .try_into_vec::<f32>()
                 .expect("Failed to read weights");
-            let resampled_inds =
-                multinomial_sample(&mut self.rng, &resampled_weights, pruned_count);
+            let resampled_inds = multinomial_sample(&mut self.rng, &resampled_weights, num_dead);
             split_inds.extend(resampled_inds);
         }
 
@@ -610,8 +738,7 @@ impl SplatTrainer {
                     .try_into_vec::<i32>()
                     .expect("Failed to read oversized indices");
                 let mut budget = self
-                    .config
-                    .max_splats
+                    .growth_cap()
                     .saturating_sub(splats.num_splats() + split_inds.len() as u32);
                 for ind in oversized_inds {
                     if budget == 0 {
@@ -640,13 +767,13 @@ impl SplatTrainer {
             let grow_count =
                 (threshold_count as f32 * self.config.growth_select_fraction).round() as u32;
 
-            let sample_high_grad = grow_count.saturating_sub(pruned_count);
+            let sample_high_grad = grow_count.saturating_sub(num_dead);
 
             // Saturating — cur_splats can exceed max_splats if the scene
             // was loaded above cap, and the u32 underflow would request
             // ~4B new splats.
             let cur_splats = splats.num_splats() + split_inds.len() as u32;
-            let headroom = self.config.max_splats.saturating_sub(cur_splats);
+            let headroom = self.growth_cap().saturating_sub(cur_splats);
             let grow_count = sample_high_grad.min(headroom);
 
             // If still growing, sample from indices which are over the threshold.
@@ -701,6 +828,7 @@ impl SplatTrainer {
                 num_split_high_grad,
                 num_pruned: pruned_count,
                 num_pruned_non_finite,
+                num_evicted,
                 total_splats: splat_count,
             },
         )
@@ -826,6 +954,9 @@ impl SplatTrainer {
                     Tensor::cat(vec![x, zeros], 0)
                 },
             );
+            if let Some(life) = self.evict.as_mut().and_then(|e| e.life.as_mut()) {
+                life.split(opt_inds);
+            }
         }
 
         let train_t = (iter as f32 / self.config.total_train_iters.max(1) as f32).clamp(0.0, 1.0);
@@ -871,6 +1002,7 @@ async fn prune_points(
     mut splats: Splats,
     optim: &mut SplatOptim,
     mut refiner: RefineRecord,
+    life: Option<&mut SplatLife>,
     prune: Tensor<1, Bool>,
 ) -> (Splats, RefineRecord, u32) {
     assert_eq!(
@@ -906,6 +1038,9 @@ async fn prune_points(
             |x| x.select(0, valid_inds.clone()),
             |x| x.select(0, valid_inds.clone()),
         );
+        if let Some(life) = life {
+            life.keep(inner_valid_inds.clone());
+        }
         refiner = refiner.keep(inner_valid_inds);
     }
     (splats, refiner, start_splats - new_points)
@@ -953,14 +1088,25 @@ mod append_tests {
     }
 
     fn batch() -> SceneBatch {
-        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(32, 32, image::Rgb([255, 0, 0])));
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            32,
+            32,
+            image::Rgb([255, 0, 0]),
+        ));
         let (img_packed, has_alpha) = view_to_packed_data(img, AlphaMode::Transparent);
         let fov = 60f64.to_radians();
         SceneBatch {
             img_packed,
             has_alpha,
             alpha_mode: AlphaMode::Transparent,
-            camera: Camera::new(glam::Vec3::ZERO, glam::Quat::IDENTITY, fov, fov, glam::vec2(0.5, 0.5), CameraModel::Pinhole),
+            camera: Camera::new(
+                glam::Vec3::ZERO,
+                glam::Quat::IDENTITY,
+                fov,
+                fov,
+                glam::vec2(0.5, 0.5),
+                CameraModel::Pinhole,
+            ),
         }
     }
 
@@ -1040,3 +1186,7 @@ mod append_tests {
         assert_eq!(s.num_splats() as usize, pre_count + 20);
     }
 }
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "train_evict_tests.rs"]
+mod evict_tests;

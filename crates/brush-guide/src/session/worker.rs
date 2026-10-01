@@ -8,6 +8,7 @@ use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
 use crate::protocol::{Cell, KeyframeHeader, MeshBrick};
 use crate::schedule::{ScoreScheduler, score_view_weight, select_score_views};
+use crate::scores::importance::importances;
 use crate::scores::metrics::gaussian_metrics;
 use crate::scores::pass::{PassView, score_pass};
 use crate::scores::voxel::{GaussianScore, RawVoxel, ViewCone, VoxelAggregator};
@@ -85,6 +86,8 @@ struct Worker {
     sizes: Vec<UVec2>,
     /// Set by Finish: no training or scoring until a new keyframe or Reset.
     finished: bool,
+    /// `live.num_evicted()` at the end of the previous round.
+    evicted_at_round: u64,
 }
 
 impl Worker {
@@ -114,6 +117,7 @@ impl Worker {
             rate_window,
             sizes: Vec::new(),
             finished: false,
+            evicted_at_round: 0,
         }
     }
 
@@ -185,6 +189,7 @@ impl Worker {
         self.scheduler = ScoreScheduler::new(config.score_budget, config.min_score_interval_s);
         self.sizes.clear();
         self.finished = false;
+        self.evicted_at_round = 0;
         self.last_score_ms = 0;
         // `live.iter()` restarts at 0; an old window would underflow.
         self.rate_window = (self.clock.elapsed().as_secs_f64(), self.live.iter());
@@ -212,9 +217,13 @@ impl Worker {
         let (bricks, pending, num_fused) = self.mesh_round(&splats).await;
         let end = self.clock.elapsed().as_secs_f64();
         let mesh_ms = ((end - scored) * 1000.0) as u32;
+        let evicted = self.live.num_evicted() - self.evicted_at_round;
+        self.evicted_at_round = self.live.num_evicted();
         log::info!(
-            "round {version}: {} bricks sent of {pending} stale, {num_fused} views fused, {mesh_ms} ms",
-            bricks.len()
+            "round {version}: {} bricks sent of {pending} stale, {num_fused} views fused, {mesh_ms} ms; \
+             {} splats, {evicted} evicted since last round",
+            bricks.len(),
+            splats.num_splats()
         );
         self.scheduler.record(end, end - now);
         self.channels
@@ -250,7 +259,12 @@ impl Worker {
         .collect();
         let out = score_pass(splats, &views, &config.pass).await;
         let (coverage, fisher_pos) = gaussian_metrics(&out, &config.coverage);
-        let gaussians = gaussian_scores(splats, &coverage, &fisher_pos).await;
+        let read = SplatRead::new(splats).await;
+        if config.evict {
+            let importance = importances(&out, &read.rots, &read.scales);
+            self.live.set_importance(&importance);
+        }
+        let gaussians = gaussian_scores(&read, &coverage, &fisher_pos);
         let cones = view_cones(self.live.views());
         self.voxels
             .aggregate(&gaussians, &cones, self.clock.elapsed().as_secs_f64())
@@ -322,16 +336,37 @@ async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
         .expect("f32 splat data")
 }
 
+/// Splat parameters read back once per round, flat per splat.
+struct SplatRead {
+    means: Vec<f32>,
+    opac: Vec<f32>,
+    rots: Vec<f32>,
+    scales: Vec<f32>,
+}
+
+impl SplatRead {
+    async fn new(splats: &Splats) -> Self {
+        Self {
+            means: read_f32(splats.means()).await,
+            opac: read_f32(splats.opacities()).await,
+            rots: read_f32(splats.rotations()).await,
+            scales: read_f32(splats.scales()).await,
+        }
+    }
+}
+
 /// Per-Gaussian inputs of the voxel aggregation.
-async fn gaussian_scores(
-    splats: &Splats,
+fn gaussian_scores(
+    read: &SplatRead,
     coverage: &[f32],
     fisher_pos: &[[f32; 9]],
 ) -> Vec<GaussianScore> {
-    let means = read_f32(splats.means()).await;
-    let opac = read_f32(splats.opacities()).await;
-    let rots = read_f32(splats.rotations()).await;
-    let scales = read_f32(splats.scales()).await;
+    let SplatRead {
+        means,
+        opac,
+        rots,
+        scales,
+    } = read;
     (0..opac.len())
         .map(|i| GaussianScore {
             pos: Vec3::new(means[i * 3], means[i * 3 + 1], means[i * 3 + 2]),
