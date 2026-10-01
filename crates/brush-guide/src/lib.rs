@@ -9,5 +9,6 @@ pub mod protocol;
 pub mod schedule;
 pub mod seed;
 pub mod session;
+pub mod timing;
 
 pub mod scores;

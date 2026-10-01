@@ -164,18 +164,38 @@ impl Geometry {
         views: &[SceneView],
         sizes: &[UVec2],
     ) -> usize {
+        use web_time::Instant;
+        let t = Instant::now();
         self.tsdf.decay(WEIGHT_DECAY);
+        let t_decay = t.elapsed().as_secs_f64();
         let round = self.views_for_round(views.len());
+        let (mut t_depth, mut t_colour, mut t_integrate) = (0.0, 0.0, 0.0);
         for &i in &round {
             let size = (sizes[i] / DEPTH_DOWNSCALE).max(UVec2::ONE);
             let camera = &views[i].camera;
+            let t = Instant::now();
             let depth = render_expected_depth(splats, camera, size).await;
+            t_depth += t.elapsed().as_secs_f64();
+            let t = Instant::now();
             let colour = render_colour(splats, camera, size).await;
+            t_colour += t.elapsed().as_secs_f64();
             // Colour shares the distance's weight (Open3D), so every
             // integration passes it: one without would weigh later
             // colours down.
+            let t = Instant::now();
             self.tsdf.integrate(&depth, Some(&colour), camera);
+            t_integrate += t.elapsed().as_secs_f64();
         }
+        log::debug!(
+            target: crate::timing::TARGET,
+            "fuse: {} views, {} tsdf bricks, decay {:.0} ms, depth render {:.0} ms, colour render {:.0} ms, integrate {:.0} ms",
+            round.len(),
+            self.tsdf.num_bricks(),
+            t_decay * 1e3,
+            t_depth * 1e3,
+            t_colour * 1e3,
+            t_integrate * 1e3
+        );
         round.len()
     }
 
@@ -185,7 +205,9 @@ impl Geometry {
     /// a mesh and has none now is returned as removed. Also returns how
     /// many bricks were stale.
     pub(super) fn mesh_changed(&mut self, eye: Vec3) -> (Vec<MeshBrick>, usize) {
+        use web_time::Instant;
         self.round += 1;
+        let t = Instant::now();
         let stale = self.tsdf.changed();
         let geometry: HashSet<BrickKey> = stale.iter().copied().collect();
         let repainted: Vec<BrickKey> = self
@@ -195,9 +217,37 @@ impl Geometry {
             .filter(|k| !geometry.contains(k))
             .collect();
         let pending = stale.len() + repainted.len();
+        let t_scan = t.elapsed().as_secs_f64();
         let chosen = self.select(stale, repainted, eye);
-        let bricks = chosen.iter().filter_map(|&key| self.mesh(key)).collect();
+        let t = Instant::now();
+        let bricks: Vec<MeshBrick> = chosen.iter().filter_map(|&key| self.mesh(key)).collect();
+        let t_nets = t.elapsed().as_secs_f64();
+        let t = Instant::now();
         self.tsdf.mark_meshed(&chosen);
+        let t_mark = t.elapsed().as_secs_f64();
+        if crate::timing::enabled() {
+            let tris: usize = bricks
+                .iter()
+                .map(|b| match b {
+                    MeshBrick::Mesh(m) => m.indices.len() / 3,
+                    MeshBrick::Removed(_) => 0,
+                })
+                .sum();
+            let t = Instant::now();
+            let bytes = encode_mesh_bricks(bricks.iter()).len();
+            log::debug!(
+                target: crate::timing::TARGET,
+                "mesh: {} meshed of {pending} stale, {tris} triangles ({:.0}/brick), {} meshed bricks total, \
+                 change scan {:.0} ms, surface nets {:.0} ms, mark {:.0} ms, encode {:.1} ms ({bytes} B)",
+                bricks.len(),
+                tris as f64 / bricks.len().max(1) as f64,
+                self.meshed.len(),
+                t_scan * 1e3,
+                t_nets * 1e3,
+                t_mark * 1e3,
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
         (bricks, pending)
     }
 

@@ -65,6 +65,7 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
     let mut weight: Tensor<1> = Tensor::zeros([n], &inner);
     let mut max_ppm: Tensor<1> = Tensor::zeros([n], &inner);
     let means = base.means();
+    let t_start = web_time::Instant::now();
 
     for view in views {
         let size = (view.img_size.as_vec2() * cfg.render_scale)
@@ -109,14 +110,26 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
         let focal = view.camera.focal(view.img_size).x;
         let ppm = dist.squeeze_dim::<1>(1).recip() * focal * observed;
         max_ppm = max_ppm.max_pair(ppm);
+        crate::timing::sync(&max_ppm).await;
     }
+    let t_views = t_start.elapsed().as_secs_f64();
 
+    let t_read = web_time::Instant::now();
     let fisher_v = read_vec(fisher).await;
     let dir_v = read_vec(dir_sum).await;
-    PassOutput {
+    let out = PassOutput {
         fisher: fisher_v.as_chunks::<36>().0.to_vec(),
         dir_sum: dir_v.as_chunks::<3>().0.to_vec(),
         weight: read_vec(weight).await,
         max_px_per_m: read_vec(max_ppm).await,
-    }
+    };
+    log::debug!(
+        target: crate::timing::TARGET,
+        "score_pass: {} views, {n} splats, render+bwd {:.0} ms ({:.1} ms/view), readback {:.0} ms",
+        views.len(),
+        t_views * 1e3,
+        t_views * 1e3 / views.len().max(1) as f64,
+        t_read.elapsed().as_secs_f64() * 1e3
+    );
+    out
 }

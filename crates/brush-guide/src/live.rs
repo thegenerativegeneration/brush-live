@@ -50,6 +50,8 @@ pub struct LiveModel {
     iter: u32,
     /// Splats evicted to stay within the budget, in total.
     num_evicted: u64,
+    /// Refines and their time since `take_refine_stats`, for debug timing.
+    refine_stats: (u32, f64),
     rng: rand::rngs::StdRng,
 }
 
@@ -82,6 +84,7 @@ impl LiveModel {
             views_in_all: 0,
             iter: 0,
             num_evicted: 0,
+            refine_stats: (0, 0.0),
             rng,
         }
     }
@@ -114,6 +117,11 @@ impl LiveModel {
         if let Some(t) = self.trainer.as_mut() {
             t.set_importance(importance);
         }
+    }
+
+    /// Refines and their seconds since the last call.
+    pub fn take_refine_stats(&mut self) -> (u32, f64) {
+        std::mem::take(&mut self.refine_stats)
     }
 
     /// Number of training steps taken.
@@ -294,6 +302,13 @@ impl LiveModel {
             stride: (self.config.seed_stride_px / 4).max(1),
             alpha_threshold: self.config.seed_alpha_threshold,
         });
+        log::debug!(
+            target: crate::timing::TARGET,
+            "keyframe {}: {} seeds (depth {}) onto {current} splats",
+            kf.id,
+            seeds.colors.len(),
+            kf.depth.is_some()
+        );
         let seeds = self.cap_seeds(seeds, current);
         (seeds.colors.len() >= 3).then(|| {
             self.seeds_to_splats(seeds.means, &seeds.colors)
@@ -334,8 +349,23 @@ impl LiveModel {
         let mut splats = stepped.valid();
         self.iter += 1;
         if self.iter.is_multiple_of(self.config.refine_every) {
+            crate::timing::sync_splats(&splats).await;
+            let t = web_time::Instant::now();
+            let before = splats.num_splats();
             let (refined, stats) = trainer.refine(self.iter, splats).await;
             splats = refined;
+            crate::timing::sync_splats(&splats).await;
+            let dt = t.elapsed().as_secs_f64();
+            self.refine_stats.0 += 1;
+            self.refine_stats.1 += dt;
+            log::debug!(
+                target: crate::timing::TARGET,
+                "refine at iter {}: {:.0} ms, splats {before} -> {}, {} evicted",
+                self.iter,
+                dt * 1e3,
+                splats.num_splats(),
+                stats.num_evicted
+            );
             self.num_evicted += u64::from(stats.num_evicted);
         }
         self.splats = Some(splats);

@@ -51,15 +51,33 @@ pub(super) async fn worker(
             }
         };
         if let Some(cmd) = cmd {
+            let t = Instant::now();
+            let is_kf = matches!(cmd, Command::Keyframe(..));
             w.handle(cmd).await;
+            if is_kf {
+                if let Some(s) = w.live.splats() {
+                    crate::timing::sync_splats(s).await;
+                }
+                w.acc.kf_s += t.elapsed().as_secs_f64();
+                w.acc.kfs += 1;
+            }
         }
 
         if w.idle() {
             continue;
         }
+        let t = Instant::now();
         w.live.train_step().await;
+        w.acc.train_s += t.elapsed().as_secs_f64();
+        w.acc.steps += 1;
         let now = w.clock.elapsed().as_secs_f64();
         if w.scheduler.due(now) {
+            let t = Instant::now();
+            if let Some(s) = w.live.splats() {
+                crate::timing::sync_splats(s).await;
+            }
+            w.acc.train_s += t.elapsed().as_secs_f64();
+            let now = w.clock.elapsed().as_secs_f64();
             w.score_round(now).await;
         }
         w.publish_status();
@@ -88,6 +106,16 @@ struct Worker {
     finished: bool,
     /// `live.num_evicted()` at the end of the previous round.
     evicted_at_round: u64,
+    /// Time spent between rounds, for the debug timing log.
+    acc: Between,
+}
+
+#[derive(Default)]
+struct Between {
+    train_s: f64,
+    steps: u32,
+    kf_s: f64,
+    kfs: u32,
 }
 
 impl Worker {
@@ -118,6 +146,7 @@ impl Worker {
             sizes: Vec::new(),
             finished: false,
             evicted_at_round: 0,
+            acc: Between::default(),
         }
     }
 
@@ -201,6 +230,22 @@ impl Worker {
     /// Scores the splats, fuses and meshes the TSDF, and publishes the
     /// round's bricks, then its score set. `now` is when the round started.
     async fn score_round(&mut self, now: f64) {
+        let acc = std::mem::take(&mut self.acc);
+        let refine = self.live.take_refine_stats();
+        log::debug!(
+            target: crate::timing::TARGET,
+            "between rounds: {} train steps in {:.0} ms ({:.1} ms/step), of which {} refines {:.0} ms; \
+             {} keyframes in {:.0} ms; {} views, {} splats",
+            acc.steps,
+            acc.train_s * 1e3,
+            acc.train_s * 1e3 / f64::from(acc.steps.max(1)),
+            refine.0,
+            refine.1 * 1e3,
+            acc.kfs,
+            acc.kf_s * 1e3,
+            self.live.views().len(),
+            self.live.splats().map_or(0, |s| s.num_splats())
+        );
         let splats = self.live.splats().expect("views imply splats").clone();
         let cells = self.score_cells(&splats).await;
         let scored = self.clock.elapsed().as_secs_f64();
@@ -243,6 +288,7 @@ impl Worker {
     async fn score_cells(&mut self, splats: &Splats) -> Vec<Cell> {
         let config = &self.config;
         let num_views = self.live.views().len();
+        let t = Instant::now();
         let views: Vec<PassView> = select_score_views(
             num_views,
             config.max_score_views,
@@ -257,17 +303,46 @@ impl Worker {
             weight: score_view_weight(i, num_views, config.max_score_views),
         })
         .collect();
+        let t_select = t.elapsed().as_secs_f64();
+        let t = Instant::now();
         let out = score_pass(splats, &views, &config.pass).await;
+        let t_pass = t.elapsed().as_secs_f64();
+        let t = Instant::now();
         let (coverage, fisher_pos) = gaussian_metrics(&out, &config.coverage);
+        let t_metrics = t.elapsed().as_secs_f64();
+        let t = Instant::now();
         let read = SplatRead::new(splats).await;
+        let t_read = t.elapsed().as_secs_f64();
+        let t = Instant::now();
         if config.evict {
             let importance = importances(&out, &read.rots, &read.scales);
             self.live.set_importance(&importance);
         }
+        let t_importance = t.elapsed().as_secs_f64();
+        let t = Instant::now();
         let gaussians = gaussian_scores(&read, &coverage, &fisher_pos);
         let cones = view_cones(self.live.views());
-        self.voxels
-            .aggregate(&gaussians, &cones, self.clock.elapsed().as_secs_f64())
+        let t_prep = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let cells = self
+            .voxels
+            .aggregate(&gaussians, &cones, self.clock.elapsed().as_secs_f64());
+        log::debug!(
+            target: crate::timing::TARGET,
+            "score: {} views, select {:.1} ms, pass {:.0} ms, metrics {:.0} ms, splat readback {:.0} ms, \
+             importance {:.0} ms, gaussian prep {:.0} ms ({} cones), voxel aggregate {:.0} ms, {} cells",
+            views.len(),
+            t_select * 1e3,
+            t_pass * 1e3,
+            t_metrics * 1e3,
+            t_read * 1e3,
+            t_importance * 1e3,
+            t_prep * 1e3,
+            cones.len(),
+            t.elapsed().as_secs_f64() * 1e3,
+            cells.len()
+        );
+        cells
     }
 
     /// Fuses and meshes the TSDF: the bricks to publish, how many were

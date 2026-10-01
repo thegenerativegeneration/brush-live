@@ -225,6 +225,11 @@ impl Tsdf {
         }
     }
 
+    /// Allocated bricks.
+    pub fn num_bricks(&self) -> usize {
+        self.bricks.len()
+    }
+
     /// Fuses one depth image (depth along the camera's forward axis, NaN
     /// where empty) seen from `camera`, a pinhole with the image's size,
     /// and the colour image of the same view if given. Depth beyond
