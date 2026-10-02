@@ -28,7 +28,11 @@ pub struct PickedFile<R: AsyncRead + Unpin> {
 
 /// Pick a file and return the name & reader of the file.
 pub async fn pick_file() -> Result<PickedFile<impl AsyncRead + Unpin>, PickFileError> {
-    #[cfg(all(not(target_os = "android"), not(target_family = "wasm")))]
+    #[cfg(all(
+        not(target_os = "android"),
+        not(target_os = "ios"),
+        not(target_family = "wasm")
+    ))]
     {
         let file = rfd::AsyncFileDialog::new()
             .pick_file()
@@ -38,6 +42,11 @@ pub async fn pick_file() -> Result<PickedFile<impl AsyncRead + Unpin>, PickFileE
         let name = file.file_name();
         let file = tokio::fs::File::open(file.path()).await?;
         Ok(PickedFile { name, reader: file })
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        Err::<PickedFile<tokio::fs::File>, _>(PickFileError::NoFileSelected)
     }
 
     #[cfg(target_family = "wasm")]
@@ -57,7 +66,12 @@ pub async fn pick_file() -> Result<PickedFile<impl AsyncRead + Unpin>, PickFileE
 
 #[cfg(not(target_family = "wasm"))]
 pub async fn pick_directory() -> Result<PathBuf, PickFileError> {
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    {
+        Err(PickFileError::NoDirectorySelected)
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let dir = rfd::AsyncFileDialog::new()
             .pick_folder()
@@ -77,7 +91,11 @@ pub async fn pick_directory() -> Result<PathBuf, PickFileError> {
 ///
 /// Nb: Does not work on Android currently.
 pub async fn save_file(default_name: &str, data: Vec<u8>) -> Result<(), PickFileError> {
-    #[cfg(all(not(target_os = "android"), not(target_family = "wasm")))]
+    #[cfg(all(
+        not(target_os = "android"),
+        not(target_os = "ios"),
+        not(target_family = "wasm")
+    ))]
     {
         let file = rfd::AsyncFileDialog::new()
             .set_file_name(default_name)
@@ -88,6 +106,13 @@ pub async fn save_file(default_name: &str, data: Vec<u8>) -> Result<(), PickFile
         tokio::fs::write(file.path(), data).await?;
 
         Ok(())
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let _ = default_name;
+        let _ = data;
+        Err(PickFileError::NoFileSelected)
     }
 
     #[cfg(target_family = "wasm")]
