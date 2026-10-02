@@ -33,6 +33,9 @@ pub struct GuideConfig {
     /// Training iterations per second at most (0: uncapped). The worker sleeps
     /// between steps, which saves power on the phone.
     pub max_iters_per_s: f32,
+    /// Long side of the keyframes the client sends, in pixels. Sizes the
+    /// warm-up so GPU autotuning covers the session's image size.
+    pub keyframe_long_side: u32,
     /// Share of wall time for voxel rounds (score set from the splat
     /// parameters, TSDF fusion, meshing).
     pub score_budget: f32,
@@ -93,6 +96,7 @@ impl Default for GuideConfig {
             all_loader_rebuild_every: 10,
             loader_cache_bytes: 1 << 30,
             max_iters_per_s: 0.0,
+            keyframe_long_side: 960,
             score_budget: 0.25,
             min_score_interval_s: 2.0,
             fisher_budget: 0.2,

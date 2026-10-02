@@ -56,8 +56,11 @@ impl Warmup {
 
 /// Smallest splat count warmed; sessions start from a few thousand seeds.
 const MIN_SPLATS: u32 = 1 << 12;
-/// Image size of a keyframe as the phone sends it.
-const IMAGE: UVec2 = UVec2::new(960, 720);
+
+/// Keyframe size warmed: landscape 4:3 at `long_side`, as ARKit images are.
+pub fn warmup_image(long_side: u32) -> UVec2 {
+    UVec2::new(long_side, long_side * 3 / 4)
+}
 
 /// Splat counts to warm: one per autotune bucket from `MIN_SPLATS` up to
 /// the bucket holding `max_splats`, the last one at `max_splats` itself.
@@ -76,8 +79,9 @@ pub fn warmup_sizes(max_splats: u32) -> Vec<u32> {
 /// the seconds it took.
 pub async fn warm_up(config: &GuideConfig, device: &Device) -> f64 {
     let start = Instant::now();
-    let fov = 2.0 * (f64::from(IMAGE.x) / 2.0 / 700.0).atan();
-    let fov_y = 2.0 * (f64::from(IMAGE.y) / 2.0 / 700.0).atan();
+    let image = warmup_image(config.keyframe_long_side);
+    let fov = 2.0 * (f64::from(image.x) / 2.0 / 700.0).atan();
+    let fov_y = 2.0 * (f64::from(image.y) / 2.0 / 700.0).atan();
     let camera = Camera::new(
         Vec3::ZERO,
         glam::Quat::IDENTITY,
@@ -91,14 +95,14 @@ pub async fn warm_up(config: &GuideConfig, device: &Device) -> f64 {
         let t = Instant::now();
         let splats = dummy_splats(n, &camera, &mut rng, &device.clone().inner())
             .with_sh_degree(config.sh_degree);
-        let splats = train_steps(config, device, splats, &camera, &mut rng).await;
+        let splats = train_steps(config, device, splats, &camera, image, &mut rng).await;
         let view = PassView {
             camera,
-            img_size: IMAGE,
+            img_size: image,
             weight: 1.0,
         };
         let _ = score_pass(&splats, &[view], &config.pass).await;
-        let small = IMAGE / 4;
+        let small = image / 4;
         let _ = render_expected_depth(&splats, &camera, small).await;
         let _ = render_colour(&splats, &camera, small).await;
         log::info!(
@@ -140,14 +144,15 @@ async fn train_steps(
     device: &Device,
     splats: Splats,
     camera: &Camera,
+    image: UVec2,
     rng: &mut impl rand::Rng,
 ) -> Splats {
     let mut train_config = TrainConfig::parse_from(["brush-guide-warmup"]);
     train_config.max_splats = config.max_splats;
     let bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
     let mut trainer = SplatTrainer::new_seeded(&train_config, device, bounds, config.seed);
-    let pixels: Vec<u8> = (0..IMAGE.x * IMAGE.y * 3).map(|_| rng.random()).collect();
-    let img = image::RgbImage::from_raw(IMAGE.x, IMAGE.y, pixels).expect("image size");
+    let pixels: Vec<u8> = (0..image.x * image.y * 3).map(|_| rng.random()).collect();
+    let img = image::RgbImage::from_raw(image.x, image.y, pixels).expect("image size");
     let (img_packed, has_alpha) =
         view_to_packed_data(image::DynamicImage::ImageRgb8(img), AlphaMode::default());
     let batch = SceneBatch {
@@ -169,6 +174,12 @@ async fn train_steps(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warmup_image_is_four_by_three_at_the_long_side() {
+        assert_eq!(warmup_image(960), UVec2::new(960, 720));
+        assert_eq!(warmup_image(500), UVec2::new(500, 375));
+    }
 
     #[test]
     fn sizes_cover_each_bucket_up_to_the_budget() {
