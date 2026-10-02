@@ -112,6 +112,7 @@ impl Receiver {
             return;
         }
         let cells = decode_cells(payload).unwrap_or_default();
+        eprintln!("score_set v{version}, {} cells", cells.len());
         let due = self
             .last_dump
             .is_none_or(|t| t.elapsed().as_secs_f32() >= self.dump_every_s);

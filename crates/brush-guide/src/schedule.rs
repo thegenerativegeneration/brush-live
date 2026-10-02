@@ -101,6 +101,20 @@ const FIT_MARGIN_S: f64 = 0.1;
 /// A Fisher pass waits for a gap holding at least the views that fit in
 /// this share of the time between two voxel rounds.
 const SLOT_SHARE: f64 = 0.75;
+/// Trimmed Fisher view counts round to a multiple of this many views, so
+/// `ViewSample`'s `recent` count and stratum boundaries only move in whole
+/// steps instead of drifting by the ±1-2 views that a per-pass cost estimate
+/// jitters by.
+const VIEW_TIER: usize = 3;
+
+/// Rounds `views` to the nearest multiple of [`VIEW_TIER`], at least one
+/// tier; 0 stays 0 (no pass fits).
+fn quantise_views(views: usize) -> usize {
+    if views == 0 {
+        return 0;
+    }
+    (((views + VIEW_TIER / 2) / VIEW_TIER) * VIEW_TIER).max(VIEW_TIER)
+}
 
 impl RoundScheduler {
     pub fn new(voxel: Cadence, fisher: Cadence, max_views: usize, min_views: usize) -> Self {
@@ -133,7 +147,8 @@ impl RoundScheduler {
             } else if cost.per_view_s <= 0.0 {
                 self.max_views
             } else {
-                (room / cost.per_view_s).floor().min(self.max_views as f64) as usize
+                let raw = (room / cost.per_view_s).floor().min(self.max_views as f64) as usize;
+                quantise_views(raw).min(self.max_views)
             }
         };
         // The best slot is right after a voxel round; noticing it takes a

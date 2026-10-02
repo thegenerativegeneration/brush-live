@@ -1,10 +1,8 @@
 //! GPU warm-up at server start. cubecl autotunes a kernel the first time it
 //! runs at a new size bucket (powers of two of the splat count), which costs
-//! seconds per bucket on a cold cache: a cold first session took 5.3 s for
-//! its first training step and 0.8 s for its first depth render. Running
-//! the session's GPU work once per bucket on dummy splats fills the cache
-//! (in memory, and on disk under the server's working directory) before a
-//! phone connects.
+//! seconds per bucket on a cold cache. Running the session's GPU work once
+//! per bucket on dummy splats fills the cache (in memory, and on disk under
+//! the server's working directory) before a phone connects.
 
 use crate::config::GuideConfig;
 use crate::geometry::depth::{render_colour, render_expected_depth};
@@ -163,7 +161,7 @@ async fn train_steps(
         let (stepped, _) = trainer.step(batch.clone(), splats.train()).await;
         splats = stepped.valid();
     }
-    // A cold refine took 2.4 s in the first session after a cache wipe.
+    // Warms the refine kernels too, not just the training step's.
     let (refined, _) = trainer.refine(train_config.refine_every, splats).await;
     refined
 }

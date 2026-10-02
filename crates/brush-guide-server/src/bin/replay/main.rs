@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
         score_dump: args
             .dump_scores
             .as_deref()
-            .map(ScoreDump::open)
+            .map(|p| ScoreDump::open(p, started.into_std()))
             .transpose()?,
         mesh_dump: args.dump_mesh.clone(),
         stop_on_splat: args.finish_after.is_some(),

@@ -1,6 +1,5 @@
-//! The single-pass aggregation the score round used before the voxel round
-//! and the Fisher pass were split (brush 295c49a5), kept as the reference
-//! the split must reproduce.
+//! Single-pass aggregation kept as the reference that the split voxel round
+//! and Fisher pass must reproduce.
 
 use super::*;
 use rand::{RngExt as _, SeedableRng};

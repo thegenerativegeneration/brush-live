@@ -200,6 +200,39 @@ fn older_weight_is_the_length_of_the_stratum_holding_the_view() {
 }
 
 #[test]
+fn trimmed_view_counts_round_to_a_tier() {
+    assert_eq!(quantise_views(0), 0);
+    assert_eq!(quantise_views(1), 3);
+    assert_eq!(quantise_views(2), 3);
+    assert_eq!(quantise_views(3), 3);
+    assert_eq!(quantise_views(4), 3);
+    assert_eq!(quantise_views(5), 6);
+    assert_eq!(quantise_views(17), 18);
+    assert_eq!(quantise_views(30), 30);
+}
+
+#[test]
+fn a_trimmed_pass_keeps_stable_strata_despite_small_cost_jitter() {
+    // Two cost estimates a view apart (the kind of jitter a round-to-round
+    // cost estimate has) land on the same tier, so `ViewSample::new` sees
+    // the same `recent`/stratum split both times.
+    let mut s = scheduler();
+    s.fisher.record(7.6, 0.2);
+    s.voxel.record(10.0, 0.4);
+    let a = FisherCost {
+        per_view_s: 1.1 / 18.5,
+        fixed_s: 0.2,
+    };
+    let b = FisherCost {
+        per_view_s: 1.1 / 19.5,
+        fixed_s: 0.2,
+    };
+    // Raw fits differ (18 vs 19) but both round to the 18-view tier.
+    assert_eq!(s.next(10.6, Some(a)), Some(Round::Fisher(18)));
+    assert_eq!(s.next(10.6, Some(b)), Some(Round::Fisher(18)));
+}
+
+#[test]
 fn smaller_passes_keep_a_third_recent() {
     let v = ViewSample::new(12);
     assert_eq!(v.recent, 4);

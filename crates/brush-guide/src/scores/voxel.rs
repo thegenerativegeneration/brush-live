@@ -79,7 +79,9 @@ pub struct VoxelAggregator {
     min_opacity: f32,
     scale: UncertaintyScale,
     first_seen: HashMap<IVec3, f64>,
-    /// Per voxel, as of the latest Fisher pass that scored it.
+    /// Per voxel, as of the latest Fisher pass that scored it. Never
+    /// pruned, so its memory is bounded by the voxels ever observed, not
+    /// by the current observed volume.
     fisher: HashMap<IVec3, FisherBytes>,
     record_raw: bool,
     raw: Vec<RawVoxel>,

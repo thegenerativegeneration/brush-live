@@ -16,14 +16,16 @@ pub(crate) struct ScoreDump {
 }
 
 impl ScoreDump {
-    pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
+    /// `started` is the replay's connect clock, shared with [`super::receive::Receiver`]
+    /// so dumped and logged timestamps read from the same origin.
+    pub(crate) fn open(path: &Path, started: Instant) -> std::io::Result<Self> {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)?;
         Ok(Self {
             file,
-            start: Instant::now(),
+            start: started,
         })
     }
 
