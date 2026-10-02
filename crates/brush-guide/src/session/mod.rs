@@ -1,4 +1,5 @@
 mod geometry;
+mod preview;
 mod splat_read;
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use worker::{Channels, worker};
 
 pub use geometry::{MeshBricksMsg, MeshLog};
+pub use preview::{PREVIEW_FLOATS, PreviewSnapshot};
 
 pub struct ScoreSetMsg {
     pub version: u64,
@@ -80,6 +82,8 @@ enum Command {
     Reset(oneshot::Sender<()>),
     /// `true` stops training, rounds and keyframe decoding until `false`.
     Pause(bool, oneshot::Sender<()>),
+    /// Snapshot interval for the preview; `None` turns it off. No reply.
+    SetPreview(Option<std::time::Duration>),
 }
 
 /// Handle to one capture session: a worker that trains on incoming keyframes
@@ -90,6 +94,7 @@ pub struct GuideSession {
     scores: watch::Receiver<Option<Arc<ScoreSetMsg>>>,
     meshes: watch::Receiver<MeshLog>,
     status: watch::Receiver<StatusMsg>,
+    preview: watch::Receiver<Option<Arc<PreviewSnapshot>>>,
     /// The worker runs pinned to this actor's thread: GPU streams are keyed on
     /// the OS thread, so the worker must not migrate between tokio workers.
     _actor: Actor,
@@ -114,11 +119,13 @@ impl GuideSession {
         let (scores_tx, scores) = watch::channel(None);
         let (meshes_tx, meshes) = watch::channel(MeshLog::default());
         let (status_tx, status) = watch::channel(StatusMsg::default());
+        let (preview_tx, preview) = watch::channel(None);
         let actor = Actor::new("brush-guide-session");
         let channels = Channels {
             scores: scores_tx,
             meshes: meshes_tx,
             status: status_tx,
+            preview: preview_tx,
         };
         actor
             .run(move || worker(config, device, session_dir, rx, channels, ready))
@@ -128,6 +135,7 @@ impl GuideSession {
             scores,
             meshes,
             status,
+            preview,
             _actor: actor,
         }
     }
@@ -167,6 +175,17 @@ impl GuideSession {
 
     pub fn status(&self) -> watch::Receiver<StatusMsg> {
         self.status.clone()
+    }
+
+    /// Newest preview snapshot; `None` until the first one.
+    pub fn preview(&self) -> watch::Receiver<Option<Arc<PreviewSnapshot>>> {
+        self.preview.clone()
+    }
+
+    /// Turns preview snapshots on (`Some(interval)`, zero = every training
+    /// step) or off. Returns once queued, without waiting for the worker.
+    pub async fn set_preview(&self, interval: Option<std::time::Duration>) {
+        let _ = self.tx.send(Command::SetPreview(interval)).await;
     }
 
     /// The current splats as PLY bytes.

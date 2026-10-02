@@ -7,7 +7,7 @@ use brush_render::gaussian_splats::Splats;
 use burn::tensor::Tensor;
 use glam::{Quat, Vec3};
 
-async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
+pub(super) async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
     t.into_data_async()
         .await
         .expect("splat readback")

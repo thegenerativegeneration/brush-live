@@ -6,6 +6,7 @@
 mod fisher;
 
 use super::geometry::{Geometry, MeshLog};
+use super::preview::{PREVIEW_FLOATS, PreviewClock, PreviewSnapshot};
 use super::splat_read::{SplatRead, view_cones};
 use super::{Command, ScoreSetMsg, StatusMsg};
 use crate::config::GuideConfig;
@@ -28,6 +29,7 @@ pub(super) struct Channels {
     pub(super) scores: watch::Sender<Option<Arc<ScoreSetMsg>>>,
     pub(super) meshes: watch::Sender<MeshLog>,
     pub(super) status: watch::Sender<StatusMsg>,
+    pub(super) preview: watch::Sender<Option<Arc<PreviewSnapshot>>>,
 }
 
 /// Runs the session. With `ready`, waits for it to turn true (the server's
@@ -95,6 +97,9 @@ pub(super) async fn worker(
         w.live.train_step().await;
         w.acc.train_s += t.elapsed().as_secs_f64();
         w.acc.steps += 1;
+        if w.preview.due(Instant::now()) {
+            w.publish_preview().await;
+        }
         let now = w.clock.elapsed().as_secs_f64();
         if let Some(round) = w.scheduler.next(now, w.fisher_cost()) {
             let t = Instant::now();
@@ -145,6 +150,8 @@ struct Worker {
     evicted_at_round: u64,
     /// Time spent between rounds, for the debug timing log.
     acc: Between,
+    preview: PreviewClock,
+    preview_version: u64,
 }
 
 #[derive(Default)]
@@ -190,6 +197,8 @@ impl Worker {
             held: Vec::new(),
             evicted_at_round: 0,
             acc: Between::default(),
+            preview: PreviewClock::default(),
+            preview_version: 0,
         }
     }
 
@@ -224,6 +233,7 @@ impl Worker {
                 let result = self.export(finish).await;
                 let _ = reply.send(result);
             }
+            Command::SetPreview(interval) => self.preview.set(interval),
             Command::Reset(reply) => {
                 self.reset();
                 let _ = reply.send(());
@@ -288,6 +298,35 @@ impl Worker {
         self.channels.scores.send_replace(None);
         self.channels.meshes.send_replace(MeshLog::default());
         self.channels.status.send_replace(StatusMsg::default());
+        if self.channels.preview.borrow().is_some() {
+            self.preview_version += 1;
+            self.channels
+                .preview
+                .send_replace(Some(Arc::new(PreviewSnapshot {
+                    version: self.preview_version,
+                    ..PreviewSnapshot::default()
+                })));
+        }
+    }
+
+    /// Reads and publishes a preview snapshot of the current splats.
+    async fn publish_preview(&mut self) {
+        let Some(splats) = self.live.splats() else {
+            return;
+        };
+        let t = Instant::now();
+        let data = super::preview::read(splats).await;
+        self.preview_version += 1;
+        let count = (data.len() / PREVIEW_FLOATS) as u32;
+        self.channels
+            .preview
+            .send_replace(Some(Arc::new(PreviewSnapshot {
+                version: self.preview_version,
+                count,
+                readback_ms: t.elapsed().as_secs_f32() * 1000.0,
+                data,
+            })));
+        self.preview.taken(Instant::now());
     }
 
     /// Builds the score set from the splat parameters, fuses and meshes the
