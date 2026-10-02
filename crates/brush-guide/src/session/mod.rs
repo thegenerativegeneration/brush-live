@@ -41,6 +41,8 @@ pub struct StatusMsg {
     pub num_splats: u32,
     pub train_iters_per_s: f32,
     pub last_score_ms: u32,
+    /// Training iterations since the session started; not sent on the wire.
+    pub train_iters: u64,
 }
 
 impl StatusMsg {

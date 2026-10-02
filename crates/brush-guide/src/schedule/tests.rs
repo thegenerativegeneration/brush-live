@@ -225,3 +225,24 @@ fn a_trimmed_pass_keeps_stable_strata_despite_small_cost_jitter() {
     assert_eq!(s.next(10.6, Some(a)), Some(Round::Fisher(18)));
     assert_eq!(s.next(10.6, Some(b)), Some(Round::Fisher(18)));
 }
+
+#[test]
+fn uncapped_throttle_never_waits() {
+    let mut t = IterThrottle::new(0.0);
+    for i in 0..5 {
+        assert_eq!(t.wait_s(f64::from(i) * 1e-3), None);
+        t.record_step(f64::from(i) * 1e-3);
+    }
+}
+
+#[test]
+fn throttle_spaces_steps_by_the_cap_without_banking_time() {
+    let mut t = IterThrottle::new(2.0);
+    assert_eq!(t.wait_s(0.0), None);
+    t.record_step(0.0);
+    assert_eq!(t.wait_s(0.25), Some(0.25));
+    // After a 10 s round the next step runs at once, but no burst follows.
+    assert_eq!(t.wait_s(10.0), None);
+    t.record_step(10.0);
+    assert_eq!(t.wait_s(10.0), Some(0.5));
+}

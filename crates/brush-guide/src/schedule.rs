@@ -235,5 +235,32 @@ fn splitmix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+/// Caps training at `max_per_s` iterations per second (0: uncapped) by
+/// spacing steps at least `1 / max_per_s` apart. Time spent elsewhere is not
+/// banked, so a step after a long round runs at once but no burst follows.
+pub struct IterThrottle {
+    min_gap_s: Option<f64>,
+    last_step_s: Option<f64>,
+}
+
+impl IterThrottle {
+    pub fn new(max_per_s: f32) -> Self {
+        Self {
+            min_gap_s: (max_per_s > 0.0).then(|| 1.0 / f64::from(max_per_s)),
+            last_step_s: None,
+        }
+    }
+
+    /// Seconds to wait before the next step may run, if any.
+    pub fn wait_s(&self, now_s: f64) -> Option<f64> {
+        let wait = self.last_step_s? + self.min_gap_s? - now_s;
+        (wait > 0.0).then_some(wait)
+    }
+
+    pub fn record_step(&mut self, now_s: f64) {
+        self.last_step_s = Some(now_s);
+    }
+}
+
 #[cfg(test)]
 mod tests;

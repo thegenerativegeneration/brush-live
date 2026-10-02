@@ -30,6 +30,9 @@ pub struct GuideConfig {
     pub all_loader_rebuild_every: usize,
     /// Decoded-frame cache per scene loader, in bytes.
     pub loader_cache_bytes: u64,
+    /// Training iterations per second at most (0: uncapped). The worker sleeps
+    /// between steps, which saves power on the phone.
+    pub max_iters_per_s: f32,
     /// Share of wall time for voxel rounds (score set from the splat
     /// parameters, TSDF fusion, meshing).
     pub score_budget: f32,
@@ -89,6 +92,7 @@ impl Default for GuideConfig {
             refine_every: 100,
             all_loader_rebuild_every: 10,
             loader_cache_bytes: 1 << 30,
+            max_iters_per_s: 0.0,
             score_budget: 0.25,
             min_score_interval_s: 2.0,
             fisher_budget: 0.2,

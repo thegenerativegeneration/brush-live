@@ -12,7 +12,7 @@ use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
 use crate::protocol::{Cell, KeyframeHeader, MeshBrick};
-use crate::schedule::{Cadence, FisherCost, Round, RoundScheduler};
+use crate::schedule::{Cadence, FisherCost, IterThrottle, Round, RoundScheduler};
 use crate::scores::voxel::{RawVoxel, VoxelAggregator};
 use brush_render::gaussian_splats::Splats;
 use burn::module::Module;
@@ -20,6 +20,7 @@ use burn::tensor::Device;
 use glam::UVec2;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use web_time::Instant;
 
@@ -78,6 +79,18 @@ pub(super) async fn worker(
         if w.idle() {
             continue;
         }
+        // Over the iteration cap: sleep until the next step is allowed, waking early for a command.
+        if let Some(wait) = w.throttle.wait_s(w.clock.elapsed().as_secs_f64()) {
+            match tokio::time::timeout(Duration::from_secs_f64(wait), rx.recv()).await {
+                Ok(Some(cmd)) => {
+                    w.handle(cmd).await;
+                    continue;
+                }
+                Ok(None) => return,
+                Err(_elapsed) => {}
+            }
+        }
+        w.throttle.record_step(w.clock.elapsed().as_secs_f64());
         let t = Instant::now();
         w.live.train_step().await;
         w.acc.train_s += t.elapsed().as_secs_f64();
@@ -109,6 +122,7 @@ struct Worker {
     live: LiveModel,
     voxels: VoxelAggregator,
     scheduler: RoundScheduler,
+    throttle: IterThrottle,
     /// Fisher passes so far; rotates their view sample.
     fisher_passes: u64,
     /// Cost of the last Fisher pass and the splat count it ran at.
@@ -148,6 +162,7 @@ impl Worker {
         );
         voxels.record_raw(config.dump_raw_uncertainty);
         let scheduler = scheduler(&config);
+        let throttle = IterThrottle::new(config.max_iters_per_s);
         let rate_window = (clock.elapsed().as_secs_f64(), live.iter());
         Self {
             config,
@@ -158,6 +173,7 @@ impl Worker {
             live,
             voxels,
             scheduler,
+            throttle,
             fisher_passes: 0,
             fisher_cost: None,
             geometry: Geometry::new(),
@@ -237,6 +253,7 @@ impl Worker {
         self.voxels.reset();
         self.geometry = Geometry::new();
         self.scheduler = scheduler(config);
+        self.throttle = IterThrottle::new(config.max_iters_per_s);
         self.fisher_passes = 0;
         self.fisher_cost = None;
         self.sizes.clear();
@@ -368,6 +385,7 @@ impl Worker {
                 num_splats: self.live.splats().map_or(0, |s| s.num_splats()),
                 train_iters_per_s: rate as f32,
                 last_score_ms: self.last_score_ms,
+                train_iters: u64::from(self.live.iter()),
             });
         } else {
             publish_counts(&self.channels.status, &self.live);
