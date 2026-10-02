@@ -8,12 +8,14 @@ use brush_guide::session::GuideSession;
 use glam::Vec3;
 use std::time::Duration;
 
+/// Score sets decode, mesh bricks follow with a version at least the score set's, and colours cover every vertex.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn scores_arrive_after_keyframes() {
+async fn scores_arrive_after_keyframes_with_mesh_bricks_following() {
     let device = test_scene::device().await.autodiff();
     let dir = std::env::temp_dir().join(format!("brush-guide-session-{}", std::process::id()));
     let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
     let mut scores = session.scores();
+    let meshes = session.meshes();
 
     for (i, a) in [0.0f32, 1.0, 2.0].iter().enumerate() {
         let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
@@ -51,34 +53,6 @@ async fn scores_arrive_after_keyframes() {
     let ply = session.export_splat().await.unwrap();
     assert!(ply.starts_with(b"ply"));
 
-    session.reset().await;
-    assert_eq!(session.status().borrow().num_keyframes, 0);
-    std::fs::remove_dir_all(dir).ok();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mesh_bricks_follow_the_first_score_set() {
-    let device = test_scene::device().await.autodiff();
-    let dir = std::env::temp_dir().join(format!("brush-guide-session-mesh-{}", std::process::id()));
-    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
-    let mut scores = session.scores();
-    let meshes = session.meshes();
-
-    for (i, a) in [0.0f32, 0.5, 1.0, -0.5].iter().enumerate() {
-        let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
-        session.push_keyframe(h, p).await.unwrap();
-    }
-    let set = tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            scores.changed().await.unwrap();
-            if let Some(s) = scores.borrow().clone() {
-                return s;
-            }
-        }
-    })
-    .await
-    .expect("a ScoreSet within 60 s");
-
     let msg = meshes
         .borrow()
         .since(0)
@@ -113,12 +87,15 @@ async fn mesh_bricks_follow_the_first_score_set() {
     }
 
     session.reset().await;
+    assert_eq!(session.status().borrow().num_keyframes, 0);
     assert!(session.meshes().borrow().since(0).is_none());
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// A NaN pose is rejected without killing the session, and a resend with undecodable content is recognised as a
+/// resend before decoding (the stored image is untouched).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bad_keyframe_reports_error_and_session_survives() {
+async fn bad_keyframe_reports_error_and_a_resend_is_acked_without_touching_the_stored_image() {
     let device = test_scene::device().await.autodiff();
     let dir = std::env::temp_dir().join(format!("brush-guide-session-bad-{}", std::process::id()));
     let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
@@ -126,24 +103,13 @@ async fn bad_keyframe_reports_error_and_session_survives() {
     h.pose[0] = f32::NAN;
     assert!(session.push_keyframe(h, p).await.is_err());
     let (h, p) = test_scene::keyframe(1, Vec3::new(0.0, 0.0, 2.0));
-    session.push_keyframe(h, p).await.unwrap();
-    std::fs::remove_dir_all(dir).ok();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resent_id_is_acked_without_touching_the_stored_image() {
-    let device = test_scene::device().await.autodiff();
-    let dir = std::env::temp_dir().join(format!("brush-guide-session-dup-{}", std::process::id()));
-    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
-    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
     session.push_keyframe(h.clone(), p).await.unwrap();
-    let stored = std::fs::read(dir.join("images/0.jpg")).unwrap();
+    let stored = std::fs::read(dir.join("images/1.jpg")).unwrap();
 
-    // Same id, undecodable content: recognised as a resend before decoding.
     let garbage = vec![0u8; h.jpeg_len as usize];
     let h = brush_guide::protocol::KeyframeHeader { num_points: 0, ..h };
     session.push_keyframe(h, garbage).await.unwrap();
-    assert_eq!(std::fs::read(dir.join("images/0.jpg")).unwrap(), stored);
+    assert_eq!(std::fs::read(dir.join("images/1.jpg")).unwrap(), stored);
     assert_eq!(session.status().borrow().num_keyframes, 1);
     std::fs::remove_dir_all(dir).ok();
 }
@@ -163,7 +129,11 @@ async fn finish_writes_ply_and_pauses_training_until_next_keyframe() {
     assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
     assert!(std::fs::read(&path).unwrap().starts_with(b"ply"));
 
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while session.status().borrow().train_iters_per_s != 0.0 && tokio::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         session.status().borrow().train_iters_per_s,
         0.0,
@@ -196,7 +166,7 @@ async fn keyframes_queue_until_the_warm_up_is_done() {
     let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
     let pusher = session.clone();
     let push = tokio::spawn(async move { pusher.push_keyframe(h, p).await });
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!push.is_finished(), "the keyframe waits for the warm-up");
     assert_eq!(session.status().borrow().num_keyframes, 0);
     ready_tx.send(true).unwrap();

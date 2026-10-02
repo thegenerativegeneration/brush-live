@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
 
 const TIMEOUTS: Timeouts = Timeouts {
-    read_idle: Duration::from_secs(2),
-    ping_every: Duration::from_millis(500),
+    read_idle: Duration::from_millis(500),
+    ping_every: Duration::from_millis(100),
 };
 
 async fn start(name: &str) -> String {
@@ -38,18 +38,21 @@ fn hello(id: &str) -> Message {
     Message::binary(encode_frame(&hello, &[]))
 }
 
+/// One server, two clients: a client that keeps reading answers the server's pings and stays connected well past
+/// the idle timeout, while a client that stops polling (no pongs go out, like a vanished peer) is dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_client_that_keeps_reading_stays_connected_without_keyframes() {
-    let url = start("alive").await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-    ws.send(hello("alive")).await.unwrap();
+async fn keepalive_keeps_a_reading_client_and_drops_a_silent_one() {
+    let url = start("keepalive").await;
+
+    let (mut alive, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    alive.send(hello("alive")).await.unwrap();
 
     // Reading lets tungstenite answer the server's pings, so a silent but live client survives
     // well past the idle timeout.
     let start = Instant::now();
     let (mut pings, mut late_frames) = (0, 0);
     while start.elapsed() < TIMEOUTS.read_idle * 3 {
-        match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
+        match tokio::time::timeout(Duration::from_secs(2), alive.next()).await {
             Ok(Some(Ok(Message::Ping(_)))) => pings += 1,
             Ok(Some(Ok(Message::Binary(_)))) if start.elapsed() > TIMEOUTS.read_idle * 2 => {
                 late_frames += 1;
@@ -66,13 +69,9 @@ async fn a_client_that_keeps_reading_stays_connected_without_keyframes() {
         late_frames > 0,
         "no status frames after twice the idle timeout"
     );
-}
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_client_that_stops_answering_is_dropped() {
-    let url = start("dead").await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
-    ws.send(hello("dead")).await.unwrap();
+    let (mut dead, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    dead.send(hello("dead")).await.unwrap();
 
     // Not polling the socket means no pongs go out, like a vanished peer.
     tokio::time::sleep(TIMEOUTS.read_idle * 2).await;
@@ -83,7 +82,7 @@ async fn a_client_that_stops_answering_is_dropped() {
             Instant::now() < deadline,
             "server did not close the connection"
         );
-        let next = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        let next = tokio::time::timeout(Duration::from_secs(5), dead.next())
             .await
             .expect("server did not close the connection");
         if matches!(next, Some(Ok(Message::Close(_)) | Err(_)) | None) {

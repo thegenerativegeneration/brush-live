@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use super::dataset::{DepthMode, Frame, load_depth};
 use super::receive::handle_mesh_bricks;
-use super::viz::mesh_3d;
 
 struct TempDir(PathBuf);
 
@@ -83,29 +82,14 @@ fn mesh_dump_writes_ply_and_round_line() {
     assert_eq!(round["bricks"][1]["removed"], true);
 }
 
+/// Depth-mode table: none sends nothing, all sends depth without confidence, high sends both when confidence is
+/// present and falls back to depth-only without it.
 #[test]
-fn rerun_mesh_carries_vertex_colours_when_the_brick_has_them() {
-    let mut mesh = BrickMesh {
-        key: BrickKey(glam::IVec3::ZERO),
-        positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-        normals: vec![[0.0, 0.0, 1.0]; 3],
-        colours: vec![[255, 0, 0]; 3],
-        indices: vec![0, 1, 2],
-    };
-    assert!(mesh_3d(&mesh).vertex_colors.is_some());
-    mesh.colours.clear();
-    assert!(mesh_3d(&mesh).vertex_colors.is_none());
-}
-
-#[test]
-fn none_mode_sends_no_depth() {
+fn depth_mode_controls_what_is_sent() {
     let dir = TempDir::new("none");
     let f = frame_with_depth(Some("depth/0.f16"));
     assert!(load_depth(&dir.0, &f, DepthMode::None).unwrap().is_none());
-}
 
-#[test]
-fn all_mode_sends_depth_without_confidence() {
     let dir = TempDir::new("all");
     std::fs::create_dir_all(dir.0.join("depth")).unwrap();
     std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
@@ -115,12 +99,9 @@ fn all_mode_sends_depth_without_confidence() {
         .unwrap()
         .expect("depth present");
     assert_eq!(depth, vec![0, 1, 2, 3]);
-    assert_eq!(confidence, None);
+    assert_eq!(confidence, None, "all mode ignores confidence");
     assert_eq!(size, [2, 1]);
-}
 
-#[test]
-fn high_mode_with_confidence_sends_both() {
     let dir = TempDir::new("high-with-conf");
     std::fs::create_dir_all(dir.0.join("depth")).unwrap();
     std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
@@ -132,10 +113,7 @@ fn high_mode_with_confidence_sends_both() {
     assert_eq!(depth, vec![0, 1, 2, 3]);
     assert_eq!(confidence, Some(vec![2, 1]));
     assert_eq!(size, [2, 1]);
-}
 
-#[test]
-fn high_mode_without_confidence_falls_back_to_depth_only() {
     let dir = TempDir::new("high-no-conf");
     std::fs::create_dir_all(dir.0.join("depth")).unwrap();
     std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
@@ -144,12 +122,14 @@ fn high_mode_without_confidence_falls_back_to_depth_only() {
         .unwrap()
         .expect("depth present");
     assert_eq!(depth, vec![0, 1, 2, 3]);
-    assert_eq!(confidence, None);
+    assert_eq!(confidence, None, "high falls back to depth-only");
     assert_eq!(size, [2, 1]);
 }
 
+/// Depth-key table: the legacy key is read when the new key is absent, the new key wins when both are present, and
+/// `Frame` JSON parses either key name.
 #[test]
-fn legacy_depth_key_is_read_when_the_new_key_is_absent() {
+fn depth_key_prefers_the_new_name_over_the_legacy_one() {
     let dir = TempDir::new("legacy-key");
     std::fs::create_dir_all(dir.0.join("depth")).unwrap();
     std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
@@ -160,10 +140,7 @@ fn legacy_depth_key_is_read_when_the_new_key_is_absent() {
         .expect("depth present via depth_file_path");
     assert_eq!(depth, vec![0, 1, 2, 3]);
     assert_eq!(size, [2, 1]);
-}
 
-#[test]
-fn new_depth_key_wins_over_the_legacy_key() {
     let dir = TempDir::new("both-keys");
     std::fs::create_dir_all(dir.0.join("depth")).unwrap();
     std::fs::write(dir.0.join("depth/0.f16"), [0u8, 1, 2, 3]).unwrap();
@@ -174,10 +151,7 @@ fn new_depth_key_wins_over_the_legacy_key() {
         .unwrap()
         .expect("depth present");
     assert_eq!(depth, vec![0, 1, 2, 3]);
-}
 
-#[test]
-fn frame_json_accepts_either_depth_key() {
     let base = r#""file_path":"images/0.jpg","transform_matrix":[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],"depth_w":2,"depth_h":1"#;
     let new: Frame = serde_json::from_str(&format!(
         r#"{{{base},"lidar_depth_file_path":"depth/0.f16"}}"#

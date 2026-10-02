@@ -9,6 +9,10 @@ use test_scene::{camera_at, device, splats_from};
 
 const SIZE: UVec2 = UVec2::new(16, 16);
 
+/// The Fisher oracle renders at 8×8 (192 backward passes) rather than the other tests' 16×16: it is
+/// correctness-critical but only needs enough pixels to exercise the estimator, not a realistic resolution.
+const ORACLE_SIZE: UVec2 = UVec2::new(8, 8);
+
 /// Exact `Σ_p Σ_c J Jᵀ` over `[mean, log_scale]` by one backward per pixel/channel.
 async fn exact_fisher(
     splats: &brush_render::gaussian_splats::Splats,
@@ -16,11 +20,11 @@ async fn exact_fisher(
 ) -> Vec<[f32; 36]> {
     let n = splats.num_splats() as usize;
     let mut h = vec![[0f32; 36]; n];
-    for y in 0..SIZE.y as usize {
-        for x in 0..SIZE.x as usize {
+    for y in 0..ORACLE_SIZE.y as usize {
+        for x in 0..ORACLE_SIZE.x as usize {
             for c in 0..3 {
                 let s = splats.clone().train();
-                let out = render_splats(s.clone(), &view.camera, SIZE, Vec3::ZERO).await;
+                let out = render_splats(s.clone(), &view.camera, ORACLE_SIZE, Vec3::ZERO).await;
                 let px: Tensor<1> = out.img.slice(s![y..y + 1, x..x + 1, c..c + 1]).reshape([1]);
                 let mut grads = px.sum().backward();
                 let g = s.transforms.val().grad_remove(&mut grads).unwrap();
@@ -57,15 +61,15 @@ async fn hutchinson_matches_exact_fisher() {
     );
     let view = PassView {
         camera: camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)),
-        img_size: SIZE,
+        img_size: ORACLE_SIZE,
         weight: 1.0,
     };
 
     let exact = exact_fisher(&splats, &view).await;
     let cfg = PassConfig {
         hutchinson_samples: 4000,
-        // exact_fisher renders at the fixed SIZE above; pin the estimate
-        // to the same resolution so the comparison is apples-to-apples.
+        // exact_fisher renders at ORACLE_SIZE; pin the estimate to the same resolution so the comparison is
+        // apples-to-apples.
         render_scale: 1.0,
         ..Default::default()
     };
