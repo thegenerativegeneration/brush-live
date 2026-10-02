@@ -8,7 +8,8 @@ mod tests;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 pub use cells::{
-    CELL_BYTES, CELL_FLAG_NORMAL, Cell, decode_cells, encode_cells, oct_decode, oct_encode,
+    CELL_BYTES, CELL_FLAG_NORMAL, CELL_FLAG_UNINFORMED, Cell, decode_cells, encode_cells,
+    oct_decode, oct_encode,
 };
 pub use mesh::{
     BRICK_MARGIN, MAX_BRICK_VERTICES, MESH_BRICK_COLOURS, MESH_BRICK_REMOVED, MeshBrick,

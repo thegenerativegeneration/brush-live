@@ -28,9 +28,10 @@ impl ScoreDump {
     }
 
     /// Each cell as `[x, y, z, coverage, uncertainty, age, nx, ny, nz,
-    /// density]`, normal 0 when the cell has none.
+    /// density, uninformed]`, normal 0 when the cell has none, uninformed 0
+    /// or 1.
     pub(crate) fn write(&mut self, version: u64, voxel_size: f32, cells: &[Cell]) {
-        let cells_json: Vec<[f64; 10]> = cells
+        let cells_json: Vec<[f64; 11]> = cells
             .iter()
             .map(|c| {
                 let [nx, ny, nz] = c.normal.unwrap_or([0.0, 0.0, 0.0]);
@@ -45,6 +46,7 @@ impl ScoreDump {
                     ny as f64,
                     nz as f64,
                     c.density as f64,
+                    f64::from(u8::from(c.uninformed)),
                 ]
             })
             .collect();

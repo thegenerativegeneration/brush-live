@@ -66,8 +66,8 @@ const MIN_FLAT_WEIGHT: f32 = 0.1;
 
 /// Coverage byte of a voxel no Fisher pass has scored yet ("unseen").
 pub const UNINFORMED_COVERAGE: u8 = 0;
-/// Uncertainty byte of a voxel without information: no Fisher pass has
-/// scored it yet, or its summed Fisher is zero.
+/// Uncertainty byte of a voxel no Fisher pass has scored yet (one with
+/// information about it); such cells also carry `Cell::uninformed`.
 pub const UNINFORMED_UNCERTAINTY: u8 = 255;
 
 /// Builds score-set cells in two parts: [`Self::update_fisher`] takes a
@@ -268,8 +268,10 @@ impl VoxelAggregator {
     /// Takes one Fisher pass: per voxel, the opacity-weighted mean coverage
     /// and the positional σ of the summed position Fisher, mapped to a byte
     /// between this pass's 5th and 95th percentile of `ln σ` and smoothed
-    /// per voxel across passes. Voxels this pass does not hold keep their
-    /// previous bytes. Returns the number of voxels scored.
+    /// per voxel across passes. Voxels this pass does not hold, or holds
+    /// without usable information (no view of the pass observed them, or
+    /// only broken Fisher blocks, so σ is not finite), keep their previous
+    /// bytes unchanged. Returns the number of voxels scored.
     pub fn update_fisher(&mut self, gaussians: &[GaussianScore]) -> usize {
         let mut acc: HashMap<IVec3, FisherAcc> = HashMap::new();
         for g in gaussians {
@@ -306,7 +308,7 @@ impl VoxelAggregator {
         let sigmas: Vec<f32> = voxels.iter().map(|v| v.2).collect();
         let range = log_sigma_range(&sigmas);
         self.raw.clear();
-        let scored = voxels.len();
+        let mut scored = 0;
         for (key, a, sigma) in voxels {
             if self.record_raw {
                 self.raw.push(RawVoxel {
@@ -315,6 +317,13 @@ impl VoxelAggregator {
                     sigma,
                 });
             }
+            // No usable information, typically because no view of this pass
+            // observed the voxel. That says nothing about it, so it keeps
+            // what earlier passes gave it, or stays uninformed.
+            if !sigma.is_finite() {
+                continue;
+            }
+            scored += 1;
             let u8_unc = f32::from(uncertainty_byte(sigma, range));
             let prev = self.fisher.get(&key).map_or(u8_unc, |f| f.unc_ema);
             self.fisher.insert(
@@ -333,7 +342,12 @@ impl VoxelAggregator {
     /// appearance here, coverage and uncertainty from the latest Fisher pass
     /// that scored the voxel ([`UNINFORMED_COVERAGE`] and
     /// [`UNINFORMED_UNCERTAINTY`] if none has).
-    pub fn cells(&mut self, gaussians: &[SplatGeom], cameras: &[ViewCone], now_s: f64) -> Vec<Cell> {
+    pub fn cells(
+        &mut self,
+        gaussians: &[SplatGeom],
+        cameras: &[ViewCone],
+        now_s: f64,
+    ) -> Vec<Cell> {
         let mut acc: HashMap<IVec3, GeomAcc> = HashMap::new();
         for g in gaussians {
             let Some(key) = self.key(g.pos, g.opacity) else {
@@ -356,10 +370,11 @@ impl VoxelAggregator {
         acc.into_iter()
             .map(|(key, a)| {
                 let first = *self.first_seen.entry(key).or_insert(now_s);
-                let (coverage, uncertainty) = self.fisher.get(&key).map_or(
-                    (UNINFORMED_COVERAGE, UNINFORMED_UNCERTAINTY),
-                    |f| (f.coverage, f.unc_ema.round() as u8),
-                );
+                let fisher = self.fisher.get(&key);
+                let (coverage, uncertainty) = fisher
+                    .map_or((UNINFORMED_COVERAGE, UNINFORMED_UNCERTAINTY), |f| {
+                        (f.coverage, f.unc_ema.round() as u8)
+                    });
                 let center = a.pos / a.w;
                 let normal = (a.w >= MIN_NORMAL_WEIGHT && a.axis_w >= MIN_FLAT_WEIGHT)
                     .then(|| dominant_axis(a.tensor))
@@ -373,6 +388,7 @@ impl VoxelAggregator {
                     age: (now_s - first).clamp(0.0, 255.0) as u8,
                     normal,
                     density: (a.w * 32.0).round().min(255.0) as u8,
+                    uninformed: fisher.is_none(),
                 }
             })
             .collect()

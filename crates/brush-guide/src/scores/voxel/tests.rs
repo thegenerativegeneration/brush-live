@@ -54,9 +54,9 @@ fn groups_by_voxel_and_weights_by_opacity() {
     let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
     let cells = agg.aggregate(
         &[
-            g([0.2, 0.2, 0.2], 0.9, 1.0, 0.0),
-            g([0.8, 0.1, 0.5], 0.3, 0.0, 0.0),
-            g([5.5, 0.5, 0.5], 0.05, 1.0, 0.0),
+            g([0.2, 0.2, 0.2], 0.9, 1.0, 1.0),
+            g([0.8, 0.1, 0.5], 0.3, 0.0, 1.0),
+            g([5.5, 0.5, 0.5], 0.05, 1.0, 1.0),
         ],
         &[],
         0.0,
@@ -130,7 +130,7 @@ fn round_of_only_infinite_sigma_maps_to_255() {
     let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
     let none = |x: f32| g([x, 0.5, 0.5], 1.0, 0.0, f32::INFINITY);
     let cells = agg.aggregate(&[none(0.5), none(1.5)], &[], 0.0);
-    assert!(cells.iter().all(|c| c.uncertainty == 255));
+    assert!(cells.iter().all(|c| c.uncertainty == 255 && c.uninformed));
 }
 
 #[test]
@@ -148,6 +148,7 @@ fn infinite_sigma_does_not_shift_the_percentiles() {
         assert_eq!(byte_at(&a, x), byte_at(&b, x), "voxel {x}");
     }
     assert!((20..30).all(|x| byte_at(&b, x) == 255));
+    assert!(b.iter().filter(|c| c.uninformed).count() == 10);
 }
 
 #[test]
@@ -329,12 +330,13 @@ fn age_counts_from_first_appearance_and_saturates() {
 }
 
 #[test]
-fn voxel_without_information_keeps_coverage_and_is_maximally_uncertain() {
+fn voxel_without_information_is_uninformed() {
     let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
     let cells = agg.aggregate(&[g([0.5; 3], 1.0, 1.0, f32::INFINITY)], &[], 0.0);
     assert_eq!(cells.len(), 1);
-    assert_eq!(cells[0].coverage, 255);
+    assert_eq!(cells[0].coverage, UNINFORMED_COVERAGE);
     assert_eq!(cells[0].uncertainty, 255);
+    assert!(cells[0].uninformed);
 }
 
 #[test]
@@ -373,6 +375,7 @@ fn nan_scores_count_as_uncovered_and_uninformative() {
     );
     let only_nan = cells.iter().find(|c| c.center[0] > 2.0).unwrap();
     assert_eq!(only_nan.uncertainty, 255, "non-finite sigma maps to 255");
+    assert!(only_nan.uninformed && !first.uninformed);
 }
 
 #[test]

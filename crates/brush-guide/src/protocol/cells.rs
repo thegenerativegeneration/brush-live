@@ -13,10 +13,14 @@ pub struct Cell {
     pub normal: Option<[f32; 3]>,
     /// `min(255, round(Σ opacity · 32))` over the voxel's visible Gaussians.
     pub density: u8,
+    /// No Fisher pass has scored the voxel yet: `coverage` and `uncertainty`
+    /// carry no information (sent as 0 and 255).
+    pub uninformed: bool,
 }
 
 pub const CELL_BYTES: usize = 19;
 pub const CELL_FLAG_NORMAL: u8 = 1;
+pub const CELL_FLAG_UNINFORMED: u8 = 2;
 
 fn sign_not_zero(v: f32) -> f32 {
     if v >= 0.0 { 1.0 } else { -1.0 }
@@ -52,10 +56,13 @@ pub fn encode_cells(cells: &[Cell]) -> Vec<u8> {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(&[c.coverage, c.uncertainty, c.age]);
-        let (oct, flags) = match c.normal {
+        let (oct, mut flags) = match c.normal {
             Some(n) => (oct_encode(glam::Vec3::from(n)), CELL_FLAG_NORMAL),
             None => ([0, 0], 0),
         };
+        if c.uninformed {
+            flags |= CELL_FLAG_UNINFORMED;
+        }
         out.extend_from_slice(&oct);
         out.extend_from_slice(&[c.density, flags]);
     }
@@ -81,6 +88,7 @@ pub fn decode_cells(bytes: &[u8]) -> Result<Vec<Cell>, ProtocolError> {
                 normal: (c[18] & CELL_FLAG_NORMAL != 0)
                     .then(|| oct_decode([c[15], c[16]]).to_array()),
                 density: c[17],
+                uninformed: c[18] & CELL_FLAG_UNINFORMED != 0,
             }
         })
         .collect())

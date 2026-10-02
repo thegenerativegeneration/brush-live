@@ -59,6 +59,7 @@ fn cells_roundtrip_and_size() {
             age: 255,
             normal: None,
             density: 0,
+            uninformed: false,
         },
         Cell {
             center: [0.0, 0.0, 0.0],
@@ -67,12 +68,39 @@ fn cells_roundtrip_and_size() {
             age: 0,
             normal: None,
             density: 0,
+            uninformed: false,
         },
     ];
     let bytes = encode_cells(&cells);
     assert_eq!(bytes.len(), 2 * CELL_BYTES);
     assert_eq!(decode_cells(&bytes).unwrap(), cells);
     assert!(decode_cells(&bytes[..16]).is_err());
+}
+
+#[test]
+fn uninformed_is_flags_bit_1_next_to_the_normal_bit() {
+    let cell = Cell {
+        center: [0.5; 3],
+        coverage: 0,
+        uncertainty: 255,
+        age: 3,
+        normal: Some([0.0, 0.0, 1.0]),
+        density: 40,
+        uninformed: true,
+    };
+    let bytes = encode_cells(&[cell]);
+    assert_eq!(bytes[18], CELL_FLAG_NORMAL | CELL_FLAG_UNINFORMED);
+    let back = decode_cells(&bytes).unwrap()[0];
+    assert!(back.uninformed && back.normal.is_some());
+    let plain = encode_cells(&[Cell {
+        uninformed: false,
+        normal: None,
+        ..cell
+    }]);
+    assert_eq!(
+        plain[18], 0,
+        "an informed cell without a normal keeps flags 0"
+    );
 }
 
 #[test]
@@ -138,6 +166,7 @@ fn cells_round_trip_with_and_without_normal() {
             age: 3,
             normal: Some([0.6, 0.0, -0.8]),
             density: 40,
+            uninformed: false,
         },
         Cell {
             center: [0.25, 0.5, -1.0],
@@ -146,6 +175,7 @@ fn cells_round_trip_with_and_without_normal() {
             age: 30,
             normal: None,
             density: 3,
+            uninformed: false,
         },
     ];
     let bytes = encode_cells(&cells);
@@ -250,6 +280,7 @@ fn write_golden_fixtures() {
             age: 3,
             normal: Some([0.6, 0.0, -0.8]),
             density: 40,
+            uninformed: false,
         },
         Cell {
             center: [0.25, 0.5, -1.0],
@@ -258,6 +289,16 @@ fn write_golden_fixtures() {
             age: 30,
             normal: None,
             density: 3,
+            uninformed: false,
+        },
+        Cell {
+            center: [-0.5, 1.5, 2.0],
+            coverage: 0,
+            uncertainty: 255,
+            age: 1,
+            normal: Some([0.0, 0.0, 1.0]),
+            density: 12,
+            uninformed: true,
         },
     ];
     let fixtures: Vec<(&str, Vec<u8>)> = vec![
@@ -272,7 +313,7 @@ fn write_golden_fixtures() {
                     version: 2,
                     based_on_keyframe_id: 9,
                     voxel_size: 0.1,
-                    num_cells: 2,
+                    num_cells: cells.len() as u32,
                     cell_bytes: CELL_BYTES as u32,
                 },
                 &encode_cells(&cells),

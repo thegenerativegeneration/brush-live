@@ -33,7 +33,12 @@ impl Legacy {
         }
     }
 
-    fn aggregate(&mut self, gaussians: &[GaussianScore], cameras: &[ViewCone], now_s: f64) -> Vec<Cell> {
+    fn aggregate(
+        &mut self,
+        gaussians: &[GaussianScore],
+        cameras: &[ViewCone],
+        now_s: f64,
+    ) -> Vec<Cell> {
         let mut acc: HashMap<IVec3, LegacyAcc> = HashMap::new();
         for g in gaussians {
             let visible = g.opacity.is_finite() && g.opacity >= self.min_opacity;
@@ -106,6 +111,7 @@ impl Legacy {
                     age: (now_s - first).clamp(0.0, 255.0) as u8,
                     normal,
                     density,
+                    uninformed: false,
                 }
             })
             .collect()
@@ -114,6 +120,9 @@ impl Legacy {
 
 /// A seeded scene: flat patches with jittered axes, round blobs, faint and
 /// broken Gaussians, a spread of information so the percentiles matter.
+/// Every Gaussian carries information: voxels without any are where the
+/// legacy round and the split path differ on purpose (they stay uninformed
+/// or keep earlier bytes instead of mapping to 255).
 fn fixture(seed: u64, n: usize) -> Vec<GaussianScore> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     (0..n)
@@ -121,7 +130,11 @@ fn fixture(seed: u64, n: usize) -> Vec<GaussianScore> {
             let pos = Vec3::new(
                 rng.random_range(-1.0..1.0),
                 rng.random_range(-0.5..0.5),
-                if i % 3 == 0 { rng.random_range(-1.0..1.0) } else { 0.3 + rng.random_range(-0.01..0.01) },
+                if i % 3 == 0 {
+                    rng.random_range(-1.0..1.0)
+                } else {
+                    0.3 + rng.random_range(-0.01..0.01)
+                },
             );
             let opacity = match i % 17 {
                 0 => 0.02,
@@ -132,13 +145,14 @@ fn fixture(seed: u64, n: usize) -> Vec<GaussianScore> {
             let mut fisher_pos = info(s);
             fisher_pos[1] = rng.random_range(-0.1..0.1) / (s * s);
             fisher_pos[3] = fisher_pos[1];
-            if i % 23 == 0 {
-                fisher_pos = [0.0; 9];
-            }
             let axis = if i % 3 == 0 {
                 Vec3::new(rng.random(), rng.random(), rng.random())
             } else {
-                Vec3::new(rng.random_range(-0.1..0.1), rng.random_range(-0.1..0.1), 1.0)
+                Vec3::new(
+                    rng.random_range(-0.1..0.1),
+                    rng.random_range(-0.1..0.1),
+                    1.0,
+                )
             };
             GaussianScore {
                 pos: if i % 41 == 0 { Vec3::NAN } else { pos },
@@ -166,7 +180,10 @@ fn sorted(mut cells: Vec<Cell>) -> Vec<Cell> {
 }
 
 const PROD_SCALE: UncertaintyScale = UncertaintyScale {
-    ridge: FisherRidge { abs: 1e-6, rel: 1e-3 },
+    ridge: FisherRidge {
+        abs: 1e-6,
+        rel: 1e-3,
+    },
     sigma_pix: 0.05,
 };
 
@@ -185,7 +202,11 @@ fn split_path_reproduces_the_legacy_score_round() {
         split.update_fisher(&gs);
         let geoms: Vec<SplatGeom> = gs.iter().map(GaussianScore::geom).collect();
         let got = sorted(split.cells(&geoms, &cams, now));
-        assert!(want.len() > 300, "fixture spans many voxels: {}", want.len());
+        assert!(
+            want.len() > 300,
+            "fixture spans many voxels: {}",
+            want.len()
+        );
         assert_eq!(got, want, "round {round}");
     }
 }
@@ -217,13 +238,17 @@ fn cells_between_fisher_passes_keep_the_last_bytes_and_mark_new_voxels_uninforme
     for (key, c) in by_key(&later) {
         match before.get(&key) {
             Some(b) => {
-                assert_eq!((c.coverage, c.uncertainty), (b.coverage, b.uncertainty), "{key}");
+                assert_eq!(
+                    (c.coverage, c.uncertainty),
+                    (b.coverage, b.uncertainty),
+                    "{key}"
+                );
             }
             None => {
                 new_keys += 1;
                 assert_eq!(
-                    (c.coverage, c.uncertainty),
-                    (UNINFORMED_COVERAGE, UNINFORMED_UNCERTAINTY),
+                    (c.coverage, c.uncertainty, c.uninformed),
+                    (UNINFORMED_COVERAGE, UNINFORMED_UNCERTAINTY, true),
                     "{key}"
                 );
             }
@@ -239,4 +264,40 @@ fn voxels_before_any_fisher_pass_are_uninformed() {
     assert_eq!(cells.len(), 1);
     assert_eq!(cells[0].coverage, 0);
     assert_eq!(cells[0].uncertainty, 255);
+    assert!(cells[0].uninformed);
+}
+
+#[test]
+fn a_pass_that_does_not_observe_a_voxel_leaves_its_bytes_alone() {
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let ladder = |unseen: Option<usize>| -> Vec<GaussianScore> {
+        (0..20)
+            .map(|i| {
+                let s = if Some(i) == unseen {
+                    f32::INFINITY
+                } else {
+                    0.01 * 1.2f32.powi(i as i32)
+                };
+                g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.5, s)
+            })
+            .collect()
+    };
+    let first = agg.aggregate(&ladder(None), &[], 0.0);
+    // Voxel 18 is near the top of the ranking; the next pass sees none of it.
+    let second = agg.aggregate(&ladder(Some(18)), &[], 1.0);
+    let at = |cells: &[Cell], x: usize| *cells.iter().find(|c| c.center[0] as usize == x).unwrap();
+    assert_eq!(
+        at(&second, 18),
+        Cell {
+            age: 1,
+            ..at(&first, 18)
+        },
+        "kept, not pulled to 255"
+    );
+    assert!(!at(&second, 18).uninformed);
+    // A voxel unseen from its first pass on stays uninformed.
+    let mut fresh = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let cells = fresh.aggregate(&ladder(Some(3)), &[], 0.0);
+    assert!(at(&cells, 3).uninformed);
+    assert!(cells.iter().filter(|c| c.uninformed).count() == 1);
 }
