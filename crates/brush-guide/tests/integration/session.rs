@@ -222,3 +222,26 @@ async fn paused_session_holds_keyframes_and_stops_training_until_resumed() {
     assert_eq!(session.status().borrow().num_keyframes, 2);
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_up_parks_while_paused_and_finishes_once_released() {
+    let device = test_scene::device().await.autodiff();
+    let config = GuideConfig {
+        max_splats: 4096,
+        ..GuideConfig::default()
+    };
+    let (pause, pause_rx) = tokio::sync::watch::channel(true);
+    let warmup = brush_guide::warmup::Warmup::spawn_pausable(config, device, pause_rx);
+    let (mut parked, mut ready) = (warmup.parked(), warmup.ready());
+    tokio::time::timeout(Duration::from_secs(10), parked.wait_for(|p| *p))
+        .await
+        .expect("parks while paused")
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!*ready.borrow(), "no warm-up work while parked");
+    pause.send(false).unwrap();
+    tokio::time::timeout(Duration::from_secs(60), ready.wait_for(|r| *r))
+        .await
+        .expect("done once released")
+        .unwrap();
+}

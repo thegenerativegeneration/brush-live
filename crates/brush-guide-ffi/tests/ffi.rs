@@ -109,3 +109,36 @@ fn pause_during_warm_up_returns_and_resume_lets_keyframes_through() {
     unsafe { bge_free(e) };
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn pause_after_warm_up_holds_keyframes_every_time() {
+    let frames: Box<Mutex<Vec<ServerHeader>>> = Box::default();
+    let ctx = std::ptr::from_ref::<Mutex<Vec<ServerHeader>>>(&frames).cast_mut().cast::<c_void>();
+    let acks = || frames.lock().unwrap().iter().filter(|h| matches!(h, ServerHeader::Ack { .. })).count();
+    let dir = std::env::temp_dir().join(format!("bge-ffi-pause-{}", std::process::id()));
+    let config = CString::new(r#"{"max_splats": 4096, "warmup": true}"#).unwrap();
+    let session_dir = CString::new(dir.to_str().unwrap()).unwrap();
+    let e = unsafe { bge_new(config.as_ptr(), session_dir.as_ptr(), collect_into, ctx) };
+    assert!(!e.is_null());
+
+    let f = wire(0);
+    assert_eq!(unsafe { bge_push(e, f.as_ptr(), f.len()) }, 0);
+    assert_eq!(acks(), 1, "the warm-up is done once a keyframe is acked");
+
+    for round in 1..=3u64 {
+        unsafe { bge_pause(e) };
+        let handle = e as usize;
+        let pusher = std::thread::spawn(move || {
+            let f = wire(round);
+            unsafe { bge_push(handle as *mut BgeEngine, f.as_ptr(), f.len()) }
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(acks(), usize::try_from(round).unwrap(), "no ack while paused, round {round}");
+        unsafe { bge_resume(e) };
+        assert_eq!(pusher.join().unwrap(), 0);
+        assert_eq!(acks(), usize::try_from(round).unwrap() + 1);
+    }
+
+    unsafe { bge_free(e) };
+    std::fs::remove_dir_all(dir).ok();
+}

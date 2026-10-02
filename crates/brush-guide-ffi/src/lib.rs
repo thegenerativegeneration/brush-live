@@ -52,15 +52,18 @@ struct WarmupControl {
 }
 
 impl WarmupControl {
-    /// Pauses the warm-up; true once it is parked or done, so the session
-    /// may be commanded (it takes no commands before the warm-up is done).
+    /// Pauses the warm-up; true once it is done or gone (it panicked, which
+    /// also releases the session), so the session may be commanded. False
+    /// once it is parked. Checks `ready` first: after the warm-up ends,
+    /// `parked` is closed and reads as false.
     async fn pause(&self) -> bool {
         let _ = self.pause.send(true);
         let mut parked = self.warmup.parked();
         let mut ready = self.warmup.ready();
         tokio::select! {
-            _ = parked.wait_for(|p| *p) => false,
+            biased;
             _ = ready.wait_for(|r| *r) => true,
+            Ok(_) = parked.wait_for(|p| *p) => false,
         }
     }
 }
