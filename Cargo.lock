@@ -1129,6 +1129,7 @@ dependencies = [
  "brush-guide",
  "burn",
  "burn-wgpu",
+ "log",
  "serde_json",
  "tokio",
 ]

@@ -6,6 +6,8 @@ use brush_guide::config::GuideConfig;
 use brush_guide::protocol::{ClientHeader, ServerHeader, decode_frame, encode_frame};
 use brush_guide::session::{GuideSession, forward_frames};
 use brush_guide::warmup::Warmup;
+use burn::cubecl::config::autotune::AutotuneLevel;
+use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
 use burn_wgpu::graphics::Metal;
 use burn_wgpu::{MemoryConfiguration, RuntimeOptions, WgpuDevice};
 use std::ffi::{CStr, c_char, c_void};
@@ -120,6 +122,28 @@ fn record_panics(path: PathBuf) {
     }));
 }
 
+/// Applies the optional `"gpu_autotune_level"` key (`minimal`, `balanced`,
+/// `extensive`, `full`) of the engine config to cubecl's process-wide config.
+/// It is read once, at the first GPU use, so this runs before `device`. An
+/// unknown level or an already-read config is logged and otherwise ignored.
+fn set_autotune_level(json: &str) {
+    let Some(name) = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("gpu_autotune_level")?.as_str().map(str::to_owned))
+    else {
+        return;
+    };
+    let Ok(level) = serde_json::from_value::<AutotuneLevel>(serde_json::Value::String(name.clone())) else {
+        log::warn!("gpu_autotune_level {name:?} is not minimal, balanced, extensive or full; ignored");
+        return;
+    };
+    let mut config = CubeClRuntimeConfig::default();
+    config.autotune.level = level;
+    if !CubeClRuntimeConfig::try_set(config) {
+        log::warn!("gpu_autotune_level {name:?} ignored: cubecl config was already read");
+    }
+}
+
 unsafe fn str_arg<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
@@ -154,6 +178,7 @@ pub unsafe extern "C" fn bge_new(
         return std::ptr::null_mut();
     };
     record_panics(PathBuf::from(dir).join("engine-panic.txt"));
+    set_autotune_level(json);
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(r) => r,
         Err(e) => {
