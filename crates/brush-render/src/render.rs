@@ -26,6 +26,62 @@ use glam::{Vec3, uvec2};
 use kernels::types::RasterizeUniformsLaunch;
 use std::f32::consts::PI;
 
+/// Largest element count any buffer sized from a GPU-read count may have.
+const MAX_COUNT: u32 = u32::MAX / kernels::helpers::PROJECTED_LANES;
+
+/// Validates counts read back from the GPU. An aborted command buffer can leave garbage
+/// there, and sizing buffers from it overflows the u32 address space. `None` means implausible.
+fn checked_counts(
+    num_visible: u32,
+    num_intersections: u32,
+    total_splats: u32,
+    num_tiles: u32,
+) -> Option<(u32, u32)> {
+    let max_intersections =
+        (u64::from(total_splats) * u64::from(num_tiles)).min(u64::from(MAX_COUNT));
+    (num_visible <= total_splats.min(MAX_COUNT)
+        && u64::from(num_intersections) <= max_intersections)
+        .then_some((num_visible, num_intersections))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plausible_counts_pass() {
+        assert_eq!(checked_counts(10, 40, 100, 6), Some((10, 40)));
+        assert_eq!(checked_counts(0, 0, 100, 6), Some((0, 0)));
+        assert_eq!(checked_counts(100, 600, 100, 6), Some((100, 600)));
+    }
+
+    #[test]
+    fn more_visible_than_splats_fails() {
+        assert_eq!(checked_counts(101, 0, 100, 6), None);
+    }
+
+    #[test]
+    fn more_intersections_than_tiles_allow_fails() {
+        assert_eq!(checked_counts(10, 601, 100, 6), None);
+    }
+
+    #[test]
+    fn counts_overflowing_lane_buffers_fail() {
+        let big = MAX_COUNT + 1;
+        assert_eq!(checked_counts(big, 0, u32::MAX, 1), None);
+        assert_eq!(checked_counts(0, big, 1000, u32::MAX), None);
+        assert_eq!(
+            checked_counts(MAX_COUNT, MAX_COUNT, u32::MAX, 2),
+            Some((MAX_COUNT, MAX_COUNT))
+        );
+    }
+
+    #[test]
+    fn garbage_counts_fail() {
+        assert_eq!(checked_counts(u32::MAX, u32::MAX, 50_000, 1000), None);
+    }
+}
+
 #[doc(hidden)]
 pub fn calc_tile_bounds(img_size: glam::UVec2) -> glam::UVec2 {
     uvec2(
@@ -180,7 +236,15 @@ impl SplatOps for CubeBackend {
                 .clone()
                 .try_into_vec::<u32>()
                 .expect("num_intersections")[0];
-            (num_visible, num_intersections)
+            let num_tiles = project_uniforms.tile_bounds[0] * project_uniforms.tile_bounds[1];
+            checked_counts(num_visible, num_intersections, project_uniforms.total_splats, num_tiles)
+                .unwrap_or_else(|| {
+                    log::error!(
+                        "Implausible counts read back from the GPU: num_visible {num_visible} (splats {}), num_intersections {num_intersections} (tiles {num_tiles}, max {MAX_COUNT}); rendering nothing",
+                        project_uniforms.total_splats
+                    );
+                    (0, 0)
+                })
         };
 
         project_uniforms.num_visible = num_visible;
