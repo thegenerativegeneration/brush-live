@@ -1105,6 +1105,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "brush-guide-bench"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "brush-cube",
+ "brush-guide",
+ "burn",
+ "burn-wgpu",
+ "clap",
+ "image",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "brush-guide-server"
 version = "1.0.0"
 dependencies = [

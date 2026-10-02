@@ -1,0 +1,36 @@
+# Spike (throwaway): measures the live guidance engine on the iPhone and the Mac
+# by replaying a capture's recorded wire frames into a GuideSession.
+[package]
+name = "brush-guide-bench"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "brush_guide_bench"
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "guide-bench"
+path = "src/main.rs"
+
+[dependencies]
+brush-guide.path = "../brush-guide"
+burn = { workspace = true, features = ["autodiff"] }
+burn-wgpu.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+image = { workspace = true, features = ["jpeg"] }
+libc = "0.2"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "macros", "sync"] }
+
+brush-cube.path = "../brush-cube"
+
+[features]
+# macOS only: kernels as MSL instead of WGSL (see brush-cube). Never on iOS.
+metal = ["brush-cube/metal"]
+
+[lints]
+workspace = true
