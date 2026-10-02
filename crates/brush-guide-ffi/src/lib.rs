@@ -122,25 +122,42 @@ fn record_panics(path: PathBuf) {
     }));
 }
 
-/// Applies the optional `"gpu_autotune_level"` key (`minimal`, `balanced`,
-/// `extensive`, `full`) of the engine config to cubecl's process-wide config.
-/// It is read once, at the first GPU use, so this runs before `device`. An
-/// unknown level or an already-read config is logged and otherwise ignored.
-fn set_autotune_level(json: &str) {
-    let Some(name) = serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|v| v.get("gpu_autotune_level")?.as_str().map(str::to_owned))
-    else {
-        return;
-    };
-    let Ok(level) = serde_json::from_value::<AutotuneLevel>(serde_json::Value::String(name.clone())) else {
-        log::warn!("gpu_autotune_level {name:?} is not minimal, balanced, extensive or full; ignored");
+/// Applies the optional `"gpu_autotune_level"` (`minimal`, `balanced`,
+/// `extensive`, `full`) and `"gpu_autotune_samples"` (benchmark samples per
+/// candidate, at least 1) keys of the engine config to cubecl's process-wide
+/// config. It is read once, at the first GPU use, so this runs before
+/// `device`. An invalid value or an already-read config is logged and
+/// otherwise ignored.
+fn set_autotune(json: &str) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
         return;
     };
     let mut config = CubeClRuntimeConfig::default();
-    config.autotune.level = level;
-    if !CubeClRuntimeConfig::try_set(config) {
-        log::warn!("gpu_autotune_level {name:?} ignored: cubecl config was already read");
+    let mut changed = false;
+    if let Some(name) = value.get("gpu_autotune_level").and_then(|v| v.as_str()) {
+        match serde_json::from_value::<AutotuneLevel>(serde_json::Value::String(name.to_owned())) {
+            Ok(level) => {
+                config.autotune.level = level;
+                changed = true;
+            }
+            Err(_) => log::warn!("gpu_autotune_level {name:?} is not minimal, balanced, extensive or full; ignored"),
+        }
+    }
+    if let Some(raw) = value.get("gpu_autotune_samples") {
+        match raw.as_u64().filter(|n| *n >= 1) {
+            Some(n) => {
+                let n = usize::try_from(n).unwrap_or(usize::MAX);
+                let bench = &mut config.autotune.bench;
+                bench.max_samples = n;
+                bench.min_samples = bench.min_samples.min(n);
+                bench.short_circuit_samples = bench.short_circuit_samples.min(n);
+                changed = true;
+            }
+            None => log::warn!("gpu_autotune_samples {raw} is not an integer of at least 1; ignored"),
+        }
+    }
+    if changed && !CubeClRuntimeConfig::try_set(config) {
+        log::warn!("gpu_autotune settings ignored: cubecl config was already read");
     }
 }
 
@@ -178,7 +195,7 @@ pub unsafe extern "C" fn bge_new(
         return std::ptr::null_mut();
     };
     record_panics(PathBuf::from(dir).join("engine-panic.txt"));
-    set_autotune_level(json);
+    set_autotune(json);
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(r) => r,
         Err(e) => {

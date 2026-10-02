@@ -16,9 +16,11 @@ fn start(config: &str, dir: &std::path::Path) -> *mut BgeEngine {
 #[test]
 fn autotune_level_reaches_cubecl_and_an_unknown_level_is_ignored() {
     let dir = std::env::temp_dir().join(format!("bge-autotune-{}", std::process::id()));
-    let e = start(r#"{"warmup": false, "gpu_autotune_level": "minimal"}"#, &dir);
+    let e = start(r#"{"warmup": false, "gpu_autotune_level": "minimal", "gpu_autotune_samples": 2}"#, &dir);
     assert!(!e.is_null());
     assert!(matches!(CubeClRuntimeConfig::get().autotune.level, AutotuneLevel::Minimal));
+    let bench = &CubeClRuntimeConfig::get().autotune.bench;
+    assert_eq!((bench.min_samples, bench.max_samples, bench.short_circuit_samples), (2, 2, 2));
     unsafe { bge_free(e) };
 
     let e = start(r#"{"warmup": false, "gpu_autotune_level": "bogus"}"#, &dir);
