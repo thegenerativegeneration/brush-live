@@ -1,4 +1,4 @@
-mod test_scene;
+use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
 use brush_guide::keyframe::decode_keyframe;

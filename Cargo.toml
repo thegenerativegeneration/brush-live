@@ -153,8 +153,13 @@ debug = 1
 [profile.dev.package."*"]
 debug = false
 
+# Release is also what `cargo test` and the server share (disk is too tight
+# for a second `target/dev`). LTO buys little here since the server is
+# GPU-bound, but it blocks incremental compilation and makes every test
+# re-link take minutes; incremental keeps rebuilds between test runs cheap.
 [profile.release]
-lto = "thin"
+lto = false
+incremental = true
 
 [workspace.lints.rust]
 future_incompatible = { level = "warn", priority = -1 }

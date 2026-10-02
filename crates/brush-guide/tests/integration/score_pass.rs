@@ -1,4 +1,4 @@
-mod test_scene;
+use crate::test_scene;
 
 use brush_guide::scores::pass::{PassConfig, PassView, score_pass};
 use brush_render::bwd::render_splats;

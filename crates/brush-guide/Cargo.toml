@@ -30,5 +30,14 @@ web-time.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
+# `cargo test` compiles every example by default (to catch bit-rot) even
+# though it never runs them. score_bench links the full wgpu/Burn/CubeCL
+# stack, so that alone adds minutes to every test build; `test = false`
+# excludes it. Run it explicitly with `cargo run --release -p brush-guide
+# --features brush-cube/metal --example score_bench`.
+[[example]]
+name = "score_bench"
+test = false
+
 [lints]
 workspace = true
