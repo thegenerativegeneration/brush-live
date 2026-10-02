@@ -34,6 +34,23 @@ void bge_resume(BgeEngine *engine);
 // thread, not from inside out. May run while a capture's bge_new / bge_push are running; the device
 // setup is shared and guarded.
 int32_t bge_warm_up(const char *config_json);
+// One splat snapshot: count * 14 floats per splat (position 3, rotation [w, x, y, z] 4, linear scale 3,
+// opacity 1, SH0 3). count is 0 after a reset. data stays valid until bge_preview_release(handle), also
+// after newer snapshots and after bge_free.
+typedef struct {
+    uint64_t version;
+    uint32_t count;
+    float readback_ms;
+    const float *data;
+    const void *handle;
+} BgePreview;
+// interval_ms 0: a snapshot after every training step; > 0: at most every interval_ms; < 0: off.
+// Does not wait for the engine.
+void bge_set_preview(BgeEngine *engine, int32_t interval_ms);
+// Fills *out and returns 1 if the newest snapshot's version is above after_version; returns 0 otherwise.
+int32_t bge_preview_latest(BgeEngine *engine, uint64_t after_version, BgePreview *out);
+// Releases a snapshot from bge_preview_latest; NULL is ignored. Any thread.
+void bge_preview_release(const void *handle);
 // Stops the engine; out is not called after it returns. No other bge_* call may
 // be in progress on any thread.
 void bge_free(BgeEngine *engine);

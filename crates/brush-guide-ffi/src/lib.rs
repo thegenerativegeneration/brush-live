@@ -16,6 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::watch;
 
+mod preview;
+pub use preview::*;
+
 pub type BgeOut = extern "C" fn(ctx: *mut c_void, frame: *const u8, len: usize);
 
 struct Out {
