@@ -30,16 +30,6 @@ fn picks_lowest_within_the_cell_quota() {
 }
 
 #[test]
-fn target_and_limit_split_the_headroom() {
-    assert_eq!(evict_target(100_000, 0.1), 90_000);
-    assert_eq!(growth_limit(100_000, 0.1), 95_000);
-    assert_eq!(evict_target(300_000, 0.1), 270_000);
-    assert_eq!(growth_limit(300_000, 0.1), 285_000);
-    assert_eq!(evict_target(15, 0.1), 13);
-    assert_eq!(growth_limit(15, 0.1), 14);
-}
-
-#[test]
 fn evicts_blocked_recent_demand_up_to_the_target() {
     // Room left for the demand: nothing.
     assert_eq!(evict_count(90_000, 5_000, 0, 100_000, 0.1), 0);

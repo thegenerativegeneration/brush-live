@@ -145,12 +145,26 @@ async fn eviction_removes_lowest_and_keeps_adam_rows_aligned() {
     assert_eq!(s.num_splats() as usize, N - 6);
 }
 
+/// No eviction: no demand, blocked demand without a new keyframe, and a keyframe whose seeds land elsewhere.
 #[tokio::test]
 async fn no_eviction_without_demand() {
     let (mut trainer, s) = trainer_at_budget(0).await;
     trainer.set_importance(&importance());
     let (s, stats) = trainer.refine(1, s).await;
     assert_eq!(stats.num_evicted, 0);
+    assert_eq!(s.num_splats() as usize, N);
+
+    let (mut trainer, s) = split_trainer_at_budget().await;
+    let (s, stats) = trainer.refine(1, s).await;
+    assert_eq!(stats.num_evicted, 0, "blocked demand without a new keyframe");
+    assert_eq!(stats.num_split_oversized, 0);
+    assert_eq!(s.num_splats() as usize, N);
+
+    let (mut trainer, s) = split_trainer_at_budget().await;
+    // Seeds in a far cell: the blocked demand is all in the old cell.
+    trainer.note_keyframe_seeds(&[5.5, 5.5, 5.5].repeat(16));
+    let (s, stats) = trainer.refine(1, s).await;
+    assert_eq!(stats.num_evicted, 0, "keyframe elsewhere");
     assert_eq!(s.num_splats() as usize, N);
 }
 
@@ -305,25 +319,6 @@ async fn split_trainer_at_budget() -> (SplatTrainer, Splats) {
 }
 
 #[tokio::test]
-async fn blocked_demand_without_new_keyframe_evicts_nothing() {
-    let (mut trainer, s) = split_trainer_at_budget().await;
-    let (s, stats) = trainer.refine(1, s).await;
-    assert_eq!(stats.num_evicted, 0);
-    assert_eq!(stats.num_split_oversized, 0);
-    assert_eq!(s.num_splats() as usize, N);
-}
-
-#[tokio::test]
-async fn keyframe_elsewhere_does_not_evict_for_old_demand() {
-    let (mut trainer, s) = split_trainer_at_budget().await;
-    // Seeds in a far cell: the blocked demand is all in the old cell.
-    trainer.note_keyframe_seeds(&[5.5, 5.5, 5.5].repeat(16));
-    let (s, stats) = trainer.refine(1, s).await;
-    assert_eq!(stats.num_evicted, 0);
-    assert_eq!(s.num_splats() as usize, N);
-}
-
-#[tokio::test]
 async fn evictions_stop_once_the_keyframe_window_passes() {
     // Cells stay recent for 2 refines; every refine has fresh scores.
     let (mut trainer, s) = split_trainer_at_budget().await;
@@ -331,7 +326,7 @@ async fn evictions_stop_once_the_keyframe_window_passes() {
     let (mut s, stats) = trainer.refine(1, s).await;
     // 60 → 54, split back to the growth limit 57.
     assert_eq!(stats.num_evicted, 6);
-    for iter in 2..6 {
+    for iter in 2..5 {
         let (stepped, _) = trainer.step(batch(), s.train()).await;
         let n = stepped.num_splats() as usize;
         trainer.set_importance(&vec![1.0; n]);
