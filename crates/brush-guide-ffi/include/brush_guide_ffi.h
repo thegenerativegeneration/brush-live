@@ -36,7 +36,7 @@ void bge_resume(BgeEngine *engine);
 int32_t bge_warm_up(const char *config_json);
 // One splat snapshot: count * 14 floats per splat (position 3, rotation [w, x, y, z] 4, linear scale 3,
 // opacity 1, SH0 3). count is 0 after a reset. data stays valid until bge_preview_release(handle), also
-// after newer snapshots and after bge_free.
+// after newer snapshots and after bge_free; it may be non-NULL when count is 0.
 typedef struct {
     uint64_t version;
     uint32_t count;
@@ -45,7 +45,8 @@ typedef struct {
     const void *handle;
 } BgePreview;
 // interval_ms 0: a snapshot after every training step; > 0: at most every interval_ms; < 0: off.
-// Does not wait for the engine.
+// Does not wait for the engine. bge_set_preview and bge_preview_latest may be called from any thread,
+// concurrently with the other bge_* calls except bge_free.
 void bge_set_preview(BgeEngine *engine, int32_t interval_ms);
 // Fills *out and returns 1 if the newest snapshot's version is above after_version; returns 0 otherwise.
 int32_t bge_preview_latest(BgeEngine *engine, uint64_t after_version, BgePreview *out);

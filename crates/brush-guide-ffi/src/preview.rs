@@ -17,6 +17,12 @@ pub struct BgePreview {
     pub handle: *const c_void,
 }
 
+const _: () = assert!(
+    std::mem::size_of::<BgePreview>() == 32
+        && std::mem::offset_of!(BgePreview, data) == 16
+        && std::mem::offset_of!(BgePreview, handle) == 24
+);
+
 impl Default for BgePreview {
     fn default() -> Self {
         Self {

@@ -29,20 +29,6 @@ fn wait_newer(e: *mut BgeEngine, after: u64, secs: u64) -> BgePreview {
     }
 }
 
-/// Waits until no newer snapshot appears for `quiet`, returning the last version.
-fn settle(e: *mut BgeEngine, mut v: u64, quiet: Duration) -> u64 {
-    loop {
-        std::thread::sleep(quiet);
-        match latest(e, v) {
-            Some(p) => {
-                v = p.version;
-                unsafe { bge_preview_release(p.handle) };
-            }
-            None => return v,
-        }
-    }
-}
-
 #[test]
 fn snapshots_follow_training_pause_off_and_reset() {
     let dir = std::env::temp_dir().join(format!("bge-preview-{}", std::process::id()));
@@ -77,14 +63,27 @@ fn snapshots_follow_training_pause_off_and_reset() {
 
     // Paused: no GPU work, so no new snapshot.
     unsafe { bge_pause(e) };
-    let v = settle(e, second.version, Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(500));
+    let v = latest(e, second.version).map_or(second.version, |p| {
+        unsafe { bge_preview_release(p.handle) };
+        p.version
+    });
     std::thread::sleep(Duration::from_millis(500));
     assert!(latest(e, v).is_none(), "snapshot while paused");
     unsafe { bge_resume(e) };
 
+    // Snapshots flow again after resume.
+    let flowing = wait_newer(e, v, 10);
+    let v = flowing.version;
+    unsafe { bge_preview_release(flowing.handle) };
+
     // Off: no new snapshot.
     unsafe { bge_set_preview(e, -1) };
-    let v = settle(e, v, Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(500));
+    let v = latest(e, v).map_or(v, |p| {
+        unsafe { bge_preview_release(p.handle) };
+        p.version
+    });
     std::thread::sleep(Duration::from_millis(500));
     assert!(latest(e, v).is_none(), "snapshot while off");
 
