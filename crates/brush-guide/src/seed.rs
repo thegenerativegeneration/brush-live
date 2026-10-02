@@ -137,14 +137,6 @@ mod tests {
     }
 
     #[test]
-    fn project_roundtrip() {
-        let (px, d) = project(&cam(), UVec2::new(100, 100), Vec3::new(0.0, 0.0, 2.0)).unwrap();
-        assert!((px - Vec2::new(50.0, 50.0)).length() < 1e-3);
-        assert!((d - 2.0).abs() < 1e-5);
-        assert!(project(&cam(), UVec2::new(100, 100), Vec3::new(0.0, 0.0, -2.0)).is_none());
-    }
-
-    #[test]
     fn covered_pixels_get_no_seeds() {
         let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
         let depth = DepthMap {

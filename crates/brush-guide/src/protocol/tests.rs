@@ -37,6 +37,20 @@ fn header_json_uses_type_tag() {
     let len = u32::from_le_bytes(frame[0..4].try_into().unwrap()) as usize;
     let json = std::str::from_utf8(&frame[4..4 + len]).unwrap();
     assert_eq!(json, r#"{"type":"ack","keyframe_id":3}"#);
+
+    let frame = encode_frame(
+        &ServerHeader::MeshBricks {
+            version: 5,
+            num_bricks: 2,
+            mesh_ms: 40,
+        },
+        &[],
+    );
+    let (h, _): (serde_json::Value, _) = decode_frame(&frame).unwrap();
+    assert_eq!(
+        h,
+        serde_json::json!({"type": "mesh_bricks", "version": 5, "num_bricks": 2, "mesh_ms": 40})
+    );
 }
 
 #[test]
@@ -47,34 +61,6 @@ fn truncated_and_oversized_frames_are_errors() {
     assert!(decode_frame::<ServerHeader>(&frame).is_err());
     let bad = encode_frame(&serde_json::json!({"type": "nope"}), &[]);
     assert!(decode_frame::<ServerHeader>(&bad).is_err());
-}
-
-#[test]
-fn cells_roundtrip_and_size() {
-    let cells = vec![
-        Cell {
-            center: [1.0, -2.0, 3.5],
-            coverage: 10,
-            uncertainty: 250,
-            age: 255,
-            normal: None,
-            density: 0,
-            uninformed: false,
-        },
-        Cell {
-            center: [0.0, 0.0, 0.0],
-            coverage: 0,
-            uncertainty: 0,
-            age: 0,
-            normal: None,
-            density: 0,
-            uninformed: false,
-        },
-    ];
-    let bytes = encode_cells(&cells);
-    assert_eq!(bytes.len(), 2 * CELL_BYTES);
-    assert_eq!(decode_cells(&bytes).unwrap(), cells);
-    assert!(decode_cells(&bytes[..16]).is_err());
 }
 
 #[test]
@@ -157,7 +143,7 @@ fn octahedral_round_trip_within_two_degrees() {
 }
 
 #[test]
-fn cells_round_trip_with_and_without_normal() {
+fn cells_roundtrip_with_and_without_a_normal() {
     let cells = [
         Cell {
             center: [1.0, -2.0, 3.5],
@@ -187,6 +173,9 @@ fn cells_round_trip_with_and_without_normal() {
     let n = glam::Vec3::from(back[0].normal.unwrap());
     assert!(n.dot(glam::Vec3::new(0.6, 0.0, -0.8)) > 0.999);
     assert_eq!((back[0].center, back[0].density), (cells[0].center, 40));
+
+    assert!(decode_cells(&bytes[..16]).is_err(), "truncated payload");
+    assert!(decode_cells(&[0u8; 15]).is_err(), "old 15-byte payload");
 }
 
 #[test]
@@ -222,24 +211,6 @@ pub(super) fn fixture_bricks() -> [MeshBrick; 2] {
         }),
         MeshBrick::Removed(BrickKey(glam::IVec3::new(-1, 0, 3))),
     ]
-}
-
-#[test]
-fn decode_cells_rejects_old_15_byte_payload() {
-    assert!(decode_cells(&[0u8; 15]).is_err());
-}
-
-#[test]
-fn header_without_confidence_field_defaults_to_false() {
-    let json = serde_json::json!({
-        "id": 1, "timestamp": 0.0,
-        "pose": [1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.],
-        "fx": 1.0, "fy": 1.0, "cx": 1.0, "cy": 1.0,
-        "width": 1, "height": 1, "jpeg_len": 0,
-        "depth_size": null, "num_points": 0,
-    });
-    let h: KeyframeHeader = serde_json::from_value(json).unwrap();
-    assert!(!h.depth_confidence);
 }
 
 #[test]

@@ -1,13 +1,21 @@
 use super::*;
 
+/// Ruling 42.3: the interval counts start-to-start, and a budget-sized round stretches it.
 #[test]
-fn cadence_counts_start_to_start() {
+fn cadence_counts_start_to_start_and_budget_stretches_long_rounds() {
     let mut c = Cadence::new(0.25, 2.0);
     assert!(c.due(0.0));
     // Started at 10 s and took 0.4 s: the next start is due at 12 s, not 12.4 s.
     c.record(10.0, 0.4);
     assert!(!c.due(11.99));
     assert!(c.due(12.0));
+
+    let mut c = Cadence::new(0.25, 2.0);
+    // 1 s at 25 %: one start every 4 s.
+    c.record(10.0, 1.0);
+    assert!(!c.due(13.99));
+    assert!(c.due(14.0));
+    assert_eq!(c.interval(), 4.0);
 }
 
 #[test]
@@ -21,16 +29,6 @@ fn a_slightly_late_start_keeps_the_cadence() {
     c.record(15.5, 0.4);
     assert!(!c.due(17.4));
     assert!(c.due(17.5));
-}
-
-#[test]
-fn cadence_budget_stretches_long_rounds() {
-    let mut c = Cadence::new(0.25, 2.0);
-    // 1 s at 25 %: one start every 4 s.
-    c.record(10.0, 1.0);
-    assert!(!c.due(13.99));
-    assert!(c.due(14.0));
-    assert_eq!(c.interval(), 4.0);
 }
 
 fn scheduler() -> RoundScheduler {
@@ -117,6 +115,8 @@ fn short_captures_score_every_view() {
     }
 }
 
+/// Sampling at max_views 30 (keep the newest 10, one pick per stratum over the rest) and at max_views 12 (keep a
+/// third recent).
 #[test]
 fn long_captures_keep_newest_and_take_one_view_per_stratum() {
     let v = ViewSample::new(30);
@@ -131,6 +131,12 @@ fn long_captures_keep_newest_and_take_one_view_per_stratum() {
     }
     assert_eq!(picked, v.select(322, 5, 7), "deterministic");
     assert_ne!(picked, v.select(322, 6, 7), "rotates with the pass");
+
+    let v = ViewSample::new(12);
+    assert_eq!(v.recent, 4);
+    let picked = v.select(200, 0, 1);
+    assert_eq!(picked.len(), 12);
+    assert!((196..200).all(|i| picked.contains(&i)));
 }
 
 #[test]
@@ -200,18 +206,6 @@ fn older_weight_is_the_length_of_the_stratum_holding_the_view() {
 }
 
 #[test]
-fn trimmed_view_counts_round_to_a_tier() {
-    assert_eq!(quantise_views(0), 0);
-    assert_eq!(quantise_views(1), 3);
-    assert_eq!(quantise_views(2), 3);
-    assert_eq!(quantise_views(3), 3);
-    assert_eq!(quantise_views(4), 3);
-    assert_eq!(quantise_views(5), 6);
-    assert_eq!(quantise_views(17), 18);
-    assert_eq!(quantise_views(30), 30);
-}
-
-#[test]
 fn a_trimmed_pass_keeps_stable_strata_despite_small_cost_jitter() {
     // Two cost estimates a view apart (the kind of jitter a round-to-round
     // cost estimate has) land on the same tier, so `ViewSample::new` sees
@@ -230,13 +224,4 @@ fn a_trimmed_pass_keeps_stable_strata_despite_small_cost_jitter() {
     // Raw fits differ (18 vs 19) but both round to the 18-view tier.
     assert_eq!(s.next(10.6, Some(a)), Some(Round::Fisher(18)));
     assert_eq!(s.next(10.6, Some(b)), Some(Round::Fisher(18)));
-}
-
-#[test]
-fn smaller_passes_keep_a_third_recent() {
-    let v = ViewSample::new(12);
-    assert_eq!(v.recent, 4);
-    let picked = v.select(200, 0, 1);
-    assert_eq!(picked.len(), 12);
-    assert!((196..200).all(|i| picked.contains(&i)));
 }

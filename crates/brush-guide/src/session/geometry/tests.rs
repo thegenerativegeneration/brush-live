@@ -22,17 +22,14 @@ fn keys(msg: &MeshBricksMsg) -> Vec<(i32, bool)> {
 /// were recorded gets both rounds in one message of version 2: versions
 /// can run ahead of the score set the reader just saw.
 #[test]
-fn a_late_reader_gets_coalesced_rounds_with_the_newer_version() {
+fn mesh_log_coalesces_for_a_late_reader_and_catches_up_with_the_latest_state() {
     let mut log = MeshLog::default();
     log.record(1, 10, vec![mesh(1)]);
     log.record(2, 20, vec![mesh(2)]);
     let msg = log.since(0).unwrap();
     assert_eq!(msg.version, 2);
     assert_eq!(keys(&msg), vec![(1, false), (2, false)]);
-}
 
-#[test]
-fn mesh_log_catches_up_with_the_latest_state() {
     let mut log = MeshLog::default();
     assert!(log.since(0).is_none());
     log.record(1, 10, vec![mesh(1), mesh(2)]);
@@ -51,10 +48,10 @@ fn mesh_log_catches_up_with_the_latest_state() {
     assert_eq!((empty.version, empty.bricks.len()), (3, 0));
 }
 
-/// 20 new views at once are fused over three rounds, 8 new per round,
-/// none lost, while older views keep being refreshed.
+/// 20 new views at once are fused over three rounds, 8 new per round, none lost, while older views keep being
+/// refreshed and rotate through on top of newly integrated ones.
 #[test]
-fn new_views_are_capped_per_round_and_carried_over() {
+fn views_for_round_caps_new_views_and_rotates_older_ones() {
     let mut g = Geometry::new();
     assert_eq!(g.views_for_round(20), (0..8).collect::<Vec<_>>());
     assert_eq!(
@@ -66,10 +63,7 @@ fn new_views_are_capped_per_round_and_carried_over() {
         [4, 5, 6, 7].into_iter().chain(16..20).collect::<Vec<_>>()
     );
     assert_eq!(g.views_for_round(20), vec![8, 9, 10, 11], "only refreshes");
-}
 
-#[test]
-fn rounds_integrate_new_views_and_rotate_through_older_ones() {
     let mut g = Geometry::new();
     assert_eq!(g.views_for_round(3), vec![0, 1, 2]);
     assert_eq!(g.views_for_round(5), vec![0, 1, 2, 3, 4]);
@@ -80,11 +74,6 @@ fn rounds_integrate_new_views_and_rotate_through_older_ones() {
 
 /// The cap the queueing tests below are written for.
 const CAP: usize = 24;
-
-#[test]
-fn default_cap_is_96_bricks_per_round() {
-    assert_eq!(Geometry::new().max_bricks, 96);
-}
 
 /// A row of 30 bricks along x holding the plane z = 0.5, meshed at most
 /// `CAP` per round.

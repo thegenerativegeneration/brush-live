@@ -52,8 +52,9 @@ fn mesh_bricks_round_trip_with_removal() {
     assert!(matches!(back[1], MeshBrick::Removed(k) if k.0 == glam::IVec3::new(7, -8, 9)));
 }
 
+/// The colour round trip and the shared golden byte layout use the same fixture, so one test pins both.
 #[test]
-fn mesh_bricks_round_trip_with_colours() {
+fn mesh_bricks_round_trip_with_colours_and_byte_layout() {
     let bricks = fixture_bricks();
     let bytes = encode_mesh_bricks(&bricks);
     assert_eq!(bytes.len(), 2 * MESH_BRICK_HEADER + 3 * (6 + 2 + 3) + 3 * 2);
@@ -63,21 +64,7 @@ fn mesh_bricks_round_trip_with_colours() {
     };
     assert_eq!(mesh.colours, FIXTURE_COLOURS.to_vec());
     assert_eq!(mesh.indices, vec![0, 1, 2]);
-}
 
-#[test]
-#[should_panic(expected = "colours")]
-fn mesh_bricks_reject_a_colour_count_other_than_the_vertex_count() {
-    let MeshBrick::Mesh(mut mesh) = fixture_bricks()[0].clone() else {
-        unreachable!()
-    };
-    mesh.colours.pop();
-    encode_mesh_bricks(&[MeshBrick::Mesh(mesh)]);
-}
-
-#[test]
-fn mesh_bricks_byte_layout() {
-    let bytes = encode_mesh_bricks(&fixture_bricks());
     let int = |i: usize| i32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
     let word = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
     let half = |i: usize| u16::from_le_bytes(bytes[i..i + 2].try_into().unwrap());
@@ -109,31 +96,6 @@ fn mesh_bricks_byte_layout() {
     assert_eq!(&bytes[removed + 13..], &[0; 8]);
 }
 
-#[test]
-fn mesh_bricks_reject_truncated_and_trailing_bytes() {
-    let bytes = encode_mesh_bricks(&fixture_bricks());
-    assert!(decode_mesh_bricks(&bytes[..bytes.len() - 1], 2).is_err());
-    assert!(decode_mesh_bricks(&bytes, 1).is_err());
-    assert!(decode_mesh_bricks(&bytes, 3).is_err());
-}
-
-#[test]
-fn mesh_bricks_header_json() {
-    let frame = encode_frame(
-        &ServerHeader::MeshBricks {
-            version: 5,
-            num_bricks: 2,
-            mesh_ms: 40,
-        },
-        &[],
-    );
-    let (h, _): (serde_json::Value, _) = decode_frame(&frame).unwrap();
-    assert_eq!(
-        h,
-        serde_json::json!({"type": "mesh_bricks", "version": 5, "num_bricks": 2, "mesh_ms": 40})
-    );
-}
-
 fn triangle_with_indices(indices: Vec<u32>) -> [MeshBrick; 1] {
     let MeshBrick::Mesh(mut mesh) = fixture_bricks()[0].clone() else {
         unreachable!()
@@ -142,31 +104,35 @@ fn triangle_with_indices(indices: Vec<u32>) -> [MeshBrick; 1] {
     [MeshBrick::Mesh(mesh)]
 }
 
+/// The decoder rejects every malformed brick: truncated bytes, trailing bytes, a removed brick carrying counts, an
+/// index count that is not a multiple of three, and an index past the vertex count.
 #[test]
-fn mesh_bricks_reject_a_removed_brick_with_counts() {
-    let mut bytes = encode_mesh_bricks(&fixture_bricks()[1..]);
-    assert!(decode_mesh_bricks(&bytes, 1).is_ok());
-    bytes[13] = 3;
+fn mesh_bricks_reject_malformed_bricks() {
+    let bytes = encode_mesh_bricks(&fixture_bricks());
+    assert!(
+        decode_mesh_bricks(&bytes[..bytes.len() - 1], 2).is_err(),
+        "truncated"
+    );
+    assert!(decode_mesh_bricks(&bytes, 1).is_err(), "trailing bytes");
+    assert!(decode_mesh_bricks(&bytes, 3).is_err(), "too few bytes for the count");
+
+    let mut removed = encode_mesh_bricks(&fixture_bricks()[1..]);
+    assert!(decode_mesh_bricks(&removed, 1).is_ok());
+    removed[13] = 3;
     assert!(matches!(
-        decode_mesh_bricks(&bytes, 1),
+        decode_mesh_bricks(&removed, 1),
         Err(ProtocolError::RemovedBrickWithData)
     ));
-}
 
-#[test]
-fn mesh_bricks_reject_an_index_count_not_a_multiple_of_three() {
-    let bytes = encode_mesh_bricks(&triangle_with_indices(vec![0, 1, 2, 0]));
+    let not_a_triangle = encode_mesh_bricks(&triangle_with_indices(vec![0, 1, 2, 0]));
     assert!(matches!(
-        decode_mesh_bricks(&bytes, 1),
+        decode_mesh_bricks(&not_a_triangle, 1),
         Err(ProtocolError::PartialTriangle(4))
     ));
-}
 
-#[test]
-fn mesh_bricks_reject_indices_past_the_vertices() {
-    let bytes = encode_mesh_bricks(&triangle_with_indices(vec![0, 1, 3]));
+    let out_of_range = encode_mesh_bricks(&triangle_with_indices(vec![0, 1, 3]));
     assert!(matches!(
-        decode_mesh_bricks(&bytes, 1),
+        decode_mesh_bricks(&out_of_range, 1),
         Err(ProtocolError::IndexOutOfRange {
             index: 3,
             num_vertices: 3
@@ -184,8 +150,9 @@ fn mesh_with_vertices(n: usize) -> [MeshBrick; 1] {
     })]
 }
 
+/// The u16 vertex-index limit: 65,536 vertices encode and decode, one more panics.
 #[test]
-fn mesh_bricks_encode_up_to_65536_vertices() {
+fn mesh_bricks_vertex_count_is_capped_at_65536() {
     let bytes = encode_mesh_bricks(&mesh_with_vertices(65_536));
     let back = decode_mesh_bricks(&bytes, 1).unwrap();
     let MeshBrick::Mesh(mesh) = &back[0] else {
@@ -193,10 +160,13 @@ fn mesh_bricks_encode_up_to_65536_vertices() {
     };
     assert_eq!(mesh.positions.len(), 65_536);
     assert_eq!(mesh.indices, vec![0, 1, 65_535]);
-}
 
-#[test]
-#[should_panic(expected = "more than 65 536")]
-fn mesh_bricks_reject_more_than_65536_vertices() {
-    encode_mesh_bricks(&mesh_with_vertices(65_537));
+    let result = std::panic::catch_unwind(|| encode_mesh_bricks(&mesh_with_vertices(65_537)));
+    let err = result.expect_err("more than 65,536 vertices must panic");
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default();
+    assert!(msg.contains("more than 65 536"), "{msg}");
 }

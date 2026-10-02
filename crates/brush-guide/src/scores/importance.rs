@@ -90,27 +90,25 @@ mod tests {
         (0..6).map(|k| f[k * 6 + k]).sum()
     }
 
+    /// Ruling 37: per-observation normalisation. Summed over views, a weak but often-observed Gaussian can look
+    /// more important than a strongly observed one; per observation it does not, and the same per-view sensitivity
+    /// scores the same regardless of how many views contributed.
     #[test]
-    fn one_strong_view_beats_many_weak_views() {
+    fn importance_is_normalised_per_observation() {
         let scale = [0.05; 3];
         let once = fisher([0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 1.0);
         let weak = fisher([0.0, 0.0, 0.0, 0.2, 0.2, 0.2], 100.0);
-        // Summed over views the weak, well-observed Gaussian looks more
-        // important; per observation it is not.
         assert!(trace(&weak) > trace(&once));
         let i_once = gaussian_importance(&once, 1.0, &IDENTITY, &scale);
         let i_weak = gaussian_importance(&weak, 100.0, &IDENTITY, &scale);
         assert!(i_once > i_weak, "{i_once} vs {i_weak}");
         assert!((i_once - 3.0).abs() < 1e-5);
         assert!((i_weak - 0.12).abs() < 1e-5);
-    }
 
-    #[test]
-    fn same_per_view_sensitivity_scores_the_same_at_any_view_count() {
         let j = [0.5, -0.2, 0.1, 0.3, 0.0, 0.4];
-        let scale = [0.1, 0.05, 0.02];
-        let a = gaussian_importance(&fisher(j, 2.0), 2.0, &IDENTITY, &scale);
-        let b = gaussian_importance(&fisher(j, 200.0), 200.0, &IDENTITY, &scale);
+        let scale2 = [0.1, 0.05, 0.02];
+        let a = gaussian_importance(&fisher(j, 2.0), 2.0, &IDENTITY, &scale2);
+        let b = gaussian_importance(&fisher(j, 200.0), 200.0, &IDENTITY, &scale2);
         assert!((a - b).abs() < 1e-5 * a.max(1.0));
     }
 

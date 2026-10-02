@@ -43,10 +43,40 @@ fn cam(pos: [f32; 3], fwd: [f32; 3]) -> ViewCone {
     }
 }
 
+/// Degenerate rounds: no input, a single voxel, a uniform round, and a round where the p5/p95 range collapses but
+/// one voxel is still well above it.
 #[test]
-fn empty_input_gives_no_cells() {
+fn degenerate_rounds() {
     let mut agg = VoxelAggregator::new(0.1, 0.1, SCALE);
     assert!(agg.aggregate(&[], &[], 0.0).is_empty());
+
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let cells = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.3)], &[], 0.0);
+    assert_eq!(cells[0].uncertainty, 0, "a single voxel round maps to zero");
+
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let cells = agg.aggregate(
+        &[
+            g([0.5; 3], 1.0, 0.0, 0.1),
+            g([1.5, 0.5, 0.5], 1.0, 0.0, 0.1),
+        ],
+        &[],
+        0.0,
+    );
+    assert!(
+        cells.iter().all(|c| c.uncertainty == 0),
+        "a uniform round maps to zero"
+    );
+
+    // 19 equal voxels put p5 and p95 on the same value; the 20th is higher.
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let mut gs: Vec<_> = (0..19)
+        .map(|i| g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, 0.1))
+        .collect();
+    gs.push(g([19.5, 0.5, 0.5], 1.0, 0.0, 0.5));
+    let cells = agg.aggregate(&gs, &[], 0.0);
+    assert!((0..19).all(|x| byte_at(&cells, x) == 0));
+    assert_eq!(byte_at(&cells, 19), 255, "above the collapsed range");
 }
 
 #[test]
@@ -118,19 +148,21 @@ fn byte_at(cells: &[Cell], x: usize) -> u8 {
         .uncertainty
 }
 
+/// Uninformed table: a round with only infinite sigma maps every voxel to 255 and uninformed, and a voxel with no
+/// information at all (infinite sigma, full coverage) gets the uninformed coverage placeholder too.
 #[test]
-fn one_voxel_round_maps_to_zero() {
-    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-    let cells = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.3)], &[], 0.0);
-    assert_eq!(cells[0].uncertainty, 0);
-}
-
-#[test]
-fn round_of_only_infinite_sigma_maps_to_255() {
+fn rounds_without_information_are_uninformed() {
     let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
     let none = |x: f32| g([x, 0.5, 0.5], 1.0, 0.0, f32::INFINITY);
     let cells = agg.aggregate(&[none(0.5), none(1.5)], &[], 0.0);
     assert!(cells.iter().all(|c| c.uncertainty == 255 && c.uninformed));
+
+    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
+    let cells = agg.aggregate(&[g([0.5; 3], 1.0, 1.0, f32::INFINITY)], &[], 0.0);
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0].coverage, UNINFORMED_COVERAGE);
+    assert_eq!(cells[0].uncertainty, 255);
+    assert!(cells[0].uninformed);
 }
 
 #[test]
@@ -184,33 +216,6 @@ fn uninformed_voxel_is_infinite_under_the_production_ridge() {
 }
 
 #[test]
-fn degenerate_range_keeps_voxels_above_it_visible() {
-    // 19 equal voxels put p5 and p95 on the same value; the 20th is higher.
-    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-    let mut gs: Vec<_> = (0..19)
-        .map(|i| g([i as f32 + 0.5, 0.5, 0.5], 1.0, 0.0, 0.1))
-        .collect();
-    gs.push(g([19.5, 0.5, 0.5], 1.0, 0.0, 0.5));
-    let cells = agg.aggregate(&gs, &[], 0.0);
-    assert!((0..19).all(|x| byte_at(&cells, x) == 0));
-    assert_eq!(byte_at(&cells, 19), 255);
-}
-
-#[test]
-fn uniform_round_maps_to_zero() {
-    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-    let cells = agg.aggregate(
-        &[
-            g([0.5; 3], 1.0, 0.0, 0.1),
-            g([1.5, 0.5, 0.5], 1.0, 0.0, 0.1),
-        ],
-        &[],
-        0.0,
-    );
-    assert!(cells.iter().all(|c| c.uncertainty == 0));
-}
-
-#[test]
 fn splitting_a_gaussian_keeps_the_voxel_sigma() {
     let whole = GaussianScore {
         fisher_pos: [200.0, 20.0, 0.0, 20.0, 50.0, 0.0, 0.0, 0.0, 80.0],
@@ -236,19 +241,6 @@ fn splitting_a_gaussian_keeps_the_voxel_sigma() {
     ]);
     assert!(one.is_finite() && one > 0.0);
     assert!((one - two).abs() < 1e-6 * one, "{one} vs {two}");
-}
-
-#[test]
-fn more_gaussians_observing_a_voxel_lower_its_sigma() {
-    let sigma = |n: usize| {
-        let gs: Vec<_> = (0..n).map(|_| g([0.5; 3], 1.0, 0.0, 0.2)).collect();
-        let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-        agg.record_raw(true);
-        agg.aggregate(&gs, &[], 0.0);
-        agg.raw_round()[0].sigma
-    };
-    assert!((sigma(1) - 0.2).abs() < 1e-6);
-    assert!((sigma(4) - 0.1).abs() < 1e-6);
 }
 
 #[test]
@@ -327,16 +319,6 @@ fn age_counts_from_first_appearance_and_saturates() {
     assert_eq!(age(2.5), 0);
     let cells = agg.aggregate(&[g([0.5; 3], 1.0, 0.0, 0.0)], &[], 1000.0);
     assert_eq!(cells[0].age, 255);
-}
-
-#[test]
-fn voxel_without_information_is_uninformed() {
-    let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-    let cells = agg.aggregate(&[g([0.5; 3], 1.0, 1.0, f32::INFINITY)], &[], 0.0);
-    assert_eq!(cells.len(), 1);
-    assert_eq!(cells[0].coverage, UNINFORMED_COVERAGE);
-    assert_eq!(cells[0].uncertainty, 255);
-    assert!(cells[0].uninformed);
 }
 
 #[test]

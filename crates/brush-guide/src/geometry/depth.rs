@@ -229,23 +229,18 @@ mod tests {
         }
     }
 
+    /// A flat layer renders its own distance, at 2 m and at 4 m; depth above 1 must survive the float render path
+    /// un-clamped.
     #[tokio::test]
     async fn flat_layer_renders_its_distance() {
         let device = device().await;
-        let s = splats(&layer(2.0, -1.6, 1.6, 1.6, 0.05), 0.05, &device);
-        let img = render_expected_depth(&s, &camera(), SIZE).await;
-        assert_eq!((img.width, img.height), (SIZE.x, SIZE.y));
-        assert_eq!(img.depth.len(), (SIZE.x * SIZE.y) as usize);
-        assert_depth(&img, 2.0);
-    }
-
-    /// Depth above 1 must survive the float render path un-clamped.
-    #[tokio::test]
-    async fn far_layer_is_not_clamped() {
-        let device = device().await;
-        let s = splats(&layer(4.0, -3.0, 3.0, 3.0, 0.08), 0.08, &device);
-        let img = render_expected_depth(&s, &camera(), SIZE).await;
-        assert_depth(&img, 4.0);
+        for (z, half, spacing) in [(2.0, 1.6, 0.05), (4.0, 3.0, 0.08)] {
+            let s = splats(&layer(z, -half, half, half, spacing), spacing, &device);
+            let img = render_expected_depth(&s, &camera(), SIZE).await;
+            assert_eq!((img.width, img.height), (SIZE.x, SIZE.y), "z {z}");
+            assert_eq!(img.depth.len(), (SIZE.x * SIZE.y) as usize, "z {z}");
+            assert_depth(&img, z);
+        }
     }
 
     #[tokio::test]

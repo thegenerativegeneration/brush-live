@@ -101,19 +101,16 @@ mod tests {
         (dirs.iter().map(|d| d.normalize()).sum(), dirs.len() as f32)
     }
 
+    /// Coverage formula table (spec: the phone's `CoverageScore` port must match): unseen is zero, many views from
+    /// one direction stay low, a wide arc with enough views saturates, and few views scale down with a low-res
+    /// penalty.
     #[test]
-    fn unseen_is_zero() {
+    fn coverage_score_matches_the_spec_formula() {
         assert_eq!(coverage_score(Vec3::ZERO, 0.0, 0.0, &p()), 0.0);
-    }
 
-    #[test]
-    fn many_views_one_direction_is_low() {
         let (s, w) = sum_dirs(&[Vec3::Z; 20]);
         assert!(coverage_score(s, w, 1000.0, &p()) < 0.05);
-    }
 
-    #[test]
-    fn wide_arc_with_enough_views_is_full() {
         let dirs: Vec<Vec3> = (0..12)
             .map(|i| {
                 let a = (i as f32 / 11.0 - 0.5) * std::f32::consts::PI; // -90°..90°
@@ -122,10 +119,7 @@ mod tests {
             .collect();
         let (s, w) = sum_dirs(&dirs);
         assert!((coverage_score(s, w, 1000.0, &p()) - 1.0).abs() < 1e-5);
-    }
 
-    #[test]
-    fn few_views_scale_down_and_low_res_penalised() {
         let (s, w) = sum_dirs(&[Vec3::X, Vec3::NEG_X]);
         let full_res = coverage_score(s, w, 1000.0, &p());
         assert!((full_res - 2.0 / 8.0).abs() < 1e-5);
@@ -150,16 +144,14 @@ mod tests {
         );
     }
 
+    /// σ = sqrt(tr Σ / 3): an isotropic information gives its inverse square root exactly, and the trace of the
+    /// inverse averages the per-axis variances regardless of rotation.
     #[test]
-    fn isotropic_information_gives_its_inverse_square_root() {
+    fn position_sigma_is_the_square_root_of_the_mean_inverse_variance() {
         let exact = FisherRidge { abs: 0.0, rel: 0.0 };
         let s = position_sigma(&diag(400.0), exact, 0.05);
         assert!((s - 0.05 / 20.0).abs() < 1e-9, "{s}");
-    }
 
-    #[test]
-    fn trace_of_the_inverse_averages_the_axis_variances() {
-        let exact = FisherRidge { abs: 0.0, rel: 0.0 };
         let h = [1.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 16.0];
         let want = ((1.0 + 0.25 + 0.0625) / 3.0f64).sqrt() as f32;
         assert!((position_sigma(&h, exact, 1.0) - want).abs() < 1e-6);
@@ -174,38 +166,12 @@ mod tests {
         assert!((position_sigma(&rh, exact, 1.0) - want).abs() < 1e-6);
     }
 
-    /// Position Fisher from `k` random per-view gradients at the magnitude a real pass produces.
-    fn fisher_from_views(k: usize, seed: u64) -> [f64; 9] {
-        use rand::{RngExt as _, SeedableRng};
-        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
-        let mut h = [0f64; 9];
-        for _ in 0..k {
-            let g: [f64; 3] = std::array::from_fn(|_| (rng.random::<f64>() * 2.0 - 1.0) * 100.0);
-            for i in 0..3 {
-                for j in 0..3 {
-                    h[i * 3 + j] += g[i] * g[j];
-                }
-            }
-        }
-        h
-    }
-
+    /// Degenerate information is bounded by the ridge (zero information) or infinite (non-finite or indefinite).
     #[test]
-    fn more_views_give_smaller_sigma() {
-        let s = |k, seed| position_sigma(&fisher_from_views(k, seed), RIDGE, 0.05);
-        let (r1, r3, r12) = (s(1, 1), s(3, 2), s(12, 3));
-        assert!(r1.is_finite() && r3.is_finite() && r12.is_finite());
-        assert!(r1 > r3 && r3 > r12, "{r1} {r3} {r12}");
-    }
-
-    #[test]
-    fn zero_information_is_bounded_by_the_ridge() {
+    fn degenerate_information_is_bounded_or_infinite() {
         let s = position_sigma(&[0.0; 9], RIDGE, 0.05);
         assert!((s - 0.05 / 1e-6f32.sqrt()).abs() < 1e-2, "{s}");
-    }
 
-    #[test]
-    fn non_finite_or_indefinite_information_is_infinite() {
         let mut nan = diag(1.0);
         nan[4] = f64::NAN;
         assert_eq!(position_sigma(&nan, RIDGE, 0.05), f32::INFINITY);

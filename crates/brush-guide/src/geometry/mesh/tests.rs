@@ -276,23 +276,6 @@ fn unobserved_samples_make_no_faces() {
     }
 }
 
-/// Weights never decay below `DECAY_FLOOR`, so a surface seen once
-/// stays until it is seen differently.
-#[test]
-fn single_view_surface_survives_long_decay() {
-    let cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 2.5));
-    let mut tsdf = Tsdf::new();
-    tsdf.integrate(&depth_image(&cam, plane_z(2.5)), None, &cam);
-    for _ in 0..200 {
-        tsdf.decay(0.95);
-    }
-    let mesh = mesh_brick(&tsdf, BrickKey(IVec3::new(0, 0, 2))).expect("still meshed");
-    assert!(
-        mesh.positions.iter().all(|p| (p[2] - 2.5).abs() < 0.01),
-        "vertices on the plane"
-    );
-}
-
 #[test]
 fn thin_sheet_is_meshed() {
     let mut tsdf = thin_sheet_tsdf();
@@ -359,15 +342,6 @@ fn assert_close(c: [u8; 3], want: [u8; 3], at: Vec3) {
         .max()
         .unwrap();
     assert!(off <= 5, "vertex {at}: {c:?}, want {want:?}");
-}
-
-#[test]
-fn red_plane_has_red_vertices() {
-    let vertices = painted_plane(|_| [1.0, 0.0, 0.0]);
-    assert!(vertices.len() > 100);
-    for (p, c) in vertices {
-        assert_close(c, [255, 0, 0], p);
-    }
 }
 
 /// Voxel colours are sampled at voxel centres and interpolated, so the

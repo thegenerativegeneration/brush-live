@@ -179,17 +179,16 @@ mod tests {
         }
     }
 
+    /// ARKit → Brush camera convention: identity looks down -z with +y down, and a translated pose keeps its
+    /// position and focal lengths.
     #[test]
-    fn identity_arkit_camera_looks_down_negative_z() {
+    fn arkit_camera_keeps_its_convention_translation_and_focal() {
         let cam = arkit_to_camera(&header(Mat4::IDENTITY, 960, 720)).unwrap();
         let forward = cam.local_to_world().transform_vector3(Vec3::Z);
         assert!((forward - Vec3::NEG_Z).length() < 1e-5, "{forward}");
         let down = cam.local_to_world().transform_vector3(Vec3::Y);
         assert!((down - Vec3::NEG_Y).length() < 1e-5, "{down}");
-    }
 
-    #[test]
-    fn translation_and_focal_survive() {
         let pose = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
         let cam = arkit_to_camera(&header(pose, 960, 720)).unwrap();
         assert!((cam.position - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
@@ -230,26 +229,24 @@ mod tests {
         assert_eq!(d.sample_uv(0.9, 0.5), None);
     }
 
+    /// `masked` zeroes values below the confidence threshold, and leaves values unchanged without a confidence map.
     #[test]
-    fn masked_zeroes_low_confidence_values() {
-        let d = DepthMap {
+    fn masked_respects_confidence_when_present() {
+        let with_confidence = DepthMap {
             width: 2,
             height: 1,
             values: vec![1.0, 2.0],
             confidence: Some(vec![2, 1]),
         };
-        assert_eq!(d.masked(2).values, vec![1.0, 0.0]);
-    }
+        assert_eq!(with_confidence.masked(2).values, vec![1.0, 0.0]);
 
-    #[test]
-    fn masked_leaves_values_unchanged_without_confidence() {
-        let d = DepthMap {
+        let without_confidence = DepthMap {
             width: 2,
             height: 1,
             values: vec![1.0, 2.0],
             confidence: None,
         };
-        assert_eq!(d.masked(2).values, vec![1.0, 2.0]);
+        assert_eq!(without_confidence.masked(2).values, vec![1.0, 2.0]);
     }
 
     #[tokio::test]

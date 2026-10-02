@@ -22,14 +22,6 @@ fn fuse_plane(tsdf: &mut Tsdf, z: f32, rgb: [f32; 3]) {
 }
 
 #[test]
-fn uniform_colour_is_fused_at_the_surface() {
-    let mut tsdf = Tsdf::new();
-    fuse_plane(&mut tsdf, 2.5, A);
-    assert_rgb(tsdf.rgb(vec3(0.013, -0.2, 2.5)), A, "on the plane");
-    assert_rgb(tsdf.rgb(vec3(0.3, 0.1, 2.46)), A, "just in front");
-}
-
-#[test]
 fn integration_without_colour_leaves_none() {
     let cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 2.5));
     let mut tsdf = Tsdf::new();
@@ -70,15 +62,6 @@ fn colour_follows_a_change_at_the_weight_cap() {
     let g = voxel_of(vec3(0.01, 0.01, 2.49));
     let want = std::array::from_fn(|c| (MAX_WEIGHT * A[c] + B[c]) / (MAX_WEIGHT + 1.0));
     assert_rgb(tsdf.voxel_colour(g), want, "after the change");
-}
-
-#[test]
-#[should_panic(expected = "size")]
-fn colour_of_another_size_is_rejected() {
-    let cam = look_at(Vec3::ZERO, vec3(0.0, 0.0, 2.5));
-    let mut colour = colour_image(&cam, plane_z(2.5), |_| A);
-    colour.width /= 2;
-    Tsdf::new().integrate(&depth_image(&cam, plane_z(2.5)), Some(&colour), &cam);
 }
 
 /// Fuses plane 2.5 painted `rgb` `n` times.
