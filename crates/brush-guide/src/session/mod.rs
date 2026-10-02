@@ -3,6 +3,9 @@ mod splat_read;
 #[cfg(test)]
 mod tests;
 mod worker;
+mod frames;
+
+pub use frames::forward_frames;
 
 use crate::config::GuideConfig;
 use crate::protocol::{CELL_BYTES, Cell, KeyframeHeader, ServerHeader, encode_cells, encode_frame};
