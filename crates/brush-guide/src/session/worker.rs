@@ -21,7 +21,7 @@ use glam::UVec2;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use web_time::Instant;
 
 pub(super) struct Channels {
@@ -137,6 +137,10 @@ struct Worker {
     sizes: Vec<UVec2>,
     /// Set by Finish: no training or scoring until a new keyframe or Reset.
     finished: bool,
+    /// Set by `Command::Pause(true)`: no GPU work until resumed.
+    paused: bool,
+    /// Keyframes received while paused, added in order on resume.
+    held: Vec<(KeyframeHeader, Vec<u8>, oneshot::Sender<Result<(), String>>)>,
     /// `live.num_evicted()` at the end of the previous round.
     evicted_at_round: u64,
     /// Time spent between rounds, for the debug timing log.
@@ -182,18 +186,34 @@ impl Worker {
             rate_window,
             sizes: Vec::new(),
             finished: false,
+            paused: false,
+            held: Vec::new(),
             evicted_at_round: 0,
             acc: Between::default(),
         }
     }
 
-    /// Nothing to train: no views yet, or paused by Finish.
+    /// Nothing to train: no views yet, paused by Finish, or paused by the app.
     fn idle(&self) -> bool {
-        self.live.views().is_empty() || self.finished
+        self.live.views().is_empty() || self.finished || self.paused
     }
 
     async fn handle(&mut self, cmd: Command) {
         match cmd {
+            Command::Keyframe(h, payload, reply) if self.paused => {
+                self.held.push((h, payload, reply));
+            }
+            Command::Pause(paused, reply) => {
+                self.paused = paused;
+                if !paused {
+                    for (h, payload, held_reply) in std::mem::take(&mut self.held) {
+                        let result = self.add_keyframe(&h, &payload).await;
+                        publish_counts(&self.channels.status, &self.live);
+                        let _ = held_reply.send(result);
+                    }
+                }
+                let _ = reply.send(());
+            }
             Command::Keyframe(h, payload, reply) => {
                 let result = self.add_keyframe(&h, &payload).await;
                 // Counts are visible to the caller as soon as the push resolves.
@@ -248,6 +268,9 @@ impl Worker {
 
     /// Clears everything but the score set version, which keeps counting.
     fn reset(&mut self) {
+        for (_, _, held_reply) in self.held.drain(..) {
+            let _ = held_reply.send(Err("session reset".to_owned()));
+        }
         let config = &self.config;
         self.live = LiveModel::new(config.clone(), self.device.clone());
         self.voxels.reset();

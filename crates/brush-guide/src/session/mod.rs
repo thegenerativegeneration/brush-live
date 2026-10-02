@@ -75,6 +75,8 @@ enum Command {
     /// Export the splats; `true` also pauses training until the next new keyframe.
     Export(bool, oneshot::Sender<Result<Vec<u8>, String>>),
     Reset(oneshot::Sender<()>),
+    /// `true` stops training, rounds and keyframe decoding until `false`.
+    Pause(bool, oneshot::Sender<()>),
 }
 
 /// Handle to one capture session: a worker that trains on incoming keyframes
@@ -194,6 +196,16 @@ impl GuideSession {
     pub async fn reset(&self) {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(Command::Reset(tx)).await.is_ok() {
+            let _ = rx.await;
+        }
+    }
+
+    /// Pauses or resumes the worker; returns once it has applied the change,
+    /// i.e. after the training step or round in progress. While paused no GPU
+    /// work is submitted and `push_keyframe` waits for the resume.
+    pub async fn set_paused(&self, paused: bool) {
+        let (tx, rx) = oneshot::channel();
+        if self.tx.send(Command::Pause(paused, tx)).await.is_ok() {
             let _ = rx.await;
         }
     }

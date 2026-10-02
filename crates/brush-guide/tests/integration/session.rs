@@ -189,3 +189,36 @@ async fn warm_up_runs_the_session_kernels_on_dummy_splats() {
     let secs = brush_guide::warmup::warm_up(&config, &device).await;
     assert!(secs > 0.0 && secs.is_finite());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn paused_session_holds_keyframes_and_stops_training_until_resumed() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-session-pause-{}", std::process::id()));
+    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
+    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+    session.push_keyframe(h, p).await.unwrap();
+    // Let training publish a rate once, so a running worker would publish again within the window below.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while session.status().borrow().train_iters == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    session.set_paused(true).await;
+    let iters = session.status().borrow().train_iters;
+    let (h, p) = test_scene::keyframe(1, Vec3::new(1.0, 0.0, 2.0));
+    let pusher = session.clone();
+    let push = tokio::spawn(async move { pusher.push_keyframe(h, p).await });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert!(!push.is_finished(), "a keyframe waits while paused");
+    assert_eq!(session.status().borrow().train_iters, iters, "no training while paused");
+    assert_eq!(session.status().borrow().num_keyframes, 1);
+
+    session.set_paused(false).await;
+    tokio::time::timeout(Duration::from_secs(10), push)
+        .await
+        .expect("acked after resume")
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.status().borrow().num_keyframes, 2);
+    std::fs::remove_dir_all(dir).ok();
+}
