@@ -71,6 +71,11 @@ impl WarmupControl {
 /// Sets up wgpu with the Metal graphics API once per process, and returns
 /// the autodiff device. `AutoGraphicsApi` would ask for Vulkan on iOS, so a
 /// failed setup is retried, never skipped. `None` if there is no GPU adapter.
+/// Kernels per Metal command buffer. iOS aborts a foreground app's command
+/// buffers that hold up display rendering (kIOGPUCommandBufferCallbackError
+/// ImpactingInteractivity); short buffers let RealityKit's frames interleave.
+const GPU_TASKS_PER_SUBMIT: usize = 8;
+
 fn device(runtime: &tokio::runtime::Runtime) -> Option<burn::tensor::Device> {
     static READY: Mutex<bool> = Mutex::new(false);
     let mut ready = READY.lock().unwrap_or_else(PoisonError::into_inner);
@@ -79,7 +84,7 @@ fn device(runtime: &tokio::runtime::Runtime) -> Option<burn::tensor::Device> {
             burn_wgpu::init_setup_async::<Metal>(
                 &WgpuDevice::default(),
                 RuntimeOptions {
-                    tasks_max: 64,
+                    tasks_max: GPU_TASKS_PER_SUBMIT,
                     memory_config: MemoryConfiguration::ExclusivePages,
                 },
             )
@@ -89,6 +94,30 @@ fn device(runtime: &tokio::runtime::Runtime) -> Option<burn::tensor::Device> {
         *ready = true;
     }
     Some(burn::tensor::Device::from(WgpuDevice::default()).autodiff())
+}
+
+/// Appends every panic's message and backtrace to `path` (on iOS, stderr is
+/// lost), then runs the previous hook. Installed once per process.
+fn record_panics(path: PathBuf) {
+    static INSTALLED: AtomicBool = AtomicBool::new(false);
+    if INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let thread = std::thread::current();
+        let text = format!(
+            "--- panic on thread {:?} at {:?}\n{info}\n{}\n",
+            thread.name().unwrap_or("?"),
+            std::time::SystemTime::now(),
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = f.write_all(text.as_bytes());
+        }
+        previous(info);
+    }));
 }
 
 unsafe fn str_arg<'a>(p: *const c_char) -> Option<&'a str> {
@@ -124,6 +153,7 @@ pub unsafe extern "C" fn bge_new(
         out.error("engine: session directory missing");
         return std::ptr::null_mut();
     };
+    record_panics(PathBuf::from(dir).join("engine-panic.txt"));
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(r) => r,
         Err(e) => {
