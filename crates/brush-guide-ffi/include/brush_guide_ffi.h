@@ -26,6 +26,13 @@ void bge_reset(BgeEngine *engine);
 // Returns once no GPU work is running (a warm-up pauses between sizes).
 void bge_pause(BgeEngine *engine);
 void bge_resume(BgeEngine *engine);
+// Runs the session warm-up (GPU autotuning at the configured splat budget and keyframe size) and
+// returns when it is done: 0 on success, 1 on a config error, no GPU or a failed warm-up. Takes the
+// same config JSON as bge_new (including gpu_autotune_level / gpu_autotune_samples) and uses the same
+// process-wide GPU device, so a later bge_new reuses the tuning. Blocking: call it from a background
+// thread, not from inside out. May run while a capture's bge_new / bge_push are running; the device
+// setup is shared and guarded.
+int32_t bge_warm_up(const char *config_json);
 // Stops the engine; out is not called after it returns. No other bge_* call may
 // be in progress on any thread.
 void bge_free(BgeEngine *engine);

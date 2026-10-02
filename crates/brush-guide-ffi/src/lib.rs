@@ -161,6 +161,14 @@ fn set_autotune(json: &str) {
     }
 }
 
+fn parse_config(json: &str) -> Result<GuideConfig, serde_json::Error> {
+    if json.trim().is_empty() {
+        Ok(GuideConfig::default())
+    } else {
+        serde_json::from_str(json)
+    }
+}
+
 unsafe fn str_arg<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
@@ -183,7 +191,7 @@ pub unsafe extern "C" fn bge_new(
 ) -> *mut BgeEngine {
     let out = Arc::new(Out { f: out, ctx });
     let json = unsafe { str_arg(config_json) }.unwrap_or("");
-    let config: GuideConfig = match if json.trim().is_empty() { Ok(GuideConfig::default()) } else { serde_json::from_str(json) } {
+    let config = match parse_config(json) {
         Ok(c) => c,
         Err(e) => {
             out.error(format!("engine config: {e}"));
@@ -335,6 +343,34 @@ pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
     if e.session_paused.swap(false, Ordering::SeqCst) {
         e.runtime.block_on(e.session.set_paused(false));
     }
+}
+
+/// Runs the session warm-up to completion. `config_json` is read as in
+/// `bge_new`. Returns 0 on success, 1 on a config error, no GPU adapter or a
+/// panic in the warm-up. The tuning is kept in memory by the process-wide
+/// device, so later sessions reuse it.
+///
+/// # Safety
+/// `config_json` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bge_warm_up(config_json: *const c_char) -> i32 {
+    let json = unsafe { str_arg(config_json) }.unwrap_or("");
+    let Ok(config) = parse_config(json) else {
+        return 1;
+    };
+    set_autotune(json);
+    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread().enable_all().build() else {
+        return 1;
+    };
+    let Some(device) = device(&runtime) else {
+        return 1;
+    };
+    let warmup = Warmup::spawn(config, device);
+    let mut ready = warmup.ready();
+    let done = runtime.block_on(ready.wait_for(|r| *r)).is_ok();
+    drop(warmup);
+    runtime.shutdown_background();
+    i32::from(!done)
 }
 
 /// Stops the session and frees the engine; `out` is not called afterwards.
