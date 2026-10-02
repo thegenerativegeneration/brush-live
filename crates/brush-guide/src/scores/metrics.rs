@@ -9,7 +9,7 @@ pub struct CoverageParams {
     /// Angular spread (1 − mean resultant length) that counts as full. A uniform
     /// hemisphere gives 0.5; a ±45° arc about 0.1.
     pub spread_target: f32,
-    /// Best observed pixels per metre below which the Gaussian counts as blurry.
+    /// Best observed pixels per metre (at a REFERENCE_LONG_SIDE image) below which the Gaussian counts as blurry.
     pub min_px_per_m: f32,
     pub low_res_penalty: f32,
 }
@@ -23,6 +23,15 @@ impl Default for CoverageParams {
             low_res_penalty: 0.5,
         }
     }
+}
+
+/// Image long side at which `CoverageParams::min_px_per_m` is defined.
+pub const REFERENCE_LONG_SIDE: f32 = 960.0;
+
+/// A view's focal length in pixels rescaled to a `REFERENCE_LONG_SIDE` image,
+/// so pixels per metre mean the same working distance at any keyframe size.
+pub fn reference_focal(focal: f32, img_size: glam::UVec2) -> f32 {
+    focal * REFERENCE_LONG_SIDE / img_size.max_element().max(1) as f32
 }
 
 pub fn coverage_score(dir_sum: Vec3, weight: f32, max_px_per_m: f32, p: &CoverageParams) -> f32 {
@@ -180,5 +189,16 @@ mod tests {
             f32::INFINITY
         );
         assert_eq!(position_sigma(&diag(-5.0), RIDGE, 0.05), f32::INFINITY);
+    }
+
+    #[test]
+    fn reference_focal_is_independent_of_image_size() {
+        let at_960 = reference_focal(1334.0, glam::UVec2::new(960, 720));
+        let at_500 = reference_focal(1334.0 * 500.0 / 960.0, glam::UVec2::new(500, 375));
+        assert!((at_960 - 1334.0).abs() < 1e-3);
+        assert!((at_500 - at_960).abs() < 1e-2, "{at_500} vs {at_960}");
+        // Portrait images use their long side too.
+        let portrait = reference_focal(1334.0 * 500.0 / 960.0, glam::UVec2::new(375, 500));
+        assert!((portrait - at_960).abs() < 1e-2);
     }
 }

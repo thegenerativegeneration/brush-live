@@ -4,6 +4,7 @@ use brush_render::gaussian_splats::Splats;
 use burn::module::Module;
 use burn::tensor::{Distribution, Tensor, s};
 use glam::{UVec2, Vec3};
+use super::metrics::reference_focal;
 
 pub struct PassView {
     pub camera: Camera,
@@ -107,7 +108,7 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
         let dir = to_g / dist.clone();
         dir_sum = dir_sum + dir * (observed.clone() * view.weight).unsqueeze_dim::<2>(1);
         weight = weight + observed.clone() * view.weight;
-        let focal = view.camera.focal(view.img_size).x;
+        let focal = reference_focal(view.camera.focal(view.img_size).x, view.img_size);
         let ppm = dist.squeeze_dim::<1>(1).recip() * focal * observed;
         max_ppm = max_ppm.max_pair(ppm);
         crate::timing::sync(&max_ppm).await;
