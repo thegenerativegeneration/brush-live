@@ -1,0 +1,20 @@
+[package]
+name = "brush-guide-ffi"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+name = "brush_guide_ffi"
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+brush-guide.path = "../brush-guide"
+brush-cube.path = "../brush-cube"
+burn = { workspace = true, features = ["autodiff"] }
+burn-wgpu.workspace = true
+serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "macros", "sync"] }
+
+[lints]
+workspace = true

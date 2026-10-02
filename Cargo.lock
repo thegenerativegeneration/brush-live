@@ -1122,6 +1122,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "brush-guide-ffi"
+version = "1.0.0"
+dependencies = [
+ "brush-cube",
+ "brush-guide",
+ "burn",
+ "burn-wgpu",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "brush-guide-server"
 version = "1.0.0"
 dependencies = [

@@ -10,6 +10,7 @@ members = [
     "crates/brush-cube",
     "crates/brush-dataset",
     "crates/brush-guide",
+    "crates/brush-guide-ffi",
     "crates/brush-guide-bench",
     "crates/brush-guide-server",
     "crates/brush-loss",
