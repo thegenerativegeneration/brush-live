@@ -38,12 +38,20 @@ struct Args {
     /// (useful headless, where spawning a viewer process fails).
     #[arg(long)]
     save: Option<PathBuf>,
+    /// Record nothing to rerun (no viewer, no .rrd); for scripted runs that
+    /// read only the dumps and stderr.
+    #[arg(long, conflicts_with = "save")]
+    no_viz: bool,
+    /// Send the export this many times in a row, each pass with new keyframe
+    /// ids, so the server holds `loops` views per frame (a longer capture).
+    #[arg(long, default_value_t = 1)]
+    loops: usize,
     /// Whether to send the export's depth (and confidence) alongside each keyframe.
     #[arg(long, value_enum, default_value_t = DepthMode::High)]
     depth: DepthMode,
     /// Append one JSON line per received `score_set` to this file. Each cell is
-    /// `[x, y, z, coverage, uncertainty, age, nx, ny, nz, density]`, with
-    /// `nx, ny, nz = 0, 0, 0` when the cell has no normal.
+    /// `[x, y, z, coverage, uncertainty, age, nx, ny, nz, density,
+    /// uninformed]`, with `nx, ny, nz = 0, 0, 0` when the cell has no normal.
     #[arg(long)]
     dump_scores: Option<PathBuf>,
     /// With `--dump-scores`, skip score sets arriving less than this many
@@ -75,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let points = feature_points(&args.dataset, &t);
     let rec = match &args.save {
+        _ if args.no_viz => rerun::RecordingStream::disabled(),
         Some(path) => rerun::RecordingStreamBuilder::new("capture-guidance-replay").save(path)?,
         None => rerun::RecordingStreamBuilder::new("capture-guidance-replay").spawn()?,
     };
@@ -129,7 +138,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Sends every frame of the export at `args.rate` and logs the camera path.
+/// Sends every frame of the export `args.loops` times at `args.rate` and logs
+/// the camera path.
 async fn send_keyframes<S>(
     args: &Args,
     t: &Transforms,
@@ -143,7 +153,8 @@ where
 {
     let mut path_points = Vec::new();
     let mut warned_missing_conf = false;
-    for (i, f) in t.frames.iter().enumerate() {
+    let frames = t.frames.iter().cycle().take(t.frames.len() * args.loops);
+    for (i, f) in frames.enumerate() {
         let (header, jpeg) = keyframe_header(args, t, f, i)?;
         let depth = load_depth(&args.dataset, f, args.depth)?;
         if let Some((_, confidence, _)) = &depth {

@@ -40,7 +40,11 @@ pub struct GuideConfig {
     /// Minimum start-to-start interval of Fisher passes.
     pub min_fisher_interval_s: f32,
     /// Views per Fisher pass at most: the newest third plus one view per
-    /// stratum of the rest, rotating (`schedule::ViewSample`).
+    /// stratum of the rest, rotating (`schedule::ViewSample`). With fewer
+    /// views (larger strata) the stripe share drifts up as the voxel set
+    /// grows (30 views: 0.10 -> 0.20 in `tools/quick-gate.sh`; 60 views:
+    /// flat at 0.10). The scheduler shortens a pass to what fits between
+    /// voxel rounds, an estimated 45 views at 750k splats.
     pub max_fisher_views: usize,
     /// Fewest views a Fisher pass is shortened to so it ends before the next
     /// voxel round is due.
@@ -88,9 +92,9 @@ impl Default for GuideConfig {
             loader_cache_bytes: 1 << 30,
             score_budget: 0.25,
             min_score_interval_s: 2.0,
-            fisher_budget: 0.1,
+            fisher_budget: 0.2,
             min_fisher_interval_s: 3.0,
-            max_fisher_views: 30,
+            max_fisher_views: 60,
             min_fisher_views: 12,
             warmup: true,
             sh_degree: 1,

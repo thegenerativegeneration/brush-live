@@ -49,7 +49,9 @@ impl Receiver {
         };
         if matches!(
             header,
-            ServerHeader::ScoreSet { .. } | ServerHeader::MeshBricks { .. }
+            ServerHeader::ScoreSet { .. }
+                | ServerHeader::MeshBricks { .. }
+                | ServerHeader::Status { .. }
         ) {
             eprint!("[{:8.2} s] ", self.started.elapsed().as_secs_f64());
         }
@@ -61,11 +63,16 @@ impl Receiver {
                 ..
             } => self.score_set(version, voxel_size, cell_bytes, payload),
             ServerHeader::Status {
+                num_keyframes,
                 num_splats,
                 train_iters_per_s,
                 last_score_ms,
-                ..
-            } => log_status(&self.rec, num_splats, train_iters_per_s, last_score_ms),
+            } => {
+                eprintln!(
+                    "status: {num_keyframes} keyframes, {num_splats} splats, {train_iters_per_s:.1} it/s, score {last_score_ms} ms"
+                );
+                log_status(&self.rec, num_splats, train_iters_per_s, last_score_ms);
+            }
             ServerHeader::MeshBricks {
                 version,
                 num_bricks,
