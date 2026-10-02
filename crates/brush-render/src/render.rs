@@ -38,7 +38,7 @@ fn checked_counts(
     num_tiles: u32,
 ) -> Option<(u32, u32)> {
     let max_intersections =
-        (u64::from(total_splats) * u64::from(num_tiles)).min(u64::from(MAX_COUNT));
+        (u64::from(num_visible) * u64::from(num_tiles)).min(u64::from(MAX_COUNT));
     (num_visible <= total_splats.min(MAX_COUNT)
         && u64::from(num_intersections) <= max_intersections)
         .then_some((num_visible, num_intersections))
@@ -63,6 +63,12 @@ mod tests {
     #[test]
     fn more_intersections_than_tiles_allow_fails() {
         assert_eq!(checked_counts(10, 601, 100, 6), None);
+    }
+
+    #[test]
+    fn more_intersections_than_visible_splats_hit_fails() {
+        assert_eq!(checked_counts(3, 1000, 100, 6), None);
+        assert_eq!(checked_counts(3, 18, 100, 6), Some((3, 18)));
     }
 
     #[test]
