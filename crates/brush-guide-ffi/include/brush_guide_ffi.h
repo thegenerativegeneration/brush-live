@@ -6,7 +6,13 @@
 
 typedef struct BgeEngine BgeEngine;
 
-// Called on engine threads with a server frame, valid only during the call.
+// Receives server frames; the frame is valid only during the call.
+// Threading: out is called on engine threads and also synchronously on the
+// calling thread inside bge_new, bge_push and bge_finish (ack, error, splat),
+// so calls can overlap; out and ctx must tolerate concurrent calls from
+// several threads. No bge_* function may be called from inside out. Ordering
+// across threads is not guaranteed: the ack of keyframe N can arrive after a
+// score set that already includes it.
 typedef void (*BgeOut)(void *ctx, const uint8_t *frame, size_t len);
 
 // config_json: GuideConfig overrides (may be ""). Returns NULL on failure after
@@ -17,7 +23,9 @@ int32_t bge_push(BgeEngine *engine, const uint8_t *frame, size_t len);
 // Writes the splat PLY and emits a splat frame.
 int32_t bge_finish(BgeEngine *engine, const char *ply_path);
 void bge_reset(BgeEngine *engine);
-// Returns once no GPU work is running; must not be called on the thread blocked in bge_push.
+// Returns once no GPU work is running (a warm-up pauses between sizes).
 void bge_pause(BgeEngine *engine);
 void bge_resume(BgeEngine *engine);
+// Stops the engine; out is not called after it returns. No other bge_* call may
+// be in progress on any thread.
 void bge_free(BgeEngine *engine);

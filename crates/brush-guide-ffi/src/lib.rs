@@ -10,8 +10,9 @@ use burn_wgpu::graphics::Metal;
 use burn_wgpu::{MemoryConfiguration, RuntimeOptions, WgpuDevice};
 use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use tokio::sync::watch;
 
 pub type BgeOut = extern "C" fn(ctx: *mut c_void, frame: *const u8, len: usize);
 
@@ -21,7 +22,7 @@ struct Out {
 }
 
 // The callback and its context are the host's; the host promises they may be
-// called from any thread (see the header).
+// called from any thread, several at a time (see the header).
 unsafe impl Send for Out {}
 unsafe impl Sync for Out {}
 
@@ -40,24 +41,51 @@ pub struct BgeEngine {
     session: GuideSession,
     out: Arc<Out>,
     forwarder: tokio::task::JoinHandle<()>,
-    _warmup: Option<Warmup>,
+    warmup: Option<WarmupControl>,
+    session_paused: AtomicBool,
 }
 
-/// Sets up wgpu with the Metal graphics API once per process.
-/// `AutoGraphicsApi` would ask for Vulkan on iOS.
-async fn device() -> burn::tensor::Device {
-    static READY: AtomicBool = AtomicBool::new(false);
-    if !READY.swap(true, Ordering::SeqCst) {
-        burn_wgpu::init_setup_async::<Metal>(
-            &WgpuDevice::default(),
-            RuntimeOptions {
-                tasks_max: 64,
-                memory_config: MemoryConfiguration::ExclusivePages,
-            },
-        )
-        .await;
+/// A running warm-up and the flag that pauses it between splat counts.
+struct WarmupControl {
+    warmup: Warmup,
+    pause: watch::Sender<bool>,
+}
+
+impl WarmupControl {
+    /// Pauses the warm-up; true once it is parked or done, so the session
+    /// may be commanded (it takes no commands before the warm-up is done).
+    async fn pause(&self) -> bool {
+        let _ = self.pause.send(true);
+        let mut parked = self.warmup.parked();
+        let mut ready = self.warmup.ready();
+        tokio::select! {
+            _ = parked.wait_for(|p| *p) => false,
+            _ = ready.wait_for(|r| *r) => true,
+        }
     }
-    burn::tensor::Device::from(WgpuDevice::default()).autodiff()
+}
+
+/// Sets up wgpu with the Metal graphics API once per process, and returns
+/// the autodiff device. `AutoGraphicsApi` would ask for Vulkan on iOS, so a
+/// failed setup is retried, never skipped. `None` if there is no GPU adapter.
+fn device(runtime: &tokio::runtime::Runtime) -> Option<burn::tensor::Device> {
+    static READY: Mutex<bool> = Mutex::new(false);
+    let mut ready = READY.lock().unwrap_or_else(PoisonError::into_inner);
+    if !*ready {
+        let init = async {
+            burn_wgpu::init_setup_async::<Metal>(
+                &WgpuDevice::default(),
+                RuntimeOptions {
+                    tasks_max: 64,
+                    memory_config: MemoryConfiguration::ExclusivePages,
+                },
+            )
+            .await;
+        };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(init))).ok()?;
+        *ready = true;
+    }
+    Some(burn::tensor::Device::from(WgpuDevice::default()).autodiff())
 }
 
 unsafe fn str_arg<'a>(p: *const c_char) -> Option<&'a str> {
@@ -100,15 +128,16 @@ pub unsafe extern "C" fn bge_new(
             return std::ptr::null_mut();
         }
     };
-    let device = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(device()))) {
-        Ok(d) => d,
-        Err(_) => {
-            out.error("engine: no Metal GPU adapter");
-            return std::ptr::null_mut();
-        }
+    let Some(device) = device(&runtime) else {
+        out.error("engine: no Metal GPU adapter");
+        return std::ptr::null_mut();
     };
-    let warmup = config.warmup.then(|| Warmup::spawn(config.clone(), device.clone()));
-    let ready = warmup.as_ref().map(Warmup::ready);
+    let warmup = config.warmup.then(|| {
+        let (pause, pause_rx) = watch::channel(false);
+        let warmup = Warmup::spawn_pausable(config.clone(), device.clone(), pause_rx);
+        WarmupControl { warmup, pause }
+    });
+    let ready = warmup.as_ref().map(|w| w.warmup.ready());
     let session = GuideSession::start_when(config, device, PathBuf::from(dir), ready);
     let forwarder = runtime.spawn({
         let session = session.clone();
@@ -126,7 +155,8 @@ pub unsafe extern "C" fn bge_new(
         session,
         out,
         forwarder,
-        _warmup: warmup,
+        warmup,
+        session_paused: AtomicBool::new(false),
     }))
 }
 
@@ -198,14 +228,23 @@ pub unsafe extern "C" fn bge_reset(e: *mut BgeEngine) {
     e.runtime.block_on(e.session.reset());
 }
 
-/// Stops all GPU work; returns after the step or round in progress.
+/// Stops all GPU work; returns after the step, round or warm-up size in
+/// progress.
 ///
 /// # Safety
 /// `e` comes from `bge_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_pause(e: *mut BgeEngine) {
     let e = unsafe { &*e };
+    if let Some(warmup) = &e.warmup
+        && !e.runtime.block_on(warmup.pause())
+    {
+        // The session takes no commands during the warm-up; `bge_resume`
+        // lets the warm-up go on.
+        return;
+    }
     e.runtime.block_on(e.session.set_paused(true));
+    e.session_paused.store(true, Ordering::SeqCst);
 }
 
 /// Resumes after `bge_pause`; held keyframes are added in order.
@@ -215,21 +254,35 @@ pub unsafe extern "C" fn bge_pause(e: *mut BgeEngine) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
     let e = unsafe { &*e };
-    e.runtime.block_on(e.session.set_paused(false));
+    if let Some(warmup) = &e.warmup {
+        let _ = warmup.pause.send(false);
+    }
+    if e.session_paused.swap(false, Ordering::SeqCst) {
+        e.runtime.block_on(e.session.set_paused(false));
+    }
 }
 
 /// Stops the session and frees the engine; `out` is not called afterwards.
 ///
 /// # Safety
-/// `e` comes from `bge_new` and is not used again.
+/// `e` comes from `bge_new` and is not used again; no other `bge_*` call is
+/// running.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_free(e: *mut BgeEngine) {
     if e.is_null() {
         return;
     }
     let e = unsafe { Box::from_raw(e) };
-    e.forwarder.abort();
-    let BgeEngine { runtime, session, .. } = *e;
+    let BgeEngine {
+        runtime,
+        session,
+        forwarder,
+        ..
+    } = *e;
+    // An aborted task is finished only once its future is dropped; after
+    // this, `out` is never called again.
+    forwarder.abort();
+    let _ = runtime.block_on(forwarder);
     drop(session);
     runtime.shutdown_background();
 }

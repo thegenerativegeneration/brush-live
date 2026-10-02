@@ -73,3 +73,39 @@ fn keyframes_in_acks_status_scores_pause_and_splat_out() {
     unsafe { bge_free(e) };
     std::fs::remove_dir_all(dir).ok();
 }
+
+extern "C" fn collect_into(ctx: *mut c_void, frame: *const u8, len: usize) {
+    let frames = unsafe { &*(ctx as *const Mutex<Vec<ServerHeader>>) };
+    let bytes = unsafe { std::slice::from_raw_parts(frame, len) };
+    let (h, _) = decode_frame::<ServerHeader>(bytes).expect("server frame");
+    frames.lock().unwrap().push(h);
+}
+
+#[test]
+fn pause_during_warm_up_returns_and_resume_lets_keyframes_through() {
+    let frames: Box<Mutex<Vec<ServerHeader>>> = Box::default();
+    let ctx = std::ptr::from_ref::<Mutex<Vec<ServerHeader>>>(&frames).cast_mut().cast::<c_void>();
+    let dir = std::env::temp_dir().join(format!("bge-ffi-warm-{}", std::process::id()));
+    let config = CString::new(r#"{"max_splats": 16384, "warmup": true}"#).unwrap();
+    let session_dir = CString::new(dir.to_str().unwrap()).unwrap();
+    let e = unsafe { bge_new(config.as_ptr(), session_dir.as_ptr(), collect_into, ctx) };
+    assert!(!e.is_null());
+
+    let (done, paused) = std::sync::mpsc::channel();
+    let handle = e as usize;
+    std::thread::spawn(move || {
+        unsafe { bge_pause(handle as *mut BgeEngine) };
+        done.send(()).ok();
+    });
+    paused
+        .recv_timeout(Duration::from_secs(30))
+        .expect("bge_pause returns while the warm-up runs");
+    unsafe { bge_resume(e) };
+
+    let f = wire(0);
+    assert_eq!(unsafe { bge_push(e, f.as_ptr(), f.len()) }, 0);
+    assert!(frames.lock().unwrap().iter().any(|h| matches!(h, ServerHeader::Ack { .. })));
+
+    unsafe { bge_free(e) };
+    std::fs::remove_dir_all(dir).ok();
+}

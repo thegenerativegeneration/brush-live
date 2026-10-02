@@ -27,18 +27,50 @@ use web_time::Instant;
 pub struct Warmup {
     _actor: brush_async::Actor,
     ready: watch::Receiver<bool>,
+    parked: watch::Receiver<bool>,
+}
+
+/// Pause control of a running warm-up: the flag to watch, and the signal
+/// that the warm-up is waiting on it.
+struct Gate {
+    pause: watch::Receiver<bool>,
+    parked: watch::Sender<bool>,
+}
+
+impl Gate {
+    /// Returns once the pause flag is clear, parking in the meantime.
+    async fn pass(&mut self) {
+        if !*self.pause.borrow() {
+            return;
+        }
+        let _ = self.parked.send(true);
+        let _ = self.pause.wait_for(|paused| !paused).await;
+        let _ = self.parked.send(false);
+    }
 }
 
 impl Warmup {
     /// Starts [`warm_up`]; keep the returned value alive until it is done.
     pub fn spawn(config: GuideConfig, device: Device) -> Self {
+        Self::spawn_pausable(config, device, watch::channel(false).1)
+    }
+
+    /// Like [`Self::spawn`], but the warm-up stops between splat counts while
+    /// `pause` is true; the count in progress finishes first. [`Self::parked`]
+    /// tells when it waits.
+    pub fn spawn_pausable(config: GuideConfig, device: Device, pause: watch::Receiver<bool>) -> Self {
         let (tx, ready) = watch::channel(false);
+        let (parked_tx, parked) = watch::channel(false);
+        let mut gate = Gate {
+            pause,
+            parked: parked_tx,
+        };
         let actor = brush_async::Actor::new("brush-guide-warmup");
         actor
             .run(move || async move {
                 let sizes = warmup_sizes(config.max_splats);
                 log::info!("warm-up: {} splat counts up to {}", sizes.len(), config.max_splats);
-                let secs = warm_up(&config, &device).await;
+                let secs = warm_up_gated(&config, &device, Some(&mut gate)).await;
                 log::info!("warm-up done in {secs:.1} s; sessions start now");
                 let _ = tx.send(true);
             })
@@ -46,7 +78,13 @@ impl Warmup {
         Self {
             _actor: actor,
             ready,
+            parked,
         }
+    }
+
+    /// True while the warm-up waits for its pause flag to clear.
+    pub fn parked(&self) -> watch::Receiver<bool> {
+        self.parked.clone()
     }
 
     pub fn ready(&self) -> watch::Receiver<bool> {
@@ -78,6 +116,10 @@ pub fn warmup_sizes(max_splats: u32) -> Vec<u32> {
 /// colour renders of TSDF fusion. `device` is the autodiff device. Returns
 /// the seconds it took.
 pub async fn warm_up(config: &GuideConfig, device: &Device) -> f64 {
+    warm_up_gated(config, device, None).await
+}
+
+async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&mut Gate>) -> f64 {
     let start = Instant::now();
     let image = warmup_image(config.keyframe_long_side);
     let fov = 2.0 * (f64::from(image.x) / 2.0 / 700.0).atan();
@@ -92,6 +134,9 @@ pub async fn warm_up(config: &GuideConfig, device: &Device) -> f64 {
     );
     let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
     for n in warmup_sizes(config.max_splats) {
+        if let Some(gate) = gate.as_deref_mut() {
+            gate.pass().await;
+        }
         let t = Instant::now();
         let splats = dummy_splats(n, &camera, &mut rng, &device.clone().inner())
             .with_sh_degree(config.sh_degree);
