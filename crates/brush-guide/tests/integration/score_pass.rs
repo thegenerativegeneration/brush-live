@@ -1,6 +1,7 @@
 use crate::test_scene;
 
 use brush_guide::scores::pass::{PassConfig, PassView, score_pass};
+use brush_guide::scores::metrics::reference_focal;
 use brush_render::bwd::render_splats;
 use burn::module::Module;
 use burn::tensor::{Tensor, s};
@@ -157,7 +158,7 @@ async fn px_per_m_uses_capture_resolution() {
     let device = device().await.autodiff();
     let splats = splats_from(&[[0.0, 0.0, 2.0]], -2.0, 0.6, &device);
     let camera = camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0));
-    let expected = camera.focal(SIZE).x / 2.0;
+    let expected = reference_focal(camera.focal(SIZE).x, SIZE) / 2.0;
     for render_scale in [1.0, 0.5] {
         let view = PassView {
             camera,
@@ -176,6 +177,42 @@ async fn px_per_m_uses_capture_resolution() {
             out.max_px_per_m[0]
         );
     }
+}
+
+#[tokio::test]
+async fn score_pass_is_size_independent() {
+    let device = device().await.autodiff();
+    let splats = splats_from(&[[0.0, 0.0, 2.0]], -2.0, 0.6, &device);
+    let camera = camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0));
+
+    // Same camera at two different image sizes: same field of view, different resolutions.
+    let size_16 = UVec2::new(16, 16);
+    let size_32 = UVec2::new(32, 32);
+
+    let view_16 = PassView {
+        camera,
+        img_size: size_16,
+        weight: 1.0,
+    };
+    let view_32 = PassView {
+        camera,
+        img_size: size_32,
+        weight: 1.0,
+    };
+
+    let cfg = PassConfig::default();
+    let out_16 = score_pass(&splats, &[view_16], &cfg).await;
+    let out_32 = score_pass(&splats, &[view_32], &cfg).await;
+
+    // max_px_per_m should be the same after reference scaling, within tight tolerance.
+    let rel = (out_16.max_px_per_m[0] - out_32.max_px_per_m[0]).abs() / out_16.max_px_per_m[0];
+    assert!(
+        rel < 1e-2,
+        "16x16 {} vs 32x32 {}, relative error {}",
+        out_16.max_px_per_m[0],
+        out_32.max_px_per_m[0],
+        rel
+    );
 }
 
 #[tokio::test]
