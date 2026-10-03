@@ -52,6 +52,19 @@ async fn read_vec<const D: usize>(t: Tensor<D>) -> Vec<f32> {
         .expect("f32 scores")
 }
 
+/// A Gaussian counts as observed when its trace exceeds `rel_eps` times the
+/// mean trace over Gaussians whose own trace is finite. A Gaussian with a
+/// non-finite trace is excluded from that mean and never counts as observed
+/// itself, so one broken Gaussian cannot blind the rest of the view.
+fn observed_mask(trace: Tensor<1>, rel_eps: f32) -> Tensor<1> {
+    let n = trace.dims()[0];
+    let non_finite = trace.clone().is_nan().bool_or(trace.clone().is_inf());
+    let finite_count = non_finite.clone().bool_not().float().sum().clamp_min(1.0);
+    let finite_sum = trace.clone().mask_fill(non_finite, 0.0).sum();
+    let threshold = finite_sum / finite_count * rel_eps;
+    trace.greater(threshold.expand([n])).float()
+}
+
 /// One forward/backward per view and probe. Back-propagating `Σ r·render` with
 /// Rademacher `r` gives gradients `g` with `E[g gᵀ] = Σ_p J_p J_pᵀ`, the Fisher
 /// of the render, independent of any ground-truth image.
@@ -97,10 +110,7 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
             trace = trace + j.powi_scalar(2).sum_dim(1).squeeze_dim(1) / samples as f32;
         }
 
-        // Mean over all Gaussians: zero only when no Gaussian contributed,
-        // and then the strict comparison observes nothing.
-        let threshold = trace.clone().mean().mul_scalar(cfg.observed_rel_eps);
-        let observed = trace.greater(threshold.expand([n])).float();
+        let observed = observed_mask(trace, cfg.observed_rel_eps);
         let cam = view.camera.position;
         let cam_t = Tensor::<1>::from_floats([cam.x, cam.y, cam.z], &inner).reshape([1, 3]);
         let to_g = means.clone() - cam_t;
@@ -138,4 +148,30 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
         t_read.elapsed().as_secs_f64() * 1e3
     );
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::tensor::Device;
+
+    async fn device() -> Device {
+        Device::from(brush_cube::test_helpers::test_device().await)
+    }
+
+    /// One Gaussian's own trace is non-finite; it must not pull the
+    /// threshold for the rest of the view off to NaN or infinity.
+    #[tokio::test]
+    async fn one_non_finite_trace_does_not_blind_the_rest() {
+        let device = device().await;
+        let trace = Tensor::<1>::from_floats([1.0, f32::NAN, 2.0], &device);
+        let mask = observed_mask(trace, 1e-6);
+        let v: Vec<f32> = mask
+            .into_data_async()
+            .await
+            .expect("mask readback")
+            .try_to_vec::<f32>()
+            .expect("f32 mask");
+        assert_eq!(v, vec![1.0, 0.0, 1.0]);
+    }
 }
