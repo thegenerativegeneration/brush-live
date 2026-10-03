@@ -7,6 +7,7 @@
 
 use crate::adam_scaled::{AdamScaled, AdamState};
 use brush_render::camera::Camera;
+use brush_render::kernels::camera_model::CameraModel;
 use burn::tensor::{Device, Gradients, Tensor};
 use glam::{UVec2, Vec3};
 
@@ -66,10 +67,20 @@ pub fn sh_basis(dirs: Tensor<2>) -> Tensor<2> {
 /// `(i, j)`'s centre at `i + 0.5`, local ray `((px - cx)/fx, (py - cy)/fy,
 /// 1)`); the world rotation matches Brush's forward axis used throughout
 /// `brush-guide` (`camera.rotation * Vec3::Z`, see e.g. `live.rs`'s
-/// `view_cones`). A non-pinhole `camera_model` would need its own
-/// unprojection; callers render training views as pinhole, so this only
-/// supports that.
+/// `view_cones`).
+///
+/// Panics if `camera.camera_model` isn't `Pinhole`: a fisheye/KB4 camera's
+/// `focal()` comes from that model's own (non-linear) FOV formula, which
+/// this pinhole unprojection would silently misinterpret into the wrong
+/// direction for every pixel but the centre. `brush-guide` keyframes are
+/// always pinhole; a non-pinhole caller needs its own unprojection, not a
+/// silently-wrong one.
 pub fn pixel_dirs(camera: &Camera, size: UVec2) -> Vec<f32> {
+    assert!(
+        matches!(camera.camera_model, CameraModel::Pinhole),
+        "pixel_dirs only supports a pinhole camera_model, got {:?}",
+        camera.camera_model
+    );
     let focal = camera.focal(size);
     let centre = camera.center(size);
     let rotation = camera.rotation;
@@ -288,6 +299,35 @@ mod tests {
         let idx = (50 * 101 + 50) * 3;
         let d = Vec3::new(dirs[idx], dirs[idx + 1], dirs[idx + 2]);
         assert!((d - Vec3::NEG_Z).length() < 1e-3, "flipped centre dir {d:?}");
+    }
+
+    #[test]
+    fn pixel_dirs_90_degree_yaw_moves_centre_to_plus_x() {
+        // Catches a transposed/inverted rotation that a 180-degree test
+        // can't: 180 degrees is its own inverse, so `rotation.inverse() *
+        // local` (world-to-camera, the wrong direction) would also pass
+        // that test. A 90-degree yaw breaks the symmetry: camera-to-world
+        // rotation puts the centre ray at +X; the inverse would give -X.
+        let size = UVec2::new(101, 101);
+        let cam = test_camera(glam::Quat::from_rotation_y(std::f32::consts::FRAC_PI_2));
+        let dirs = pixel_dirs(&cam, size);
+        let idx = (50 * 101 + 50) * 3;
+        let d = Vec3::new(dirs[idx], dirs[idx + 1], dirs[idx + 2]);
+        assert!((d - Vec3::X).length() < 1e-3, "90-degree-yaw centre dir {d:?}");
+    }
+
+    #[test]
+    #[should_panic(expected = "pixel_dirs only supports a pinhole camera_model")]
+    fn pixel_dirs_rejects_non_pinhole_cameras() {
+        let cam = Camera::new(
+            Vec3::ZERO,
+            glam::Quat::IDENTITY,
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::FRAC_PI_2,
+            glam::vec2(0.5, 0.5),
+            CameraModel::KannalaBrandt4(Default::default()),
+        );
+        let _ = pixel_dirs(&cam, UVec2::new(16, 16));
     }
 
     #[tokio::test]

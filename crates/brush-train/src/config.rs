@@ -146,7 +146,7 @@ pub struct TrainConfig {
     /// render (`rgb + (1 - alpha) * sh_background(view_dir)`) instead of a
     /// flat colour, so sky and at-infinity pixels get a legitimate
     /// explanation without growing near-camera floaters. Off by default:
-    /// the render keeps today's flat `background_color` compositing.
+    /// the render then composites with the flat `background_color` below.
     #[arg(long, help_heading = "Training options", default_value = "false")]
     pub sh_background: bool,
 

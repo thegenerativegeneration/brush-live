@@ -99,16 +99,21 @@ pub struct SplatTrainer {
     /// is off, so the flag-off step never builds a basis, a background image,
     /// or any extra graph node (see `step`'s `if let Some(..)` guard).
     sh_background: Option<ShBackground>,
-    /// Per-view direction-basis cache for the SH background, keyed by camera
-    /// and render size. FIFO-bounded (see `SH_BASIS_CACHE_CAP`) rather than
-    /// unbounded, so a long session's distinct keyframe count can't grow it
-    /// forever; dropped whole when a new `SplatTrainer` replaces this one
-    /// (session reset constructs a fresh trainer, see `brush_guide::live`).
+    /// Per-view direction cache for the SH background, keyed by camera and
+    /// render size. Caches `pixel_dirs`'s `[h*w, 3]` directions, not the
+    /// `[h*w, 9]` SH basis built from them — `sh_basis` is a few elementwise
+    /// ops plus one small matmul, cheap enough to redo on every cache hit,
+    /// so caching it too would only triple this cache's footprint for no
+    /// reason. FIFO-bounded (see `SH_BASIS_CACHE_CAP`) rather than unbounded,
+    /// so a long session's distinct keyframe count can't grow it forever;
+    /// dropped whole when a new `SplatTrainer` replaces this one (session
+    /// reset constructs a fresh trainer, see `brush_guide::live`).
     sh_basis_cache: Vec<(brush_render::camera::Camera, glam::UVec2, Tensor<2>)>,
 }
 
-/// Cap on `SplatTrainer::sh_basis_cache`'s entries. Each is `h*w*9` f32s
-/// (e.g. ~1.6 MB at 960x540); this bounds the cache at a few hundred MB
+/// Cap on `SplatTrainer::sh_basis_cache`'s entries. Each is `h*w*3` f32s —
+/// at 64 entries, roughly 400 MB at a full 960x540 keyframe size, roughly
+/// 150 MB at the 500 px-long-side quick-gate regime. Bounds the cache
 /// regardless of how many distinct keyframes a session accumulates.
 const SH_BASIS_CACHE_CAP: usize = 64;
 
@@ -475,32 +480,34 @@ impl SplatTrainer {
         }
     }
 
-    /// `camera`'s cached direction basis at `size`, computing and caching it
-    /// on a miss. FIFO-bounded at [`SH_BASIS_CACHE_CAP`] entries (oldest
-    /// evicted first) — see `sh_basis_cache`'s docs on why a hard cap and not
-    /// just "one per keyframe".
+    /// `camera`'s SH basis at `size`, rebuilt each call from a cached
+    /// direction tensor (computing and caching the directions on a miss).
+    /// FIFO-bounded at [`SH_BASIS_CACHE_CAP`] entries (oldest evicted first)
+    /// — see `sh_basis_cache`'s docs on why a hard cap and not just "one per
+    /// keyframe".
     fn sh_basis_for(
         &mut self,
         camera: &brush_render::camera::Camera,
         size: glam::UVec2,
         device: &Device,
     ) -> Tensor<2> {
-        if let Some((_, _, basis)) = self
+        let dirs = if let Some((_, _, dirs)) = self
             .sh_basis_cache
             .iter()
             .find(|(c, s, _)| c == camera && *s == size)
         {
-            return basis.clone();
-        }
-        let dirs = pixel_dirs(camera, size);
-        let n = (size.x * size.y) as usize;
-        let dirs = Tensor::<1>::from_floats(dirs.as_slice(), device).reshape([n, 3]);
-        let basis = sh_basis(dirs);
-        if self.sh_basis_cache.len() >= SH_BASIS_CACHE_CAP {
-            self.sh_basis_cache.remove(0);
-        }
-        self.sh_basis_cache.push((*camera, size, basis.clone()));
-        basis
+            dirs.clone()
+        } else {
+            let flat = pixel_dirs(camera, size);
+            let n = (size.x * size.y) as usize;
+            let dirs = Tensor::<1>::from_floats(flat.as_slice(), device).reshape([n, 3]);
+            if self.sh_basis_cache.len() >= SH_BASIS_CACHE_CAP {
+                self.sh_basis_cache.remove(0);
+            }
+            self.sh_basis_cache.push((*camera, size, dirs.clone()));
+            dirs
+        };
+        sh_basis(dirs)
     }
 
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
@@ -585,12 +592,16 @@ impl SplatTrainer {
             };
             // Only composite when there's a real alpha channel and a non-zero
             // bg to mix in; the kernel skips the per-pixel `(1-a)*bg` math
-            // entirely when this is None. The SH background's per-pixel
-            // globe can't be expressed as this kernel's single `Vec3`, so
-            // when it's on, the gt side is left as-is (no flat-colour
-            // compositing either) — the globe only has to explain the pred
-            // side; see Task 3's ledgered ruling for why this is fine for
-            // the real-photo case the globe targets (gt has no alpha there).
+            // entirely when this is None. `ImageLossConfig::composite_bg`
+            // only takes one flat `Vec3`, so it can't express the SH
+            // background's per-pixel globe — when the globe is on, the gt
+            // side gets no compositing at all (not even flat-colour), and
+            // only the pred side is asked to explain transparent/sky pixels.
+            // That's exact for the globe's real target (photographed sky:
+            // `has_alpha` is false there, so this branch is `None` either
+            // way). It under-composites transparent GT for a
+            // synthetic/matted dataset with real alpha and the globe on —
+            // out of scope here; see `docs/superpowers/notes/sh-globe.md`.
             let composite_bg = (has_alpha && background != glam::Vec3::ZERO
                 && self.sh_background.is_none())
             .then_some(background);
