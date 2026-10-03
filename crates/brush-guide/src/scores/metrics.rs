@@ -18,7 +18,7 @@ impl Default for CoverageParams {
     fn default() -> Self {
         Self {
             n_target: 8.0,
-            spread_target: 0.3,
+            spread_target: 0.2,
             min_px_per_m: 300.0,
             low_res_penalty: 0.5,
         }
