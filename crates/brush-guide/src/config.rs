@@ -80,6 +80,8 @@ pub struct GuideConfig {
     /// Plumbed into `TrainConfig::sh_background` — see its docs. Off by
     /// default; flag-off training is unchanged.
     pub sh_background: bool,
+    /// Plumbed into `TrainConfig::sh_background_alpha_weight`.
+    pub sh_background_alpha_weight: f32,
     /// Stop training after this many steps; keyframes are still ingested and
     /// `finish` still exports. For fixed-step measurement runs; `None` trains
     /// until the session ends.
@@ -124,6 +126,7 @@ impl Default for GuideConfig {
             seed: 42,
             min_depth_confidence: 2,
             sh_background: false,
+            sh_background_alpha_weight: 0.15,
             max_train_steps: None,
         }
     }

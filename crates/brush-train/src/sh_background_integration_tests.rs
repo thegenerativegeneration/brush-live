@@ -71,6 +71,7 @@ async fn globe_learns_opposed_camera_colours_in_world_space() {
     let mut config = TrainConfig::parse_from(["test"]);
     config.sh_background = true;
     config.sh_background_lr = 0.1;
+    config.sh_background_rest_lr = 0.1;
     config.match_alpha_weight = 0.0;
     let base = near_invisible_splat(&device);
     let bounds = get_splat_bounds(base.clone(), BOUND_PERCENTILE).await;
@@ -123,7 +124,7 @@ async fn flag_off_builds_no_background_module_or_basis_cache() {
         "flag off must never construct the globe module"
     );
     assert!(
-        trainer.sh_basis_cache.is_empty(),
-        "flag off must never build a direction basis"
+        trainer.sh_pixel_centres.is_none(),
+        "flag off must never build the pixel-centre grid"
     );
 }

@@ -101,6 +101,88 @@ pub fn pixel_dirs(camera: &Camera, size: UVec2) -> Vec<f32> {
     out
 }
 
+/// Pixel centres `(x + 0.5, y + 0.5)` of every pixel at `size`, `[h*w, 2]`,
+/// in [`pixel_dirs`]'s order. Depends only on the size, so the trainer builds
+/// it once per render size and [`world_dirs`] turns it into directions on the
+/// GPU for each camera.
+pub fn pixel_centres(size: UVec2, device: &Device) -> Tensor<2> {
+    let n = (size.x * size.y) as usize;
+    let mut out = Vec::with_capacity(n * 2);
+    for y in 0..size.y {
+        for x in 0..size.x {
+            out.push(x as f32 + 0.5);
+            out.push(y as f32 + 0.5);
+        }
+    }
+    Tensor::<1>::from_floats(out.as_slice(), device).reshape([n, 2])
+}
+
+/// The tensor form of [`pixel_dirs`]: world-space unit ray directions,
+/// `[h*w, 3]`, from [`pixel_centres`]. Only the camera's intrinsics and
+/// rotation are uploaded per call. Same pinhole-only restriction.
+pub fn world_dirs(centres: Tensor<2>, camera: &Camera, size: UVec2) -> Tensor<2> {
+    assert!(
+        matches!(camera.camera_model, CameraModel::Pinhole),
+        "world_dirs only supports a pinhole camera_model, got {:?}",
+        camera.camera_model
+    );
+    let device = centres.device();
+    let n = centres.dims()[0];
+    let focal = camera.focal(size);
+    let centre = camera.center(size);
+    let offset = Tensor::<1>::from_floats([centre.x, centre.y], &device).reshape([1, 2]);
+    let inv_focal =
+        Tensor::<1>::from_floats([1.0 / focal.x, 1.0 / focal.y], &device).reshape([1, 2]);
+    let local = Tensor::cat(
+        vec![(centres - offset) * inv_focal, Tensor::ones([n, 1], &device)],
+        1,
+    );
+    // Row vectors times Rᵀ; Rᵀ in row-major order is R's column-major array.
+    let rotation_t = Tensor::<1>::from_floats(
+        glam::Mat3::from_quat(camera.rotation).to_cols_array(),
+        &device,
+    )
+    .reshape([3, 3]);
+    let world = (local.reshape([n, 3, 1]) * rotation_t.reshape([1, 3, 3]))
+        .sum_dim(1)
+        .reshape([n, 3]);
+    let norm = world.clone().powi_scalar(2).sum_dim(1).sqrt();
+    world / norm
+}
+
+/// Mean absolute RGB difference below which a GT pixel counts as explained
+/// by the background.
+const BG_MATCH_EPS: f32 = 0.003;
+/// Share of a pixel's 3x3 neighbourhood that must match for the pixel to
+/// count, so isolated matches inside textured regions are ignored.
+const BG_MATCH_NEIGHBOURHOOD: f32 = 0.6;
+
+/// Pixels the globe already explains, `[h, w]` of 0/1: mean `|gt - bg|`
+/// over RGB below [`BG_MATCH_EPS`], kept where more than
+/// [`BG_MATCH_NEIGHBOURHOOD`] of the zero-padded 3x3 neighbourhood matches.
+/// The mask of Splatfacto-W's background alpha loss.
+pub fn background_match_mask(gt: Tensor<3>, bg: Tensor<3>) -> Tensor<2> {
+    let [h, w, _] = gt.dims();
+    let device = gt.device();
+    let close = (gt - bg)
+        .abs()
+        .mean_dim(2)
+        .reshape([h, w])
+        .lower_elem(BG_MATCH_EPS)
+        .float();
+    let row = Tensor::<2>::zeros([1, w], &device);
+    let padded = Tensor::cat(vec![row.clone(), close, row], 0);
+    let col = Tensor::<2>::zeros([h + 2, 1], &device);
+    let padded = Tensor::cat(vec![col.clone(), padded, col], 1);
+    let mut sum = Tensor::<2>::zeros([h, w], &device);
+    for dy in 0..3 {
+        for dx in 0..3 {
+            sum = sum + padded.clone().slice([dy..dy + h, dx..dx + w]);
+        }
+    }
+    (sum / 9.0).greater_elem(BG_MATCH_NEIGHBOURHOOD).float()
+}
+
 /// The learned globe: degree-2 SH coefficients `[9, 3]`, with their own tiny
 /// Adam state (reusing `crate::adam_scaled`, the trainer's own optimizer, so
 /// the globe gets the same numerics as every other learned parameter).
@@ -113,21 +195,33 @@ pub struct ShBackground {
 impl ShBackground {
     /// Zero coefficients: `image(..)` is uniform mid-grey everywhere, so
     /// turning the flag on never perturbs a step's loss before the globe
-    /// has learned anything.
-    pub fn new(device: &Device) -> Self {
+    /// has learned anything. `rest_lr_ratio` scales the learning rate of the
+    /// eight non-DC rows relative to the DC row's `lr` passed to [`step`].
+    pub fn new(device: &Device, rest_lr_ratio: f32) -> Self {
+        let mut rows = [rest_lr_ratio; 9];
+        rows[0] = 1.0;
+        let scaling = Tensor::<1>::from_floats(rows, &device.clone().inner()).reshape([9, 1]);
         Self {
             coeffs: Tensor::<2>::zeros([9, 3], device).require_grad(),
             adam: AdamScaled::new(1e-8),
-            state: AdamState::new(None, false),
+            state: AdamState::new(Some(scaling), false),
         }
     }
 
     /// The globe's colour at each row of `basis` (an `[n, 9]` SH basis from
-    /// [`sh_basis`]): `clamp(basis · coeffs + 0.5, 0, 1)`, `[n, 3]`. The
+    /// [`sh_basis`]): `max(basis · coeffs + 0.5, 0)`, `[n, 3]`. The
     /// `+ 0.5` matches `brush_render::sh::rgb_to_sh`'s convention that SH
-    /// coefficients of zero decode to mid-grey, not black.
+    /// coefficients of zero decode to mid-grey, not black. No upper clamp:
+    /// it would zero the gradient wherever the globe reaches white, which
+    /// overexposed sky does all the time.
     pub fn image(&self, basis: Tensor<2>) -> Tensor<2> {
-        (basis.matmul(self.coeffs.clone()) + 0.5).clamp(0.0, 1.0)
+        // Broadcast-and-sum rather than `matmul`: the coefficient gradient is
+        // then a sum over all pixels, which reduces in parallel, whereas the
+        // matmul backward (`[9, n] x [n, 3]`) has only 27 outputs to spread a
+        // reduction over hundreds of thousands of pixels across.
+        let [n, k] = basis.dims();
+        let weighted = basis.reshape([n, k, 1]) * self.coeffs.clone().reshape([1, k, 3]);
+        (weighted.sum_dim(1).reshape([n, 3]) + 0.5).clamp_min(0.0)
     }
 
     /// The coefficients, on the autodiff graph — composite with this (not
@@ -333,7 +427,7 @@ mod tests {
     #[tokio::test]
     async fn sh_background_starts_uniform_grey() {
         let device = device().await.autodiff();
-        let bg = ShBackground::new(&device);
+        let bg = ShBackground::new(&device, 0.2);
         let dirs = [Vec3::X, Vec3::Y, Vec3::Z, Vec3::NEG_X, Vec3::NEG_Y];
         let basis = sh_basis(dirs_tensor_on(&dirs, &device));
         let image = bg.image(basis);
@@ -346,5 +440,94 @@ mod tests {
         for v in data {
             assert!((v - 0.5).abs() < EPS, "expected grey, got {v}");
         }
+    }
+
+    async fn read(t: Tensor<2>) -> Vec<f32> {
+        t.into_data_async()
+            .await
+            .expect("tensor data")
+            .try_into_vec()
+            .expect("tensor data")
+    }
+
+    #[tokio::test]
+    async fn world_dirs_match_pixel_dirs_for_a_rotated_off_centre_camera() {
+        let device = device().await;
+        let rotation = glam::Quat::from_axis_angle(Vec3::new(0.3, 1.0, -0.5).normalize(), 0.65);
+        let cam = Camera::new(
+            Vec3::new(1.0, -2.0, 0.5),
+            rotation,
+            1.1,
+            0.8,
+            glam::vec2(0.42, 0.57),
+            Pinhole,
+        );
+        let size = UVec2::new(37, 23);
+        let expected = pixel_dirs(&cam, size);
+        let got = read(world_dirs(pixel_centres(size, &device), &cam, size)).await;
+        assert_eq!(got.len(), expected.len());
+        let worst = got
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "max deviation from pixel_dirs: {worst}");
+    }
+
+    #[tokio::test]
+    async fn background_match_mask_keeps_matching_blocks_and_drops_isolated_pixels() {
+        let device = device().await;
+        let (h, w) = (8usize, 8usize);
+        let bg = Tensor::<3>::full([h, w, 3], 0.5, &device);
+        // GT equals bg in the left half; the right half differs except for a
+        // single matching pixel at (2, 6).
+        let mut gt = vec![0.5f32; h * w * 3];
+        for y in 0..h {
+            for x in w / 2..w {
+                if (y, x) != (2, 6) {
+                    for c in 0..3 {
+                        gt[(y * w + x) * 3 + c] = 0.9;
+                    }
+                }
+            }
+        }
+        let gt = Tensor::<1>::from_floats(gt.as_slice(), &device).reshape([h, w, 3]);
+        let mask = read(background_match_mask(gt, bg)).await;
+        let at = |y: usize, x: usize| mask[y * w + x];
+        assert_eq!(at(4, 1), 1.0, "interior of the matching block");
+        assert_eq!(at(4, 6), 0.0, "non-matching block");
+        assert_eq!(at(2, 6), 0.0, "an isolated match is not kept");
+        assert_eq!(at(0, 0), 0.0, "corner: zero padding leaves 4 of 9");
+        assert_eq!(at(0, 1), 1.0, "edge: zero padding leaves 6 of 9");
+    }
+
+    #[tokio::test]
+    async fn higher_bands_step_at_the_rest_lr_ratio() {
+        let device = device().await.autodiff();
+        let mut bg = ShBackground::new(&device, 0.2);
+        let dirs = [Vec3::new(0.6, 0.0, 0.8), Vec3::new(0.0, 0.6, -0.8), Vec3::new(-0.8, 0.6, 0.0)];
+        let basis = sh_basis(dirs_tensor_on(&dirs, &device));
+        let loss = (bg.image(basis) - 0.9).powi_scalar(2).sum();
+        let mut grads = loss.backward();
+        bg.step(&mut grads, 0.01);
+        let c = read(bg.coeffs().inner()).await;
+        // Adam's first step moves every coefficient with a gradient by ~lr.
+        assert!((c[0].abs() - 0.01).abs() < 1e-4, "DC step {}", c[0]);
+        let rest_max = c[3..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((rest_max - 0.002).abs() < 1e-4, "rest step {rest_max}");
+    }
+
+    #[tokio::test]
+    async fn image_is_not_clamped_above_one() {
+        let device = device().await.autodiff();
+        let mut bg = ShBackground::new(&device, 1.0);
+        let basis = sh_basis(dirs_tensor_on(&[Vec3::Z], &device));
+        for _ in 0..200 {
+            let loss = (bg.image(basis.clone()) - 1.5).powi_scalar(2).sum();
+            let mut grads = loss.backward();
+            bg.step(&mut grads, 0.05);
+        }
+        let v = read(bg.image(basis).inner()).await;
+        assert!(v.iter().all(|x| *x > 1.2), "globe should exceed 1 freely, got {v:?}");
     }
 }

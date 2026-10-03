@@ -150,10 +150,20 @@ pub struct TrainConfig {
     #[arg(long, help_heading = "Training options", default_value = "false")]
     pub sh_background: bool,
 
-    /// Learning rate for the SH background's own tiny Adam optimizer.
-    /// Unused when `sh_background` is off.
-    #[arg(long, help_heading = "Training options", default_value = "1e-2")]
+    /// Learning rate of the SH background's DC (base colour) coefficients,
+    /// in its own tiny Adam optimizer. Unused when `sh_background` is off.
+    #[arg(long, help_heading = "Training options", default_value = "2.5e-3")]
     pub sh_background_lr: f64,
+
+    /// Learning rate of the SH background's higher-band coefficients.
+    #[arg(long, help_heading = "Training options", default_value = "5e-4")]
+    pub sh_background_rest_lr: f64,
+
+    /// Weight of the penalty on splat opacity where the SH background
+    /// already matches the photo (mean |gt - background| < 0.003 over a
+    /// 3x3 neighbourhood). 0 disables it.
+    #[arg(long, help_heading = "Training options", default_value = "0.15")]
+    pub sh_background_alpha_weight: f32,
 }
 
 impl Default for TrainConfig {

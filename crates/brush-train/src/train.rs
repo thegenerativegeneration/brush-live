@@ -10,7 +10,7 @@ use crate::{
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
-    sh_background::{ShBackground, pixel_dirs, sh_basis},
+    sh_background::{ShBackground, background_match_mask, pixel_centres, sh_basis, world_dirs},
     splat_init::bounds_from_pos,
     stats::RefineRecord,
 };
@@ -99,23 +99,11 @@ pub struct SplatTrainer {
     /// is off, so the flag-off step never builds a basis, a background image,
     /// or any extra graph node (see `step`'s `if let Some(..)` guard).
     sh_background: Option<ShBackground>,
-    /// Per-view direction cache for the SH background, keyed by camera and
-    /// render size. Caches `pixel_dirs`'s `[h*w, 3]` directions, not the
-    /// `[h*w, 9]` SH basis built from them — `sh_basis` is a few elementwise
-    /// ops plus one small matmul, cheap enough to redo on every cache hit,
-    /// so caching it too would only triple this cache's footprint for no
-    /// reason. FIFO-bounded (see `SH_BASIS_CACHE_CAP`) rather than unbounded,
-    /// so a long session's distinct keyframe count can't grow it forever;
-    /// dropped whole when a new `SplatTrainer` replaces this one (session
-    /// reset constructs a fresh trainer, see `brush_guide::live`).
-    sh_basis_cache: Vec<(brush_render::camera::Camera, glam::UVec2, Tensor<2>)>,
+    /// Pixel centres for the SH background at the last render size (see
+    /// `sh_background::pixel_centres`); directions are rebuilt from it on the
+    /// GPU each step, so nothing per view is cached.
+    sh_pixel_centres: Option<(glam::UVec2, Tensor<2>)>,
 }
-
-/// Cap on `SplatTrainer::sh_basis_cache`'s entries. Each is `h*w*3` f32s —
-/// at 64 entries, roughly 400 MB at a full 960x540 keyframe size, roughly
-/// 150 MB at the 500 px-long-side quick-gate regime. Bounds the cache
-/// regardless of how many distinct keyframes a session accumulates.
-const SH_BASIS_CACHE_CAP: usize = 64;
 
 fn inv_sigmoid(x: Tensor<1>) -> Tensor<1> {
     (x.clone() / (1.0f32 - x)).log()
@@ -208,7 +196,12 @@ impl SplatTrainer {
         #[cfg(not(target_family = "wasm"))]
         let lpips = (config.lpips_loss_weight > 0.0).then(|| lpips::load_vgg_lpips(device));
 
-        let sh_background = config.sh_background.then(|| ShBackground::new(device));
+        let sh_background = config.sh_background.then(|| {
+            ShBackground::new(
+                device,
+                (config.sh_background_rest_lr / config.sh_background_lr) as f32,
+            )
+        });
 
         Self {
             config,
@@ -225,7 +218,7 @@ impl SplatTrainer {
             view_cams: Vec::new(),
             evict: None,
             sh_background,
-            sh_basis_cache: Vec::new(),
+            sh_pixel_centres: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
         }
@@ -480,34 +473,23 @@ impl SplatTrainer {
         }
     }
 
-    /// `camera`'s SH basis at `size`, rebuilt each call from a cached
-    /// direction tensor (computing and caching the directions on a miss).
-    /// FIFO-bounded at [`SH_BASIS_CACHE_CAP`] entries (oldest evicted first)
-    /// — see `sh_basis_cache`'s docs on why a hard cap and not just "one per
-    /// keyframe".
+    /// SH basis `[h*w, 9]` of `camera`'s world-space pixel directions at
+    /// `size`.
     fn sh_basis_for(
         &mut self,
         camera: &brush_render::camera::Camera,
         size: glam::UVec2,
         device: &Device,
     ) -> Tensor<2> {
-        let dirs = if let Some((_, _, dirs)) = self
-            .sh_basis_cache
-            .iter()
-            .find(|(c, s, _)| c == camera && *s == size)
-        {
-            dirs.clone()
-        } else {
-            let flat = pixel_dirs(camera, size);
-            let n = (size.x * size.y) as usize;
-            let dirs = Tensor::<1>::from_floats(flat.as_slice(), device).reshape([n, 3]);
-            if self.sh_basis_cache.len() >= SH_BASIS_CACHE_CAP {
-                self.sh_basis_cache.remove(0);
+        let centres = match &self.sh_pixel_centres {
+            Some((s, c)) if *s == size => c.clone(),
+            _ => {
+                let c = pixel_centres(size, device);
+                self.sh_pixel_centres = Some((size, c.clone()));
+                c
             }
-            self.sh_basis_cache.push((*camera, size, dirs.clone()));
-            dirs
         };
-        sh_basis(dirs)
+        sh_basis(world_dirs(centres, camera, size))
     }
 
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
@@ -624,6 +606,7 @@ impl SplatTrainer {
             // accumulated alpha into channel 3 regardless of the render
             // background — see `kernels::rasterize`'s `final_a`), keeping
             // the alpha channel itself untouched for the alpha-match path.
+            let mut globe_alpha_penalty = None;
             let pred_final = if self.sh_background.is_some() {
                 let basis = self.sh_basis_for(&camera, img_size, &device);
                 let bg_image = self
@@ -634,6 +617,17 @@ impl SplatTrainer {
                     .reshape([img_h, img_w, 3]);
                 let rgb = pred_image.clone().slice(s![.., .., 0..3]);
                 let alpha = pred_image.clone().slice(s![.., .., 3..4]);
+                let weight = self.config.sh_background_alpha_weight;
+                if weight > 0.0 {
+                    // Splatfacto-W's background alpha loss: where the globe
+                    // already matches the photo, opacity there is a floater.
+                    let gt_rgb = brush_loss::unpack_gt_rgb(gt_packed.clone(), None);
+                    let mask: Tensor<2> =
+                        Tensor::from_inner(background_match_mask(gt_rgb, bg_image.clone().inner()));
+                    let covered = alpha.clone().reshape([img_h, img_w]) * mask.clone();
+                    globe_alpha_penalty =
+                        Some(covered.sum() / mask.sum().clamp_min(1.0) * weight);
+                }
                 let composited = rgb + (1.0f32 - alpha.clone()) * bg_image;
                 Tensor::cat(vec![composited, alpha], 2)
             } else {
@@ -644,8 +638,10 @@ impl SplatTrainer {
             // globe on, the RGBA image with the globe composited in).
             // `loss` is only reassigned by the LPIPS path below, which is
             // compiled out on wasm — so `mut` is unused there.
-            #[cfg_attr(target_family = "wasm", allow(unused_mut))]
             let mut loss = image_loss(pred_final.clone(), gt_packed.clone(), cfg);
+            if let Some(penalty) = globe_alpha_penalty {
+                loss = loss + penalty;
+            }
 
             // LPIPS still needs an f32 RGB tensor for VGG. Materialising it
             // here costs ~99 MB at 4K, only when LPIPS is enabled.
