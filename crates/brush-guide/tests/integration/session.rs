@@ -245,3 +245,28 @@ async fn warm_up_parks_while_paused_and_finishes_once_released() {
         .expect("done once released")
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn step_cap_stops_training_but_keyframes_and_finish_still_work() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-session-cap-{}", std::process::id()));
+    let config = GuideConfig {
+        max_train_steps: Some(10),
+        ..GuideConfig::default()
+    };
+    let session = GuideSession::start(config, device, dir.clone());
+    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+    session.push_keyframe(h, p).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (h, p) = test_scene::keyframe(1, Vec3::new(1.0, 0.0, 2.0));
+    session.push_keyframe(h, p).await.unwrap();
+    assert_eq!(session.status().borrow().num_keyframes, 2);
+
+    let path = dir.join("splat.ply");
+    let len = tokio::time::timeout(Duration::from_secs(30), session.finish(&path))
+        .await
+        .expect("finish answers after the cap")
+        .unwrap();
+    assert!(len > 0);
+    std::fs::remove_dir_all(dir).ok();
+}

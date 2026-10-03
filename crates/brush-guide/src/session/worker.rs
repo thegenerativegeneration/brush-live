@@ -97,6 +97,9 @@ pub(super) async fn worker(
         w.live.train_step().await;
         w.acc.train_s += t.elapsed().as_secs_f64();
         w.acc.steps += 1;
+        if w.step_cap_reached() {
+            log::info!("max_train_steps reached: training stopped at step {}", w.live.iter());
+        }
         if w.preview.due(Instant::now()) {
             w.publish_preview().await;
         }
@@ -204,7 +207,11 @@ impl Worker {
 
     /// Nothing to train: no views yet, paused by Finish, or paused by the app.
     fn idle(&self) -> bool {
-        self.live.views().is_empty() || self.finished || self.paused
+        self.live.views().is_empty() || self.finished || self.paused || self.step_cap_reached()
+    }
+
+    fn step_cap_reached(&self) -> bool {
+        self.config.max_train_steps.is_some_and(|n| self.live.iter() >= n)
     }
 
     async fn handle(&mut self, cmd: Command) {

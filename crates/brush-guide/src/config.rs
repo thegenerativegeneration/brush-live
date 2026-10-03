@@ -80,6 +80,10 @@ pub struct GuideConfig {
     /// Plumbed into `TrainConfig::sh_background` — see its docs. Off by
     /// default; flag-off training is unchanged.
     pub sh_background: bool,
+    /// Stop training after this many steps; keyframes are still ingested and
+    /// `finish` still exports. For fixed-step measurement runs; `None` trains
+    /// until the session ends.
+    pub max_train_steps: Option<u32>,
 }
 
 impl Default for GuideConfig {
@@ -120,6 +124,7 @@ impl Default for GuideConfig {
             seed: 42,
             min_depth_confidence: 2,
             sh_background: false,
+            max_train_steps: None,
         }
     }
 }
