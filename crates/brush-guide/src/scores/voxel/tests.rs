@@ -377,4 +377,5 @@ fn non_finite_position_or_opacity_is_skipped() {
 }
 
 mod legacy;
+mod lifecycle;
 mod normals;

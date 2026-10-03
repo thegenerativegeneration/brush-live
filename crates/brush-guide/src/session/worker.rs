@@ -399,12 +399,13 @@ impl Worker {
             .cells(&geoms, &cones, self.clock.elapsed().as_secs_f64());
         log::debug!(
             target: crate::timing::TARGET,
-            "cells: splat readback {:.0} ms, gaussian prep {:.0} ms ({} cones), voxel aggregate {:.0} ms, {} cells",
+            "cells: splat readback {:.0} ms, gaussian prep {:.0} ms ({} cones), voxel aggregate {:.0} ms, {} cells, {} voxels tracked",
             t_read * 1e3,
             t_prep * 1e3,
             cones.len(),
             t.elapsed().as_secs_f64() * 1e3,
-            cells.len()
+            cells.len(),
+            self.voxels.tracked_voxels()
         );
         cells
     }

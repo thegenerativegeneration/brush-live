@@ -70,6 +70,12 @@ pub const UNINFORMED_COVERAGE: u8 = 0;
 /// information about it); such cells also carry `Cell::uninformed`.
 pub const UNINFORMED_UNCERTAINTY: u8 = 255;
 
+/// Voxel rounds a voxel's state survives with no Gaussian occupying it and
+/// no Fisher pass scoring it (~1 min at the 2 s cadence): long enough that
+/// an opacity flicker or one missed pass loses nothing, short enough that
+/// memory tracks the live set and a re-seeded region starts as new.
+const PRUNE_AFTER_ROUNDS: u64 = 30;
+
 /// Builds score-set cells in two parts: [`Self::update_fisher`] takes a
 /// Fisher pass and keeps each voxel's coverage and smoothed uncertainty
 /// byte; [`Self::cells`] builds the cells from the splat parameters alone
@@ -79,12 +85,15 @@ pub struct VoxelAggregator {
     min_opacity: f32,
     scale: UncertaintyScale,
     first_seen: HashMap<IVec3, f64>,
-    /// Per voxel, as of the latest Fisher pass that scored it. Never
-    /// pruned, so its memory is bounded by the voxels ever observed, not
-    /// by the current observed volume.
+    /// Per voxel, as of the latest Fisher pass that scored it. Entries of
+    /// voxels untouched for [`PRUNE_AFTER_ROUNDS`] rounds are dropped.
     fisher: HashMap<IVec3, FisherBytes>,
     record_raw: bool,
     raw: Vec<RawVoxel>,
+    /// Voxel rounds so far, counted by [`Self::cells`].
+    round: u64,
+    /// Per voxel, the round it last held a Gaussian or was last scored.
+    last_seen: HashMap<IVec3, u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -238,6 +247,8 @@ impl VoxelAggregator {
             fisher: HashMap::new(),
             record_raw: false,
             raw: Vec::new(),
+            round: 0,
+            last_seen: HashMap::new(),
         }
     }
 
@@ -255,9 +266,16 @@ impl VoxelAggregator {
         &self.raw
     }
 
+    /// Voxels with retained state, for the timing log.
+    pub fn tracked_voxels(&self) -> usize {
+        self.first_seen.len().max(self.fisher.len())
+    }
+
     pub fn reset(&mut self) {
         self.first_seen.clear();
         self.fisher.clear();
+        self.round = 0;
+        self.last_seen.clear();
     }
 
     /// The voxel a Gaussian counts towards, if it is opaque enough: the
@@ -326,6 +344,7 @@ impl VoxelAggregator {
                 continue;
             }
             scored += 1;
+            self.last_seen.insert(key, self.round);
             let u8_unc = f32::from(uncertainty_byte(sigma, range));
             let prev = self.fisher.get(&key).map_or(u8_unc, |f| f.unc_ema);
             self.fisher.insert(
@@ -350,6 +369,7 @@ impl VoxelAggregator {
         cameras: &[ViewCone],
         now_s: f64,
     ) -> Vec<Cell> {
+        self.round += 1;
         let mut acc: HashMap<IVec3, GeomAcc> = HashMap::new();
         for g in gaussians {
             let Some(key) = self.key(g.pos, g.opacity) else {
@@ -369,9 +389,11 @@ impl VoxelAggregator {
                 a.axis_w += axis_w;
             }
         }
-        acc.into_iter()
+        let cells: Vec<Cell> = acc
+            .into_iter()
             .map(|(key, a)| {
                 let first = *self.first_seen.entry(key).or_insert(now_s);
+                self.last_seen.insert(key, self.round);
                 let fisher = self.fisher.get(&key);
                 let (coverage, uncertainty) = fisher
                     .map_or((UNINFORMED_COVERAGE, UNINFORMED_UNCERTAINTY), |f| {
@@ -393,7 +415,15 @@ impl VoxelAggregator {
                     uninformed: fisher.is_none(),
                 }
             })
-            .collect()
+            .collect();
+        if self.round > PRUNE_AFTER_ROUNDS {
+            let cutoff = self.round - PRUNE_AFTER_ROUNDS;
+            self.last_seen.retain(|_, r| *r >= cutoff);
+            let last_seen = &self.last_seen;
+            self.first_seen.retain(|k, _| last_seen.contains_key(k));
+            self.fisher.retain(|k, _| last_seen.contains_key(k));
+        }
+        cells
     }
 
     /// A Fisher pass and the cells of the same Gaussians, as one call.
