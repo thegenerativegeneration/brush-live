@@ -86,6 +86,11 @@ pub struct GuideConfig {
     /// `finish` still exports. For fixed-step measurement runs; `None` trains
     /// until the session ends.
     pub max_train_steps: Option<u32>,
+    /// Fuses a TSDF from rendered splat depth and streams `mesh_bricks` each
+    /// round. Off by default: the phone draws quality on the splats, and the
+    /// mesh costs ~100 ms/round indoors, ~800 ms outdoors. Replay measurement
+    /// turns it on.
+    pub mesh_enabled: bool,
 }
 
 impl Default for GuideConfig {
@@ -128,6 +133,7 @@ impl Default for GuideConfig {
             sh_background: false,
             sh_background_alpha_weight: 0.0,
             max_train_steps: None,
+            mesh_enabled: false,
         }
     }
 }
@@ -145,5 +151,19 @@ impl GuideConfig {
             ridge: self.fisher_ridge(),
             sigma_pix: self.sigma_pix,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GuideConfig;
+
+    #[test]
+    fn mesh_is_off_by_default_and_parses() {
+        assert!(!GuideConfig::default().mesh_enabled);
+        let c: GuideConfig = serde_json::from_str(r#"{"mesh_enabled": true}"#).unwrap();
+        assert!(c.mesh_enabled);
+        let c: GuideConfig = serde_json::from_str("{}").unwrap();
+        assert!(!c.mesh_enabled);
     }
 }

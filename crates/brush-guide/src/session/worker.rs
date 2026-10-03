@@ -346,7 +346,8 @@ impl Worker {
     }
 
     /// Builds the score set from the splat parameters, fuses and meshes the
-    /// TSDF, and publishes the round's bricks, then its score set. `start`
+    /// TSDF and publishes the round's bricks (when `mesh_enabled`), then
+    /// publishes its score set. `start`
     /// is when the round started.
     async fn voxel_round(&mut self, start: f64) {
         let acc = std::mem::take(&mut self.acc);
@@ -372,7 +373,12 @@ impl Worker {
         self.version += 1;
         let version = self.version;
 
-        let (bricks, pending, num_fused) = self.mesh_round(&splats).await;
+        let mesh_enabled = self.config.mesh_enabled;
+        let (bricks, pending, num_fused) = if mesh_enabled {
+            self.mesh_round(&splats).await
+        } else {
+            (Vec::new(), 0, 0)
+        };
         let end = self.clock.elapsed().as_secs_f64();
         let mesh_ms = ((end - scored) * 1000.0) as u32;
         let evicted = self.live.num_evicted() - self.evicted_at_round;
@@ -386,9 +392,11 @@ impl Worker {
             splats.num_splats()
         );
         self.scheduler.voxel.record(start, end - start);
-        self.channels
-            .meshes
-            .send_modify(|log| log.record(version, mesh_ms, bricks));
+        if mesh_enabled {
+            self.channels
+                .meshes
+                .send_modify(|log| log.record(version, mesh_ms, bricks));
+        }
         self.channels
             .scores
             .send_replace(Some(Arc::new(ScoreSetMsg {

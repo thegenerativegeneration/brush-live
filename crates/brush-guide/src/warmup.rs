@@ -147,9 +147,11 @@ async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&
             weight: 1.0,
         };
         let _ = score_pass(&splats, &[view], &config.pass).await;
-        let small = image / 4;
-        let _ = render_expected_depth(&splats, &camera, small).await;
-        let _ = render_colour(&splats, &camera, small).await;
+        if config.mesh_enabled {
+            let small = image / 4;
+            let _ = render_expected_depth(&splats, &camera, small).await;
+            let _ = render_colour(&splats, &camera, small).await;
+        }
         log::info!(
             "warm-up: {n} splats in {:.0} ms",
             t.elapsed().as_secs_f64() * 1e3

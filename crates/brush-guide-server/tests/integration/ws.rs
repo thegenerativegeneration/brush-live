@@ -80,7 +80,10 @@ async fn end_to_end() {
     let root = std::env::temp_dir().join(format!("brush-guide-ws-{}", std::process::id()));
     tokio::spawn(brush_guide_server::server::serve(
         listener,
-        GuideConfig::default(),
+        GuideConfig {
+            mesh_enabled: true,
+            ..GuideConfig::default()
+        },
         device,
         root.clone(),
     ));

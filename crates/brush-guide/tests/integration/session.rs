@@ -13,7 +13,11 @@ use std::time::Duration;
 async fn scores_arrive_after_keyframes_with_mesh_bricks_following() {
     let device = test_scene::device().await.autodiff();
     let dir = std::env::temp_dir().join(format!("brush-guide-session-{}", std::process::id()));
-    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
+    let config = GuideConfig {
+        mesh_enabled: true,
+        ..GuideConfig::default()
+    };
+    let session = GuideSession::start(config, device, dir.clone());
     let mut scores = session.scores();
     let meshes = session.meshes();
 
@@ -88,6 +92,31 @@ async fn scores_arrive_after_keyframes_with_mesh_bricks_following() {
 
     session.reset().await;
     assert_eq!(session.status().borrow().num_keyframes, 0);
+    assert!(session.meshes().borrow().since(0).is_none());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// With the default config no round is recorded on the mesh channel, so the frame forwarder has nothing to send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_config_records_no_mesh_rounds() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-session-nomesh-{}", std::process::id()));
+    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
+    let mut scores = session.scores();
+    for (i, a) in [0.0f32, 1.0, 2.0].iter().enumerate() {
+        let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
+        session.push_keyframe(h, p).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            scores.changed().await.unwrap();
+            if scores.borrow().is_some() {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("a ScoreSet within 60 s");
     assert!(session.meshes().borrow().since(0).is_none());
     std::fs::remove_dir_all(dir).ok();
 }
