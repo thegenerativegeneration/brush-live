@@ -5,6 +5,7 @@ pub mod eval;
 pub mod evict;
 pub mod lod;
 pub mod msg;
+pub mod sh_background;
 pub mod train;
 
 mod adam_scaled;
