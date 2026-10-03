@@ -19,8 +19,10 @@ pub struct PassView {
 pub struct PassConfig {
     /// Random-sign probes per view. One is enough when summing over many views.
     pub hutchinson_samples: u32,
-    /// A Gaussian counts as observed in a view if its per-view Fisher trace exceeds this.
-    pub observed_eps: f32,
+    /// A Gaussian counts as observed in a view if its per-view Fisher trace
+    /// exceeds this times the view's mean trace over all Gaussians, so the
+    /// decision does not move with render resolution or image content.
+    pub observed_rel_eps: f32,
     /// Multiplies each view's resolution for the pass.
     pub render_scale: f32,
 }
@@ -29,7 +31,7 @@ impl Default for PassConfig {
     fn default() -> Self {
         Self {
             hutchinson_samples: 1,
-            observed_eps: 1e-12,
+            observed_rel_eps: 1e-6,
             render_scale: 0.5,
         }
     }
@@ -95,7 +97,10 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
             trace = trace + j.powi_scalar(2).sum_dim(1).squeeze_dim(1) / samples as f32;
         }
 
-        let observed = trace.greater_elem(cfg.observed_eps).float();
+        // Mean over all Gaussians: zero only when no Gaussian contributed,
+        // and then the strict comparison observes nothing.
+        let threshold = trace.clone().mean().mul_scalar(cfg.observed_rel_eps);
+        let observed = trace.greater(threshold.expand([n])).float();
         let cam = view.camera.position;
         let cam_t = Tensor::<1>::from_floats([cam.x, cam.y, cam.z], &inner).reshape([1, 3]);
         let to_g = means.clone() - cam_t;

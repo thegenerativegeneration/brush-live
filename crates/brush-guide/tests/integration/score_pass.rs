@@ -260,3 +260,40 @@ async fn view_weight_scales_counts_directions_and_fisher() {
     let ratio = trace(&three.fisher[0]) / trace(&one.fisher[0]);
     assert!((2.4..3.6).contains(&ratio), "Fisher ratio {ratio}");
 }
+
+#[tokio::test]
+async fn observed_is_independent_of_render_scale() {
+    let device = device().await.autodiff();
+    // One splat in front of the camera, one behind it.
+    let splats = splats_from(&[[0.0, 0.0, 2.0], [0.0, 0.0, -2.0]], -2.0, 0.6, &device);
+    let camera = camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0));
+    for render_scale in [1.0, 0.25] {
+        let view = PassView {
+            camera,
+            img_size: SIZE,
+            weight: 1.0,
+        };
+        let cfg = PassConfig {
+            render_scale,
+            ..Default::default()
+        };
+        let out = score_pass(&splats, &[view], &cfg).await;
+        assert_eq!(out.weight, vec![1.0, 0.0], "render_scale {render_scale}");
+    }
+}
+
+#[tokio::test]
+async fn view_seeing_nothing_observes_nothing() {
+    let device = device().await.autodiff();
+    // The only splat is behind the camera: every trace is zero, so the
+    // view's mean trace is zero and nothing may count as observed.
+    let splats = splats_from(&[[0.0, 0.0, -2.0]], -2.0, 0.6, &device);
+    let view = PassView {
+        camera: camera_at(Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)),
+        img_size: SIZE,
+        weight: 1.0,
+    };
+    let out = score_pass(&splats, &[view], &PassConfig::default()).await;
+    assert_eq!(out.weight, vec![0.0]);
+    assert_eq!(out.max_px_per_m, vec![0.0]);
+}
