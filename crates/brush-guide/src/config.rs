@@ -77,6 +77,9 @@ pub struct GuideConfig {
     pub seed: u64,
     /// ARKit confidence below which depth is ignored for seeding (0 low, 1 medium, 2 high).
     pub min_depth_confidence: u8,
+    /// Plumbed into `TrainConfig::sh_background` — see its docs. Off by
+    /// default; flag-off training is unchanged.
+    pub sh_background: bool,
 }
 
 impl Default for GuideConfig {
@@ -116,6 +119,7 @@ impl Default for GuideConfig {
             coverage: CoverageParams::default(),
             seed: 42,
             min_depth_confidence: 2,
+            sh_background: false,
         }
     }
 }

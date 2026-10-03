@@ -10,6 +10,7 @@ use crate::{
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
+    sh_background::{ShBackground, pixel_dirs, sh_basis},
     splat_init::bounds_from_pos,
     stats::RefineRecord,
 };
@@ -94,7 +95,22 @@ pub struct SplatTrainer {
     evict: Option<Eviction>,
     #[cfg(not(target_family = "wasm"))]
     lpips: Option<lpips::LpipsModel>,
+    /// The learned SH environment background; `None` when `config.sh_background`
+    /// is off, so the flag-off step never builds a basis, a background image,
+    /// or any extra graph node (see `step`'s `if let Some(..)` guard).
+    sh_background: Option<ShBackground>,
+    /// Per-view direction-basis cache for the SH background, keyed by camera
+    /// and render size. FIFO-bounded (see `SH_BASIS_CACHE_CAP`) rather than
+    /// unbounded, so a long session's distinct keyframe count can't grow it
+    /// forever; dropped whole when a new `SplatTrainer` replaces this one
+    /// (session reset constructs a fresh trainer, see `brush_guide::live`).
+    sh_basis_cache: Vec<(brush_render::camera::Camera, glam::UVec2, Tensor<2>)>,
 }
+
+/// Cap on `SplatTrainer::sh_basis_cache`'s entries. Each is `h*w*9` f32s
+/// (e.g. ~1.6 MB at 960x540); this bounds the cache at a few hundred MB
+/// regardless of how many distinct keyframes a session accumulates.
+const SH_BASIS_CACHE_CAP: usize = 64;
 
 fn inv_sigmoid(x: Tensor<1>) -> Tensor<1> {
     (x.clone() / (1.0f32 - x)).log()
@@ -187,6 +203,8 @@ impl SplatTrainer {
         #[cfg(not(target_family = "wasm"))]
         let lpips = (config.lpips_loss_weight > 0.0).then(|| lpips::load_vgg_lpips(device));
 
+        let sh_background = config.sh_background.then(|| ShBackground::new(device));
+
         Self {
             config,
             lr_mean_decay: decay,
@@ -201,6 +219,8 @@ impl SplatTrainer {
             rng: rand::rngs::StdRng::seed_from_u64(seed),
             view_cams: Vec::new(),
             evict: None,
+            sh_background,
+            sh_basis_cache: Vec::new(),
             #[cfg(not(target_family = "wasm"))]
             lpips,
         }
@@ -446,6 +466,43 @@ impl SplatTrainer {
         splats
     }
 
+    /// The SH background's coefficients as JSON, or `None` when the flag is
+    /// off.
+    pub async fn sh_background_json(&self) -> Option<String> {
+        match &self.sh_background {
+            Some(bg) => Some(bg.coeffs_json().await),
+            None => None,
+        }
+    }
+
+    /// `camera`'s cached direction basis at `size`, computing and caching it
+    /// on a miss. FIFO-bounded at [`SH_BASIS_CACHE_CAP`] entries (oldest
+    /// evicted first) — see `sh_basis_cache`'s docs on why a hard cap and not
+    /// just "one per keyframe".
+    fn sh_basis_for(
+        &mut self,
+        camera: &brush_render::camera::Camera,
+        size: glam::UVec2,
+        device: &Device,
+    ) -> Tensor<2> {
+        if let Some((_, _, basis)) = self
+            .sh_basis_cache
+            .iter()
+            .find(|(c, s, _)| c == camera && *s == size)
+        {
+            return basis.clone();
+        }
+        let dirs = pixel_dirs(camera, size);
+        let n = (size.x * size.y) as usize;
+        let dirs = Tensor::<1>::from_floats(dirs.as_slice(), device).reshape([n, 3]);
+        let basis = sh_basis(dirs);
+        if self.sh_basis_cache.len() >= SH_BASIS_CACHE_CAP {
+            self.sh_basis_cache.remove(0);
+        }
+        self.sh_basis_cache.push((*camera, size, basis.clone()));
+        basis
+    }
+
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
         let mut splats = splats;
 
@@ -494,7 +551,16 @@ impl SplatTrainer {
             // The splats already carry their 3D-filter floor (set at refine);
             // the render path folds it in. Optimizer/refine work on raw params.
             let render_input = splats.clone();
-            let diff_out = render_splats(render_input, &camera, img_size, background)
+            // With the SH background on, the render must not bake in any flat
+            // colour — the globe supplies it per pixel below instead — so the
+            // render background is forced to zero. Off, this is exactly
+            // `background`, the existing path, unchanged.
+            let render_bg = if self.sh_background.is_some() {
+                glam::Vec3::ZERO
+            } else {
+                background
+            };
+            let diff_out = render_splats(render_input, &camera, img_size, render_bg)
                 .instrument(trace_span!("Forward"))
                 .await;
 
@@ -519,8 +585,15 @@ impl SplatTrainer {
             };
             // Only composite when there's a real alpha channel and a non-zero
             // bg to mix in; the kernel skips the per-pixel `(1-a)*bg` math
-            // entirely when this is None.
-            let composite_bg = (has_alpha && background != glam::Vec3::ZERO).then_some(background);
+            // entirely when this is None. The SH background's per-pixel
+            // globe can't be expressed as this kernel's single `Vec3`, so
+            // when it's on, the gt side is left as-is (no flat-colour
+            // compositing either) — the globe only has to explain the pred
+            // side; see Task 3's ledgered ruling for why this is fine for
+            // the real-photo case the globe targets (gt has no alpha there).
+            let composite_bg = (has_alpha && background != glam::Vec3::ZERO
+                && self.sh_background.is_none())
+            .then_some(background);
             let cfg = ImageLossConfig {
                 l1_weight: l1_w,
                 ssim_weight: ssim_w,
@@ -532,11 +605,36 @@ impl SplatTrainer {
                     0.0
                 },
             };
-            // The kernel takes the RGBA image as rendered.
+
+            // Flag off: `pred_final` is exactly `pred_image`, so the loss
+            // call below is byte-for-byte today's call. Flag on: composite
+            // the globe into the RGB channels using the render's own alpha
+            // as the weight (`brush_render`'s rasterizer writes the true
+            // accumulated alpha into channel 3 regardless of the render
+            // background — see `kernels::rasterize`'s `final_a`), keeping
+            // the alpha channel itself untouched for the alpha-match path.
+            let pred_final = if self.sh_background.is_some() {
+                let basis = self.sh_basis_for(&camera, img_size, &device);
+                let bg_image = self
+                    .sh_background
+                    .as_ref()
+                    .expect("checked is_some above")
+                    .image(basis)
+                    .reshape([img_h, img_w, 3]);
+                let rgb = pred_image.clone().slice(s![.., .., 0..3]);
+                let alpha = pred_image.clone().slice(s![.., .., 3..4]);
+                let composited = rgb + (1.0f32 - alpha.clone()) * bg_image;
+                Tensor::cat(vec![composited, alpha], 2)
+            } else {
+                pred_image.clone()
+            };
+
+            // The kernel takes the RGBA image as rendered (or, with the
+            // globe on, the RGBA image with the globe composited in).
             // `loss` is only reassigned by the LPIPS path below, which is
             // compiled out on wasm — so `mut` is unused there.
             #[cfg_attr(target_family = "wasm", allow(unused_mut))]
-            let mut loss = image_loss(pred_image.clone(), gt_packed.clone(), cfg);
+            let mut loss = image_loss(pred_final.clone(), gt_packed.clone(), cfg);
 
             // LPIPS still needs an f32 RGB tensor for VGG. Materialising it
             // here costs ~99 MB at 4K, only when LPIPS is enabled.
@@ -546,7 +644,7 @@ impl SplatTrainer {
                 let gt_rgb_diff: Tensor<3> = Tensor::from_inner(gt_rgb);
                 loss = loss
                     + lpips.lpips(
-                        pred_image.clone().slice(s![.., .., 0..3]).unsqueeze_dim(0),
+                        pred_final.clone().slice(s![.., .., 0..3]).unsqueeze_dim(0),
                         gt_rgb_diff.unsqueeze_dim(0),
                     ) * self.config.lpips_loss_weight;
             }
@@ -555,6 +653,14 @@ impl SplatTrainer {
             // scalar later without keeping the backward pass alive.
             let loss_inner = loss.clone().inner();
             let mut grads = splats.bwd_validate(loss).await;
+
+            // The globe's coefficients are a leaf in this same graph (built
+            // from `sh_bg.image(..)` above, composited with the splats'
+            // render by ordinary tensor ops) — this is the same `backward()`
+            // the splat gradients just came out of, not a second one.
+            if let Some(sh_bg) = self.sh_background.as_mut() {
+                sh_bg.step(&mut grads, self.config.sh_background_lr);
+            }
 
             trace_span!("Housekeeping").in_scope(|| {
                 // Refine state accumulates on the inner (non-autodiff) device
@@ -1275,3 +1381,7 @@ mod append_tests {
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "train_evict_tests.rs"]
 mod evict_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "sh_background_integration_tests.rs"]
+mod sh_background_integration_tests;

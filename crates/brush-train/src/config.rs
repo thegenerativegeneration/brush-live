@@ -141,6 +141,19 @@ pub struct TrainConfig {
     /// estimated from the camera spacing (with a 1m minimum).
     #[arg(long, help_heading = "Training options")]
     pub random_init_scene_scale: Option<f32>,
+
+    /// Composite a learned degree-2 SH environment background into the
+    /// render (`rgb + (1 - alpha) * sh_background(view_dir)`) instead of a
+    /// flat colour, so sky and at-infinity pixels get a legitimate
+    /// explanation without growing near-camera floaters. Off by default:
+    /// the render keeps today's flat `background_color` compositing.
+    #[arg(long, help_heading = "Training options", default_value = "false")]
+    pub sh_background: bool,
+
+    /// Learning rate for the SH background's own tiny Adam optimizer.
+    /// Unused when `sh_background` is off.
+    #[arg(long, help_heading = "Training options", default_value = "1e-2")]
+    pub sh_background_lr: f64,
 }
 
 impl Default for TrainConfig {

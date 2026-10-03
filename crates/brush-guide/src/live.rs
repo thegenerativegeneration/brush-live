@@ -64,6 +64,7 @@ impl LiveModel {
         train_config.growth_stop_iter = 1_000_000_000;
         train_config.max_splats = config.max_splats;
         train_config.refine_every = config.refine_every;
+        train_config.sh_background = config.sh_background;
         let mut load_config = LoadArgs::parse_from(["brush-guide"]).load;
         load_config.max_scene_batch_cache_size = config.loader_cache_bytes;
         let rng = rand::rngs::StdRng::seed_from_u64(config.seed);
@@ -91,6 +92,12 @@ impl LiveModel {
 
     pub fn splats(&self) -> Option<&Splats> {
         self.splats.as_ref()
+    }
+
+    /// The SH background's coefficients as JSON, or `None` when the flag is
+    /// off or training hasn't started. For the session-dir dump on finish.
+    pub async fn sh_background_json(&self) -> Option<String> {
+        self.trainer.as_ref()?.sh_background_json().await
     }
 
     pub fn views(&self) -> &[SceneView] {
