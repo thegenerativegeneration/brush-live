@@ -35,6 +35,11 @@ fn ga(pos: [f32; 3], opacity: f32, axis: [f32; 3]) -> GaussianScore {
     }
 }
 
+/// A Gaussian with no usable information: infinite σ.
+fn none(x: f32) -> GaussianScore {
+    g([x, 0.5, 0.5], 1.0, 0.0, f32::INFINITY)
+}
+
 fn cam(pos: [f32; 3], fwd: [f32; 3]) -> ViewCone {
     ViewCone {
         position: Vec3::from(pos),
@@ -153,7 +158,6 @@ fn byte_at(cells: &[Cell], x: usize) -> u8 {
 #[test]
 fn rounds_without_information_are_uninformed() {
     let mut agg = VoxelAggregator::new(1.0, 0.0, SCALE);
-    let none = |x: f32| g([x, 0.5, 0.5], 1.0, 0.0, f32::INFINITY);
     let cells = agg.aggregate(&[none(0.5), none(1.5)], &[], 0.0);
     assert!(cells.iter().all(|c| c.uncertainty == 255 && c.uninformed));
 
@@ -379,3 +383,4 @@ fn non_finite_position_or_opacity_is_skipped() {
 mod legacy;
 mod lifecycle;
 mod normals;
+mod range;

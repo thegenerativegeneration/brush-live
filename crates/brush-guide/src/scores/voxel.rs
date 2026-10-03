@@ -76,6 +76,11 @@ pub const UNINFORMED_UNCERTAINTY: u8 = 255;
 /// memory tracks the live set and a re-seeded region starts as new.
 const PRUNE_AFTER_ROUNDS: u64 = 30;
 
+/// EMA weight of a pass's p5–p95 `ln σ` range. Matches the per-voxel byte
+/// EMA: bytes from consecutive passes only compare if the scale they were
+/// mapped on moves equally slowly.
+const RANGE_ALPHA: f32 = 0.3;
+
 /// Builds score-set cells in two parts: [`Self::update_fisher`] takes a
 /// Fisher pass and keeps each voxel's coverage and smoothed uncertainty
 /// byte; [`Self::cells`] builds the cells from the splat parameters alone
@@ -94,6 +99,9 @@ pub struct VoxelAggregator {
     round: u64,
     /// Per voxel, the round it last held a Gaussian or was last scored.
     last_seen: HashMap<IVec3, u64>,
+    /// EMA of the per-pass p5–p95 range of `ln σ`; `None` before the first
+    /// pass that scored a voxel.
+    range: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -179,20 +187,20 @@ fn dominant_axis(t: Mat3) -> Option<(Vec3, f32)> {
     best.map(|(v, lambda)| (v, lambda / trace))
 }
 
-/// The round's 5th and 95th percentile of `ln σ` over finite σ.
-fn log_sigma_range(sigmas: &[f32]) -> (f32, f32) {
+/// The round's 5th and 95th percentile of `ln σ` over finite σ; `None`
+/// without any.
+fn log_sigma_range(sigmas: &[f32]) -> Option<(f32, f32)> {
     let mut logs: Vec<f32> = sigmas
         .iter()
         .filter(|s| s.is_finite() && **s > 0.0)
         .map(|s| s.ln())
         .collect();
+    if logs.is_empty() {
+        return None;
+    }
     logs.sort_by(f32::total_cmp);
-    let pct = |p: f32| {
-        logs.get(((logs.len() as f32 - 1.0) * p).round() as usize)
-            .copied()
-            .unwrap_or(0.0)
-    };
-    (pct(0.05), pct(0.95))
+    let pct = |p: f32| logs[((logs.len() as f32 - 1.0) * p).round() as usize];
+    Some((pct(0.05), pct(0.95)))
 }
 
 /// `clamp((ln σ − lo) / (hi − lo), 0, 1) · 255`, rounded; 255 for a
@@ -249,6 +257,7 @@ impl VoxelAggregator {
             raw: Vec::new(),
             round: 0,
             last_seen: HashMap::new(),
+            range: None,
         }
     }
 
@@ -276,6 +285,7 @@ impl VoxelAggregator {
         self.fisher.clear();
         self.round = 0;
         self.last_seen.clear();
+        self.range = None;
     }
 
     /// The voxel a Gaussian counts towards, if it is opaque enough: the
@@ -287,8 +297,9 @@ impl VoxelAggregator {
 
     /// Takes one Fisher pass: per voxel, the opacity-weighted mean coverage
     /// and the positional σ of the summed position Fisher, mapped to a byte
-    /// between this pass's 5th and 95th percentile of `ln σ` and smoothed
-    /// per voxel across passes. Voxels this pass does not hold, or holds
+    /// between this pass's 5th and 95th percentile of `ln σ` (smoothed
+    /// across passes, so bytes from consecutive passes share a scale) and
+    /// smoothed per voxel across passes. Voxels this pass does not hold, or holds
     /// without usable information (no view of the pass observed them, or
     /// only broken Fisher blocks, so σ is not finite), keep their previous
     /// bytes unchanged. Returns the number of voxels scored.
@@ -326,7 +337,16 @@ impl VoxelAggregator {
             })
             .collect();
         let sigmas: Vec<f32> = voxels.iter().map(|v| v.2).collect();
-        let range = log_sigma_range(&sigmas);
+        if let Some((lo, hi)) = log_sigma_range(&sigmas) {
+            self.range = Some(match self.range {
+                None => (lo, hi),
+                Some((plo, phi)) => (
+                    RANGE_ALPHA * lo + (1.0 - RANGE_ALPHA) * plo,
+                    RANGE_ALPHA * hi + (1.0 - RANGE_ALPHA) * phi,
+                ),
+            });
+        }
+        let range = self.range.unwrap_or((0.0, 0.0));
         self.raw.clear();
         let mut scored = 0;
         for (key, a, sigma) in voxels {
