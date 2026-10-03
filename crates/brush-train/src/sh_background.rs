@@ -8,6 +8,8 @@
 use crate::adam_scaled::{AdamScaled, AdamState};
 use brush_render::camera::Camera;
 use brush_render::kernels::camera_model::CameraModel;
+use burn::tensor::module::{adaptive_avg_pool2d, interpolate};
+use burn::tensor::ops::{InterpolateMode, InterpolateOptions};
 use burn::tensor::{Device, Gradients, Tensor};
 use glam::{UVec2, Vec3};
 
@@ -99,6 +101,53 @@ pub fn pixel_dirs(camera: &Camera, size: UVec2) -> Vec<f32> {
         }
     }
     out
+}
+
+/// Side, in training pixels, of the square block the globe is evaluated on.
+/// A degree-2 globe barely changes across 8 pixels (about a degree at the
+/// 500 px training size), so evaluating it per block and upsampling costs
+/// almost nothing in accuracy and removes most of its per-pixel work.
+pub const BG_BLOCK_PX: u32 = 8;
+
+/// The block grid's size for a render of `size`: [`BG_BLOCK_PX`]-pixel
+/// blocks, the last row and column partial when `size` doesn't divide.
+pub fn block_grid_size(size: UVec2) -> UVec2 {
+    UVec2::new(
+        size.x.div_ceil(BG_BLOCK_PX).max(1),
+        size.y.div_ceil(BG_BLOCK_PX).max(1),
+    )
+}
+
+/// Upsamples a block-grid background `[hl, wl, 3]` to `[h, w, 3]`. The value
+/// is bilinear (half-pixel centres); the gradient flows through a
+/// nearest-neighbour upsample instead, i.e. each block receives the sum of
+/// its pixels' gradients, because the GPU backend has no bilinear backward.
+/// For a field this smooth the two gradients differ negligibly.
+pub fn upsample_background(low: Tensor<3>, h: usize, w: usize) -> Tensor<3> {
+    let [hl, wl, c] = low.dims();
+    let nchw = low.permute([2, 0, 1]).reshape([1, c, hl, wl]);
+    let smooth = interpolate(
+        nchw.clone().detach(),
+        [h, w],
+        InterpolateOptions {
+            mode: InterpolateMode::Bilinear,
+            align_corners: false,
+        },
+    );
+    let blocky = interpolate(nchw, [h, w], InterpolateOptions::new(InterpolateMode::Nearest));
+    let out = smooth + blocky.clone() - blocky.detach();
+    out.reshape([c, h, w]).permute([1, 2, 0])
+}
+
+/// Mean of `x` (`[h, w, c]`) over each cell of a `grid`-sized block grid,
+/// `[grid.y, grid.x, c]`. Differentiable.
+pub fn block_mean(x: Tensor<3>, grid: UVec2) -> Tensor<3> {
+    let [h, w, c] = x.dims();
+    let (hl, wl) = (grid.y as usize, grid.x as usize);
+    let nchw = x.permute([2, 0, 1]).reshape([1, c, h, w]);
+    adaptive_avg_pool2d(nchw, [hl, wl])
+        .reshape([c, hl, wl])
+        .permute([1, 2, 0])
 }
 
 /// Pixel centres `(x + 0.5, y + 0.5)` of every pixel at `size`, `[h*w, 2]`,
@@ -529,5 +578,80 @@ mod tests {
         }
         let v = read(bg.image(basis).inner()).await;
         assert!(v.iter().all(|x| *x > 1.2), "globe should exceed 1 freely, got {v:?}");
+    }
+
+    /// A globe with every band set, so the upsampling tests see real
+    /// variation across the image.
+    fn varied_globe(device: &Device) -> ShBackground {
+        let mut bg = ShBackground::new(device, 1.0);
+        let coeffs: Vec<f32> = (0..27).map(|i| 0.35 * ((i as f32) * 1.7).sin()).collect();
+        bg.coeffs = Tensor::<1>::from_floats(coeffs.as_slice(), device)
+            .reshape([9, 3])
+            .require_grad();
+        bg
+    }
+
+    fn wide_camera() -> Camera {
+        Camera::new(
+            Vec3::ZERO,
+            glam::Quat::from_axis_angle(Vec3::new(0.2, 1.0, 0.1).normalize(), 0.8),
+            1.3,
+            1.0,
+            glam::vec2(0.5, 0.5),
+            Pinhole,
+        )
+    }
+
+    fn per_pixel_and_upsampled(
+        bg: &ShBackground,
+        cam: &Camera,
+        size: UVec2,
+        device: &Device,
+    ) -> (Tensor<3>, Tensor<3>) {
+        let (h, w) = (size.y as usize, size.x as usize);
+        let full = bg
+            .image(sh_basis(world_dirs(pixel_centres(size, device), cam, size)))
+            .reshape([h, w, 3]);
+        let grid = block_grid_size(size);
+        let low = bg
+            .image(sh_basis(world_dirs(pixel_centres(grid, device), cam, grid)))
+            .reshape([grid.y as usize, grid.x as usize, 3]);
+        (full, upsample_background(low, h, w))
+    }
+
+    #[tokio::test]
+    async fn upsampled_globe_matches_per_pixel_evaluation() {
+        let device = device().await.autodiff();
+        let bg = varied_globe(&device);
+        // 500 px long side, as in training; 375 doesn't divide by the block.
+        let size = UVec2::new(500, 375);
+        let (full, up) = per_pixel_and_upsampled(&bg, &wide_camera(), size, &device);
+        let diff = read((full.clone() - up).abs().reshape([-1, 1]).inner()).await;
+        let worst = diff.iter().fold(0.0f32, |m, v| m.max(*v));
+        let range = read(full.reshape([-1, 1]).inner()).await;
+        let span = range.iter().fold(f32::MIN, |m, v| m.max(*v))
+            - range.iter().fold(f32::MAX, |m, v| m.min(*v));
+        assert!(span > 0.2, "test globe should vary, span {span}");
+        assert!(worst < 4.0 / 255.0, "worst per-pixel deviation {worst}");
+    }
+
+    #[tokio::test]
+    async fn upsampled_globe_gradient_matches_per_pixel_gradient() {
+        let device = device().await.autodiff();
+        let size = UVec2::new(160, 120);
+        let cam = wide_camera();
+        let target = Tensor::<3>::full([120, 160, 3], 0.8, &device);
+        let grad_of = |use_upsampled: bool| {
+            let bg = varied_globe(&device);
+            let (full, up) = per_pixel_and_upsampled(&bg, &cam, size, &device);
+            let img = if use_upsampled { up } else { full };
+            let mut grads = (img - target.clone()).powi_scalar(2).sum().backward();
+            bg.coeffs().grad_remove(&mut grads).expect("coeff grad")
+        };
+        let exact = grad_of(false);
+        let approx = grad_of(true);
+        let err = read((exact.clone() - approx).powi_scalar(2).sum().sqrt().reshape([1, 1])).await[0];
+        let norm = read(exact.powi_scalar(2).sum().sqrt().reshape([1, 1])).await[0];
+        assert!(err / norm < 0.02, "relative gradient error {}", err / norm);
     }
 }

@@ -161,7 +161,7 @@ pub struct TrainConfig {
 
     /// Weight of the penalty on splat opacity where the SH background
     /// already matches the photo (mean |gt - background| < 0.003 over a
-    /// 3x3 neighbourhood). 0 disables it.
+    /// 3x3 neighbourhood of the globe's 8 px blocks). 0 disables it.
     #[arg(long, help_heading = "Training options", default_value = "0.15")]
     pub sh_background_alpha_weight: f32,
 }

@@ -10,7 +10,10 @@ use crate::{
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
-    sh_background::{ShBackground, background_match_mask, pixel_centres, sh_basis, world_dirs},
+    sh_background::{
+        ShBackground, background_match_mask, block_grid_size, block_mean, pixel_centres, sh_basis,
+        upsample_background, world_dirs,
+    },
     splat_init::bounds_from_pos,
     stats::RefineRecord,
 };
@@ -474,7 +477,7 @@ impl SplatTrainer {
     }
 
     /// SH basis `[h*w, 9]` of `camera`'s world-space pixel directions at
-    /// `size`.
+    /// `size` (the globe's block grid, not the render size).
     fn sh_basis_for(
         &mut self,
         camera: &brush_render::camera::Camera,
@@ -608,23 +611,32 @@ impl SplatTrainer {
             // the alpha channel itself untouched for the alpha-match path.
             let mut globe_alpha_penalty = None;
             let pred_final = if self.sh_background.is_some() {
-                let basis = self.sh_basis_for(&camera, img_size, &device);
-                let bg_image = self
+                // The globe is evaluated on a coarse block grid and upsampled;
+                // the alpha penalty works on the same grid.
+                let grid = block_grid_size(img_size);
+                let (grid_h, grid_w) = (grid.y as usize, grid.x as usize);
+                let basis = self.sh_basis_for(&camera, grid, &device);
+                let bg_grid = self
                     .sh_background
                     .as_ref()
                     .expect("checked is_some above")
                     .image(basis)
-                    .reshape([img_h, img_w, 3]);
+                    .reshape([grid_h, grid_w, 3]);
+                let bg_image = upsample_background(bg_grid.clone(), img_h, img_w);
                 let rgb = pred_image.clone().slice(s![.., .., 0..3]);
                 let alpha = pred_image.clone().slice(s![.., .., 3..4]);
                 let weight = self.config.sh_background_alpha_weight;
                 if weight > 0.0 {
                     // Splatfacto-W's background alpha loss: where the globe
                     // already matches the photo, opacity there is a floater.
-                    let gt_rgb = brush_loss::unpack_gt_rgb(gt_packed.clone(), None);
-                    let mask: Tensor<2> =
-                        Tensor::from_inner(background_match_mask(gt_rgb, bg_image.clone().inner()));
-                    let covered = alpha.clone().reshape([img_h, img_w]) * mask.clone();
+                    let gt_grid =
+                        block_mean(brush_loss::unpack_gt_rgb(gt_packed.clone(), None), grid);
+                    let mask: Tensor<2> = Tensor::from_inner(background_match_mask(
+                        gt_grid,
+                        bg_grid.clone().inner(),
+                    ));
+                    let alpha_grid = block_mean(alpha.clone(), grid).reshape([grid_h, grid_w]);
+                    let covered = alpha_grid * mask.clone();
                     globe_alpha_penalty =
                         Some(covered.sum() / mask.sum().clamp_min(1.0) * weight);
                 }
