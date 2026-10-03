@@ -87,12 +87,16 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
             let uv = px / size.as_vec2();
             let Some(depth) = (if let Some(d) = input.depth {
                 // Trustworthy depth wins. Where the map has no value
-                // (masked low-confidence, or beyond LiDAR range) a nearby
-                // projected feature point fills in, so far geometry still
-                // seeds outdoors. Still no median fallback: a pixel with
-                // neither source is skipped rather than guessed.
+                // (masked low-confidence, or beyond LiDAR range) a
+                // projected feature point fills in, but only if it is
+                // itself beyond FEATURE_BACKFILL_MIN_DEPTH_M: nearer
+                // masked pixels are usually reflective/dark surfaces
+                // LiDAR flagged, where a nearby feature carries the
+                // wrong depth, so those are still skipped. Still no
+                // median fallback: a pixel with neither source is
+                // skipped rather than guessed.
                 d.sample_uv(uv.x, uv.y)
-                    .or_else(|| feature_depth(px).filter(|d| *d > FEATURE_BACKFILL_MIN_DEPTH_M))
+                    .or_else(|| feature_depth(px).filter(|fd| *fd > FEATURE_BACKFILL_MIN_DEPTH_M))
             } else {
                 // No depth map at all: feature points only.
                 feature_depth(px)
@@ -224,6 +228,30 @@ mod tests {
             1,
             "the masked pixel takes the feature depth: {depths:?}"
         );
+    }
+
+    #[test]
+    fn masked_depth_pixel_backfill_is_gated_strictly_beyond_the_min_depth() {
+        // The filter is a strict `>`: a feature point exactly at
+        // FEATURE_BACKFILL_MIN_DEPTH_M is rejected, one just beyond it
+        // backfills.
+        let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        let mut values = vec![2.0; 16];
+        values[4 + 1] = 0.0;
+        let depth = DepthMap {
+            width: 4,
+            height: 4,
+            values,
+            confidence: None,
+        };
+
+        let at_min = [Vec3::new(0.0, 0.0, FEATURE_BACKFILL_MIN_DEPTH_M)];
+        let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &at_min));
+        assert_eq!(seeds.means.len(), 3 * 3, "exactly at the minimum is rejected");
+
+        let just_beyond = [Vec3::new(0.0, 0.0, FEATURE_BACKFILL_MIN_DEPTH_M + 0.1)];
+        let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &just_beyond));
+        assert_eq!(seeds.means.len(), 4 * 3, "just beyond the minimum backfills");
     }
 
     #[test]
