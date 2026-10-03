@@ -5,7 +5,6 @@
 //! the server's working directory) before a phone connects.
 
 use crate::config::GuideConfig;
-use crate::geometry::depth::{render_colour, render_expected_depth};
 use crate::scores::pass::{PassView, score_pass};
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};
 use brush_render::AlphaMode;
@@ -112,9 +111,8 @@ pub fn warmup_sizes(max_splats: u32) -> Vec<u32> {
 }
 
 /// Runs, at each of `warmup_sizes(config.max_splats)`: two training steps
-/// and a refine, a one-view Fisher pass (render and backward), and the expected-depth and
-/// colour renders of TSDF fusion. `device` is the autodiff device. Returns
-/// the seconds it took.
+/// and a refine, and a one-view Fisher pass (render and backward). `device`
+/// is the autodiff device. Returns the seconds it took.
 pub async fn warm_up(config: &GuideConfig, device: &Device) -> f64 {
     warm_up_gated(config, device, None).await
 }
@@ -147,11 +145,6 @@ async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&
             weight: 1.0,
         };
         let _ = score_pass(&splats, &[view], &config.pass).await;
-        if config.mesh_enabled {
-            let small = image / 4;
-            let _ = render_expected_depth(&splats, &camera, small).await;
-            let _ = render_colour(&splats, &camera, small).await;
-        }
         log::info!(
             "warm-up: {n} splats in {:.0} ms",
             t.elapsed().as_secs_f64() * 1e3

@@ -1,8 +1,7 @@
-//! Rerun logging of what the server sends: score cells gated into colours,
-//! status scalars and mesh bricks.
+//! Rerun logging of what the server sends: score cells gated into colours
+//! and status scalars.
 
-use brush_guide::geometry::mesh::BrickMesh;
-use brush_guide::protocol::{Cell, MeshBrick};
+use brush_guide::protocol::Cell;
 use clap::ValueEnum;
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -149,54 +148,5 @@ pub(crate) fn log_status(
     let _ = rec.log(
         "status/score_ms",
         &rerun::Scalars::new(vec![last_score_ms as f64]),
-    );
-}
-
-pub(crate) fn brick_name(b: &MeshBrick) -> String {
-    let [x, y, z] = b.key().0.to_array();
-    format!("brick_{x}_{y}_{z}")
-}
-
-/// A brick's mesh for rerun, with its vertex colours if it has them.
-pub(crate) fn mesh_3d(m: &BrickMesh) -> rerun::Mesh3D {
-    let mesh = rerun::Mesh3D::new(m.positions.iter().copied())
-        .with_vertex_normals(m.normals.iter().copied())
-        .with_triangle_indices(m.indices.as_chunks::<3>().0.iter().copied());
-    if m.colours.is_empty() {
-        return mesh;
-    }
-    mesh.with_vertex_colors(
-        m.colours
-            .iter()
-            .map(|&[r, g, b]| rerun::Color::from_rgb(r, g, b)),
-    )
-}
-
-/// Logs a round of mesh bricks under `mesh/brick_<x>_<y>_<z>` and its
-/// statistics under `mesh/stats`.
-pub(crate) fn log_mesh_bricks(
-    rec: &rerun::RecordingStream,
-    mesh_ms: u32,
-    frame_bytes: usize,
-    bricks: &[MeshBrick],
-) {
-    for b in bricks {
-        let path = format!("mesh/{}", brick_name(b));
-        let _ = match b {
-            MeshBrick::Mesh(m) => rec.log(path, &mesh_3d(m)),
-            MeshBrick::Removed(_) => rec.log(path, &rerun::Clear::flat()),
-        };
-    }
-    let _ = rec.log(
-        "mesh/stats/bricks",
-        &rerun::Scalars::new(vec![bricks.len() as f64]),
-    );
-    let _ = rec.log(
-        "mesh/stats/bytes",
-        &rerun::Scalars::new(vec![frame_bytes as f64]),
-    );
-    let _ = rec.log(
-        "mesh/stats/mesh_ms",
-        &rerun::Scalars::new(vec![mesh_ms as f64]),
     );
 }

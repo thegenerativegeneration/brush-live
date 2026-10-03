@@ -1,7 +1,4 @@
 mod cells;
-mod mesh;
-#[cfg(test)]
-mod mesh_tests;
 #[cfg(test)]
 mod tests;
 
@@ -10,10 +7,6 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 pub use cells::{
     CELL_BYTES, CELL_FLAG_NORMAL, CELL_FLAG_UNINFORMED, Cell, decode_cells, encode_cells,
     oct_decode, oct_encode,
-};
-pub use mesh::{
-    BRICK_MARGIN, MAX_BRICK_VERTICES, MESH_BRICK_COLOURS, MESH_BRICK_REMOVED, MeshBrick,
-    decode_mesh_bricks, encode_mesh_bricks,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -30,12 +23,6 @@ pub enum ProtocolError {
     SizeOverflow,
     #[error("depth_confidence set without depth_size")]
     ConfidenceWithoutDepth,
-    #[error("removed brick with non-zero vertex or index count")]
-    RemovedBrickWithData,
-    #[error("index count {0} is not a multiple of 3")]
-    PartialTriangle(usize),
-    #[error("index {index} out of range for {num_vertices} vertices")]
-    IndexOutOfRange { index: u32, num_vertices: usize },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -90,12 +77,6 @@ pub enum ServerHeader {
     },
     Splat {
         ply_len: u64,
-    },
-    MeshBricks {
-        version: u64,
-        num_bricks: u32,
-        /// Depth rendering, TSDF fusion and meshing time of the round, ms.
-        mesh_ms: u32,
     },
     Error {
         message: String,

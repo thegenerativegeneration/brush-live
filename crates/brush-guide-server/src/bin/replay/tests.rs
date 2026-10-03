@@ -1,10 +1,6 @@
-use brush_guide::geometry::mesh::BrickMesh;
-use brush_guide::geometry::tsdf::BrickKey;
-use brush_guide::protocol::MeshBrick;
 use std::path::PathBuf;
 
 use super::dataset::{DepthMode, Frame, load_depth};
-use super::receive::handle_mesh_bricks;
 
 struct TempDir(PathBuf);
 
@@ -44,42 +40,6 @@ fn frame_with_depth(depth_file_path: Option<&str>) -> Frame {
         depth_w: depth_file_path.map(|_| 2),
         depth_h: depth_file_path.map(|_| 1),
     }
-}
-
-#[test]
-fn mesh_dump_writes_ply_and_round_line() {
-    let dir = TempDir::new("mesh-dump");
-    let key = BrickKey(glam::IVec3::new(1, -2, 0));
-    let bricks = [
-        MeshBrick::Mesh(BrickMesh {
-            key,
-            positions: vec![[1.0, -2.0, 0.0], [2.0, -2.0, 0.0], [1.0, -1.0, 0.0]],
-            normals: vec![[0.0, 0.0, 1.0]; 3],
-            colours: vec![[230, 159, 0], [213, 94, 0], [86, 180, 233]],
-            indices: vec![0, 1, 2],
-        }),
-        MeshBrick::Removed(BrickKey(glam::IVec3::new(-1, 0, 3))),
-    ];
-    let rec = rerun::RecordingStream::disabled();
-    let line = handle_mesh_bricks(&rec, Some(&dir.0), 7, 12, 100, &bricks).unwrap();
-    assert!(
-        line.contains("2 bricks (1 removed, 1 triangles), 100 bytes"),
-        "{line}"
-    );
-    let ply = std::fs::read_to_string(dir.0.join("v00007_brick_1_-2_0.ply")).unwrap();
-    assert!(
-        ply.contains("element vertex 3\n") && ply.ends_with("3 0 1 2\n"),
-        "{ply}"
-    );
-    assert!(
-        ply.contains("property uchar blue\nelement face 1\n")
-            && ply.contains("\n1 -2 0 0 0 1 230 159 0\n"),
-        "{ply}"
-    );
-    let rounds = std::fs::read_to_string(dir.0.join("rounds.jsonl")).unwrap();
-    let round: serde_json::Value = serde_json::from_str(rounds.trim()).unwrap();
-    assert_eq!(round["version"], 7);
-    assert_eq!(round["bricks"][1]["removed"], true);
 }
 
 /// Depth-mode table: none sends nothing, all sends depth without confidence, high sends both when confidence is

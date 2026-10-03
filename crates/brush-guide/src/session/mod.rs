@@ -1,4 +1,3 @@
-mod geometry;
 mod preview;
 mod splat_read;
 #[cfg(test)]
@@ -17,7 +16,6 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
 use worker::{Channels, worker};
 
-pub use geometry::{MeshBricksMsg, MeshLog};
 pub use preview::{PREVIEW_FLOATS, PreviewSnapshot};
 
 pub struct ScoreSetMsg {
@@ -92,7 +90,6 @@ enum Command {
 pub struct GuideSession {
     tx: mpsc::Sender<Command>,
     scores: watch::Receiver<Option<Arc<ScoreSetMsg>>>,
-    meshes: watch::Receiver<MeshLog>,
     status: watch::Receiver<StatusMsg>,
     preview: watch::Receiver<Option<Arc<PreviewSnapshot>>>,
     /// The worker runs pinned to this actor's thread: GPU streams are keyed on
@@ -117,13 +114,11 @@ impl GuideSession {
     ) -> Self {
         let (tx, rx) = mpsc::channel(64);
         let (scores_tx, scores) = watch::channel(None);
-        let (meshes_tx, meshes) = watch::channel(MeshLog::default());
         let (status_tx, status) = watch::channel(StatusMsg::default());
         let (preview_tx, preview) = watch::channel(None);
         let actor = Actor::new("brush-guide-session");
         let channels = Channels {
             scores: scores_tx,
-            meshes: meshes_tx,
             status: status_tx,
             preview: preview_tx,
         };
@@ -133,7 +128,6 @@ impl GuideSession {
         Self {
             tx,
             scores,
-            meshes,
             status,
             preview,
             _actor: actor,
@@ -164,13 +158,6 @@ impl GuideSession {
 
     pub fn scores(&self) -> watch::Receiver<Option<Arc<ScoreSetMsg>>> {
         self.scores.clone()
-    }
-
-    /// Brick meshes. A round's bricks are recorded before its score set is
-    /// published, so after a score set `since` yields bricks of at least
-    /// that version; later rounds may already be included.
-    pub fn meshes(&self) -> watch::Receiver<MeshLog> {
-        self.meshes.clone()
     }
 
     pub fn status(&self) -> watch::Receiver<StatusMsg> {

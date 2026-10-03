@@ -2,7 +2,6 @@
 //! and per-voxel coverage / Fisher-uncertainty scores.
 
 pub mod config;
-pub mod geometry;
 pub mod keyframe;
 pub mod live;
 pub mod protocol;

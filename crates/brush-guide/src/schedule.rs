@@ -1,8 +1,7 @@
 //! When the worker runs its two kinds of round, and which views a Fisher
 //! pass scores.
 //!
-//! The voxel round (cells from the splat parameters, TSDF fusion, meshing)
-//! and the Fisher pass (render + backward per view) each have a
+//! The voxel round (cells from the splat parameters) and the Fisher pass (render + backward per view) each have a
 //! [`Cadence`]: a minimum start-to-start interval and a share of wall time.
 
 /// Start-to-start spacing of one kind of round: a round starts no sooner than

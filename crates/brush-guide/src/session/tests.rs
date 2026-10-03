@@ -12,13 +12,11 @@ use std::time::{Duration, Instant};
 async fn is_alive_reflects_worker_channel() {
     let (tx, rx) = mpsc::channel(1);
     let (_scores_tx, scores) = watch::channel(None);
-    let (_meshes_tx, meshes) = watch::channel(MeshLog::default());
     let (_status_tx, status) = watch::channel(StatusMsg::default());
     let (_preview_tx, preview) = watch::channel(None);
     let session = GuideSession {
         tx,
         scores,
-        meshes,
         status,
         preview,
         _actor: Actor::new("test"),

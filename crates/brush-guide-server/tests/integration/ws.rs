@@ -80,10 +80,7 @@ async fn end_to_end() {
     let root = std::env::temp_dir().join(format!("brush-guide-ws-{}", std::process::id()));
     tokio::spawn(brush_guide_server::server::serve(
         listener,
-        GuideConfig {
-            mesh_enabled: true,
-            ..GuideConfig::default()
-        },
+        GuideConfig::default(),
         device,
         root.clone(),
     ));
@@ -113,29 +110,12 @@ async fn end_to_end() {
         .await
         .unwrap();
     }
-    // Mesh bricks follow a score set with a version at least the score
-    // set's; by the next score set the previous one's round has been sent.
-    let (mut last_score, mut last_mesh) = (None, 0u64);
-    let mut saw_mesh = false;
-    while acks.len() < 3 || !saw_mesh || !saw_error {
+    let mut saw_score = false;
+    while acks.len() < 3 || !saw_score || !saw_error {
         match next_header(&mut ws).await {
             ServerHeader::Ack { keyframe_id } => acks.push(keyframe_id),
             ServerHeader::Error { .. } => saw_error = true,
-            ServerHeader::ScoreSet { version, .. } => {
-                if let Some(prev) = last_score {
-                    assert!(last_mesh >= prev, "round {prev} never sent as mesh bricks");
-                }
-                last_score = Some(version);
-            }
-            ServerHeader::MeshBricks { version, .. } => {
-                let score = last_score.expect("mesh bricks after a score set");
-                assert!(
-                    version >= score,
-                    "mesh bricks v{version} after score set v{score}"
-                );
-                last_mesh = version;
-                saw_mesh = true;
-            }
+            ServerHeader::ScoreSet { .. } => saw_score = true,
             _ => {}
         }
     }
@@ -150,15 +130,13 @@ async fn end_to_end() {
     ws.send(Message::binary(keyframe(2, Vec3::new(0.0, 0.0, 2.0))))
         .await
         .unwrap();
-    // The new connection also gets the session's current mesh.
-    let (mut acked, mut saw_mesh) = (false, false);
-    while !acked || !saw_mesh {
+    let mut acked = false;
+    while !acked {
         match next_header(&mut ws).await {
             ServerHeader::Ack { keyframe_id } => {
                 assert_eq!(keyframe_id, 2);
                 acked = true;
             }
-            ServerHeader::MeshBricks { .. } => saw_mesh = true,
             ServerHeader::Error { message } => panic!("{message}"),
             _ => {}
         }

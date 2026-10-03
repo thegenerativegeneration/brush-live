@@ -44,8 +44,6 @@ struct Sample {
     train_iters: u64,
     last_score_ms: u32,
     score_version: u64,
-    mesh_version: u64,
-    mesh_ms: u32,
     /// Slowest `push_keyframe` since the previous sample.
     max_push_ms: u32,
     phys_footprint_mb: f64,
@@ -204,7 +202,6 @@ pub async fn run(
     let session = GuideSession::start(config, device, out_dir.join("session"));
     let status = session.status();
     let scores = session.scores();
-    let meshes = session.meshes();
 
     let start = Instant::now();
     let duration = Duration::from_secs_f32(params.duration_s);
@@ -230,10 +227,6 @@ pub async fn run(
         }
         if now >= next_sample {
             let st = status.borrow().clone();
-            let (mesh_version, mesh_ms) = meshes
-                .borrow()
-                .since(0)
-                .map_or((0, 0), |m| (m.version, m.mesh_ms));
             let (phys, peak) = footprint_mb();
             let sample = Sample {
                 t_s: start.elapsed().as_secs_f32(),
@@ -244,8 +237,6 @@ pub async fn run(
                 train_iters: st.train_iters,
                 last_score_ms: st.last_score_ms,
                 score_version: scores.borrow().as_ref().map_or(0, |s| s.version),
-                mesh_version,
-                mesh_ms,
                 max_push_ms: max_push.as_millis() as u32,
                 phys_footprint_mb: phys,
                 peak_phys_footprint_mb: peak,
@@ -263,14 +254,11 @@ pub async fn run(
     }
 
     // The end state, for comparing guidance quality across runs: splat PLY,
-    // and the mesh bricks and score set as wire frames.
+    // and the score set as a wire frame.
     std::fs::write(
         out_dir.join(format!("{stem}.ply")),
         session.export_splat().await?,
     )?;
-    if let Some(m) = meshes.borrow().since(0) {
-        std::fs::write(out_dir.join(format!("{stem}-mesh.bin")), m.to_frame())?;
-    }
     if let Some(s) = scores.borrow().as_ref() {
         std::fs::write(out_dir.join(format!("{stem}-scores.bin")), s.to_frame())?;
     }

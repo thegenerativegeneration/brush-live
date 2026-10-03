@@ -58,13 +58,6 @@ struct Args {
     /// seconds after the last dumped one.
     #[arg(long, default_value_t = 0.0)]
     dump_every: f32,
-    /// Write every received `mesh_bricks` round to this directory: each
-    /// brick's mesh as `v<version>_brick_<x>_<y>_<z>.ply` (ASCII, world
-    /// metres, sRGB vertex colours when sent) and one JSON line per round in `rounds.jsonl` with its bricks
-    /// (`removed` for bricks that lost their mesh), frame bytes and
-    /// `mesh_ms`.
-    #[arg(long)]
-    dump_mesh: Option<PathBuf>,
     /// Send `finish` this many seconds after connecting (once all frames are
     /// sent), wait for the server's `splat` reply and exit. The server writes
     /// the model to `<root>/<session_id>/splat.ply`.
@@ -116,7 +109,6 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .map(|p| ScoreDump::open(p, started.into_std()))
             .transpose()?,
-        mesh_dump: args.dump_mesh.clone(),
         stop_on_splat: args.finish_after.is_some(),
         dump_every_s: args.dump_every,
         started: started.into_std(),

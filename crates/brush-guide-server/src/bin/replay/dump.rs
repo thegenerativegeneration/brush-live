@@ -1,13 +1,9 @@
-//! Files written for offline analysis: score sets as JSON lines, mesh
-//! bricks as ASCII PLY with one JSON line per round.
+//! Score sets written for offline analysis, as JSON lines.
 
-use brush_guide::geometry::mesh::BrickMesh;
-use brush_guide::protocol::{Cell, MeshBrick};
+use brush_guide::protocol::Cell;
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
-
-use super::viz::brick_name;
 
 /// Appends one JSON line per score set to a file.
 pub(crate) struct ScoreDump {
@@ -60,75 +56,4 @@ impl ScoreDump {
         });
         let _ = writeln!(self.file, "{line}");
     }
-}
-
-/// Writes `mesh` as an ASCII PLY, with `red green blue` vertex properties
-/// if it has colours.
-fn write_ply(path: &Path, mesh: &BrickMesh) -> std::io::Result<()> {
-    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
-    let coloured = !mesh.colours.is_empty();
-    writeln!(
-        out,
-        "ply\nformat ascii 1.0\nelement vertex {}\nproperty float x\nproperty float y\nproperty float z\nproperty float nx\nproperty float ny\nproperty float nz",
-        mesh.positions.len(),
-    )?;
-    if coloured {
-        writeln!(
-            out,
-            "property uchar red\nproperty uchar green\nproperty uchar blue"
-        )?;
-    }
-    writeln!(
-        out,
-        "element face {}\nproperty list uchar uint vertex_indices\nend_header",
-        mesh.indices.len() / 3
-    )?;
-    for (i, (p, n)) in mesh.positions.iter().zip(&mesh.normals).enumerate() {
-        write!(out, "{} {} {} {} {} {}", p[0], p[1], p[2], n[0], n[1], n[2])?;
-        if let Some([r, g, b]) = mesh.colours.get(i) {
-            write!(out, " {r} {g} {b}")?;
-        }
-        writeln!(out)?;
-    }
-    for t in mesh.indices.as_chunks::<3>().0 {
-        writeln!(out, "3 {} {} {}", t[0], t[1], t[2])?;
-    }
-    out.flush()
-}
-
-/// Writes each brick's mesh as `v<version>_brick_<x>_<y>_<z>.ply` in `dir`
-/// and appends the round to `rounds.jsonl`.
-pub(crate) fn dump_mesh_round(
-    dir: &Path,
-    version: u64,
-    mesh_ms: u32,
-    frame_bytes: usize,
-    bricks: &[MeshBrick],
-) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let mut entries = Vec::new();
-    for b in bricks {
-        let [x, y, z] = b.key().0.to_array();
-        match b {
-            MeshBrick::Mesh(m) => {
-                let file = format!("v{version:05}_{}.ply", brick_name(b));
-                write_ply(&dir.join(&file), m)?;
-                entries.push(serde_json::json!({"key": [x, y, z], "file": file, "vertices": m.positions.len()}));
-            }
-            MeshBrick::Removed(_) => {
-                entries.push(serde_json::json!({"key": [x, y, z], "removed": true}));
-            }
-        }
-    }
-    let line = serde_json::json!({
-        "version": version,
-        "bytes": frame_bytes,
-        "mesh_ms": mesh_ms,
-        "bricks": entries,
-    });
-    let mut rounds = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("rounds.jsonl"))?;
-    writeln!(rounds, "{line}")
 }

@@ -1,6 +1,4 @@
 use super::*;
-use crate::geometry::mesh::BrickMesh;
-use crate::geometry::tsdf::BrickKey;
 
 fn kf_header() -> KeyframeHeader {
     KeyframeHeader {
@@ -37,20 +35,6 @@ fn header_json_uses_type_tag() {
     let len = u32::from_le_bytes(frame[0..4].try_into().unwrap()) as usize;
     let json = std::str::from_utf8(&frame[4..4 + len]).unwrap();
     assert_eq!(json, r#"{"type":"ack","keyframe_id":3}"#);
-
-    let frame = encode_frame(
-        &ServerHeader::MeshBricks {
-            version: 5,
-            num_bricks: 2,
-            mesh_ms: 40,
-        },
-        &[],
-    );
-    let (h, _): (serde_json::Value, _) = decode_frame(&frame).unwrap();
-    assert_eq!(
-        h,
-        serde_json::json!({"type": "mesh_bricks", "version": 5, "num_bricks": 2, "mesh_ms": 40})
-    );
 }
 
 #[test]
@@ -191,28 +175,6 @@ fn score_set_header_carries_cell_bytes() {
     assert_eq!(h["cell_bytes"], 19);
 }
 
-/// Vertex colours of the fixture triangle.
-pub(super) const FIXTURE_COLOURS: [[u8; 3]; 3] = [[230, 159, 0], [213, 94, 0], [86, 180, 233]];
-
-/// A 1 m right triangle in brick (1, −2, 0), facing +z, coloured, and the
-/// removal of brick (−1, 0, 3): the bricks of the golden fixture.
-pub(super) fn fixture_bricks() -> [MeshBrick; 2] {
-    let key = BrickKey(glam::IVec3::new(1, -2, 0));
-    let o = glam::Vec3::new(1.0, -2.0, 0.0);
-    [
-        MeshBrick::Mesh(BrickMesh {
-            key,
-            positions: [o, o + glam::Vec3::X, o + glam::Vec3::Y]
-                .map(|p| p.to_array())
-                .to_vec(),
-            normals: vec![[0.0, 0.0, 1.0]; 3],
-            colours: FIXTURE_COLOURS.to_vec(),
-            indices: vec![0, 1, 2],
-        }),
-        MeshBrick::Removed(BrickKey(glam::IVec3::new(-1, 0, 3))),
-    ]
-}
-
 #[test]
 fn confidence_without_depth_size_is_an_error() {
     let mut h = kf_header();
@@ -309,17 +271,6 @@ fn write_golden_fixtures() {
                     message: "bad".into(),
                 },
                 &[],
-            ),
-        ),
-        (
-            "mesh_bricks.bin",
-            encode_frame(
-                &ServerHeader::MeshBricks {
-                    version: 2,
-                    num_bricks: 2,
-                    mesh_ms: 35,
-                },
-                &encode_mesh_bricks(&fixture_bricks()),
             ),
         ),
         (

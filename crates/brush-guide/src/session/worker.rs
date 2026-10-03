@@ -1,22 +1,20 @@
 //! The session worker: trains on incoming keyframes and, when the
 //! scheduler says so, runs a voxel round (score set from the splat
-//! parameters, TSDF fusion, meshing) or a Fisher pass (coverage and
-//! uncertainty per voxel, eviction importance).
+//! parameters) or a Fisher pass (coverage and uncertainty per voxel,
+//! eviction importance).
 
 mod fisher;
 
-use super::geometry::{Geometry, MeshLog};
 use super::preview::{PREVIEW_FLOATS, PreviewClock, PreviewSnapshot};
 use super::splat_read::{SplatRead, view_cones};
 use super::{Command, ScoreSetMsg, StatusMsg};
 use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
-use crate::protocol::{Cell, KeyframeHeader, MeshBrick};
+use crate::protocol::{Cell, KeyframeHeader};
 use crate::schedule::{Cadence, FisherCost, IterThrottle, Round, RoundScheduler};
 use crate::scores::voxel::{RawVoxel, VoxelAggregator};
 use brush_render::gaussian_splats::Splats;
-use burn::module::Module;
 use burn::tensor::Device;
 use glam::UVec2;
 use std::path::{Path, PathBuf};
@@ -27,7 +25,6 @@ use web_time::Instant;
 
 pub(super) struct Channels {
     pub(super) scores: watch::Sender<Option<Arc<ScoreSetMsg>>>,
-    pub(super) meshes: watch::Sender<MeshLog>,
     pub(super) status: watch::Sender<StatusMsg>,
     pub(super) preview: watch::Sender<Option<Arc<PreviewSnapshot>>>,
 }
@@ -135,7 +132,6 @@ struct Worker {
     fisher_passes: u64,
     /// Cost of the last Fisher pass and the splat count it ran at.
     fisher_cost: Option<(FisherCost, u32)>,
-    geometry: Geometry,
     /// Version of the last score set.
     version: u64,
     last_score_ms: u32,
@@ -190,7 +186,6 @@ impl Worker {
             throttle,
             fisher_passes: 0,
             fisher_cost: None,
-            geometry: Geometry::new(),
             version: 0,
             last_score_ms: 0,
             rate_window,
@@ -300,7 +295,6 @@ impl Worker {
         let config = &self.config;
         self.live = LiveModel::new(config.clone(), self.device.clone());
         self.voxels.reset();
-        self.geometry = Geometry::new();
         self.scheduler = scheduler(config);
         self.throttle = IterThrottle::new(config.max_iters_per_s);
         self.fisher_passes = 0;
@@ -312,7 +306,6 @@ impl Worker {
         // `live.iter()` restarts at 0; an old window would underflow.
         self.rate_window = (self.clock.elapsed().as_secs_f64(), self.live.iter());
         self.channels.scores.send_replace(None);
-        self.channels.meshes.send_replace(MeshLog::default());
         self.channels.status.send_replace(StatusMsg::default());
         if self.channels.preview.borrow().is_some() {
             self.preview_version += 1;
@@ -345,10 +338,8 @@ impl Worker {
         self.preview.taken(Instant::now());
     }
 
-    /// Builds the score set from the splat parameters, fuses and meshes the
-    /// TSDF and publishes the round's bricks (when `mesh_enabled`), then
-    /// publishes its score set. `start`
-    /// is when the round started.
+    /// Builds the score set from the splat parameters and publishes it.
+    /// `start` is when the round started.
     async fn voxel_round(&mut self, start: f64) {
         let acc = std::mem::take(&mut self.acc);
         let refine = self.live.take_refine_stats();
@@ -373,30 +364,16 @@ impl Worker {
         self.version += 1;
         let version = self.version;
 
-        let mesh_enabled = self.config.mesh_enabled;
-        let (bricks, pending, num_fused) = if mesh_enabled {
-            self.mesh_round(&splats).await
-        } else {
-            (Vec::new(), 0, 0)
-        };
         let end = self.clock.elapsed().as_secs_f64();
-        let mesh_ms = ((end - scored) * 1000.0) as u32;
         let evicted = self.live.num_evicted() - self.evicted_at_round;
         self.evicted_at_round = self.live.num_evicted();
         log::info!(
-            "round {version} at {start:.2} s: {} cells in {} ms; {} bricks sent of {pending} stale, \
-             {num_fused} views fused, {mesh_ms} ms; {} splats, {evicted} evicted since last round",
+            "round {version} at {start:.2} s: {} cells in {} ms; {} splats, {evicted} evicted since last round",
             cells.len(),
             self.last_score_ms,
-            bricks.len(),
             splats.num_splats()
         );
         self.scheduler.voxel.record(start, end - start);
-        if mesh_enabled {
-            self.channels
-                .meshes
-                .send_modify(|log| log.record(version, mesh_ms, bricks));
-        }
         self.channels
             .scores
             .send_replace(Some(Arc::new(ScoreSetMsg {
@@ -443,22 +420,6 @@ impl Worker {
             per_view_s: c.per_view_s * k,
             fixed_s: c.fixed_s * k,
         })
-    }
-
-    /// Fuses and meshes the TSDF: the bricks to publish, how many were
-    /// stale, and how many views were fused.
-    async fn mesh_round(&mut self, splats: &Splats) -> (Vec<MeshBrick>, usize, usize) {
-        if splats.num_splats() == 0 {
-            return (Vec::new(), 0, 0);
-        }
-        let views = self.live.views();
-        let num_fused = self
-            .geometry
-            .fuse(&splats.valid(), views, &self.sizes)
-            .await;
-        let eye = views.last().expect("views exist").camera.position;
-        let (bricks, pending) = self.geometry.mesh_changed(eye);
-        (bricks, pending, num_fused)
     }
 
     /// Publishes the training rate once a second, the counts otherwise.

@@ -1,25 +1,18 @@
 use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
-use brush_guide::protocol::{
-    MeshBrick, ServerHeader, decode_cells, decode_frame, decode_mesh_bricks,
-};
-use brush_guide::session::GuideSession;
+use brush_guide::protocol::{ServerHeader, decode_cells, decode_frame};
+use brush_guide::session::{GuideSession, forward_frames};
 use glam::Vec3;
 use std::time::Duration;
 
-/// Score sets decode, mesh bricks follow with a version at least the score set's, and colours cover every vertex.
+/// Score sets decode, and a reset clears the session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn scores_arrive_after_keyframes_with_mesh_bricks_following() {
+async fn scores_arrive_after_keyframes() {
     let device = test_scene::device().await.autodiff();
     let dir = std::env::temp_dir().join(format!("brush-guide-session-{}", std::process::id()));
-    let config = GuideConfig {
-        mesh_enabled: true,
-        ..GuideConfig::default()
-    };
-    let session = GuideSession::start(config, device, dir.clone());
+    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
     let mut scores = session.scores();
-    let meshes = session.meshes();
 
     for (i, a) in [0.0f32, 1.0, 2.0].iter().enumerate() {
         let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
@@ -57,67 +50,54 @@ async fn scores_arrive_after_keyframes_with_mesh_bricks_following() {
     let ply = session.export_splat().await.unwrap();
     assert!(ply.starts_with(b"ply"));
 
-    let msg = meshes
-        .borrow()
-        .since(0)
-        .expect("mesh bricks recorded with the score set");
-    // Rounds after the score set may already be recorded: the version is
-    // at least the score set's.
-    assert!(
-        msg.version >= set.version,
-        "{} < {}",
-        msg.version,
-        set.version
-    );
-    assert!(!msg.bricks.is_empty(), "at least one brick");
-
-    let frame = msg.to_frame();
-    let (header, payload): (ServerHeader, &[u8]) = decode_frame(&frame).unwrap();
-    let ServerHeader::MeshBricks {
-        version,
-        num_bricks,
-        ..
-    } = header
-    else {
-        panic!("{header:?}")
-    };
-    assert_eq!(version, msg.version);
-    let decoded = decode_mesh_bricks(payload, num_bricks).unwrap();
-    assert_eq!(decoded.len(), msg.bricks.len());
-    for brick in &decoded {
-        if let MeshBrick::Mesh(m) = brick {
-            assert_eq!(m.colours.len(), m.positions.len(), "brick {:?}", m.key);
-        }
-    }
-
     session.reset().await;
     assert_eq!(session.status().borrow().num_keyframes, 0);
-    assert!(session.meshes().borrow().since(0).is_none());
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// With the default config no round is recorded on the mesh channel, so the frame forwarder has nothing to send.
+/// The frames a session forwards are score sets and status only: no mesh frame follows a score set.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn default_config_records_no_mesh_rounds() {
+async fn forwarded_frames_are_score_sets_and_status() {
     let device = test_scene::device().await.autodiff();
-    let dir = std::env::temp_dir().join(format!("brush-guide-session-nomesh-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("brush-guide-session-frames-{}", std::process::id()));
     let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
-    let mut scores = session.scores();
     for (i, a) in [0.0f32, 1.0, 2.0].iter().enumerate() {
         let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
         session.push_keyframe(h, p).await.unwrap();
     }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let forwarder = {
+        let session = session.clone();
+        tokio::spawn(async move {
+            forward_frames(&session, |frame| {
+                let _ = tx.send(frame);
+                std::future::ready(true)
+            })
+            .await;
+        })
+    };
+    let mut types = Vec::new();
     tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            scores.changed().await.unwrap();
-            if scores.borrow().is_some() {
-                return;
+        while let Some(frame) = rx.recv().await {
+            let (header, _): (serde_json::Value, &[u8]) = decode_frame(&frame).unwrap();
+            let ty = header["type"].as_str().unwrap().to_owned();
+            let done = ty == "score_set";
+            types.push(ty);
+            if done {
+                break;
             }
         }
     })
     .await
-    .expect("a ScoreSet within 60 s");
-    assert!(session.meshes().borrow().since(0).is_none());
+    .expect("a score set frame within 60 s");
+    // A mesh frame, had one existed, would directly follow its score set.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    while let Ok(frame) = rx.try_recv() {
+        let (header, _): (serde_json::Value, &[u8]) = decode_frame(&frame).unwrap();
+        types.push(header["type"].as_str().unwrap().to_owned());
+    }
+    forwarder.abort();
+    assert!(types.iter().all(|t| t == "score_set" || t == "status"), "{types:?}");
     std::fs::remove_dir_all(dir).ok();
 }
 

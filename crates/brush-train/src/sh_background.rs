@@ -64,12 +64,10 @@ pub fn sh_basis(dirs: Tensor<2>) -> Tensor<2> {
 /// World-space unit ray directions of every pixel of `camera` at `size`
 /// (`[h*w, 3]`, row-major — pixel `(x, y)` at index `y * w + x`).
 ///
-/// Pinhole convention matches
-/// `brush_guide::geometry::tsdf::projection::Projection` exactly (pixel
-/// `(i, j)`'s centre at `i + 0.5`, local ray `((px - cx)/fx, (py - cy)/fy,
-/// 1)`); the world rotation matches Brush's forward axis used throughout
-/// `brush-guide` (`camera.rotation * Vec3::Z`, see e.g. `live.rs`'s
-/// `view_cones`).
+/// Pinhole convention: pixel `(i, j)`'s centre at `i + 0.5`, local ray
+/// `((px - cx)/fx, (py - cy)/fy, 1)`; the world rotation matches Brush's
+/// forward axis used throughout `brush-guide` (`camera.rotation * Vec3::Z`,
+/// see e.g. `live.rs`'s `view_cones`).
 ///
 /// Panics if `camera.camera_model` isn't `Pinhole`: a fisheye/KB4 camera's
 /// `focal()` comes from that model's own (non-linear) FOV formula, which

@@ -1,21 +1,17 @@
 //! Handling of server frames: visualised, optionally dumped, summarised
 //! on stderr.
 
-use brush_guide::protocol::{
-    CELL_BYTES, MeshBrick, ServerHeader, decode_cells, decode_frame, decode_mesh_bricks,
-};
+use brush_guide::protocol::{CELL_BYTES, ServerHeader, decode_cells, decode_frame};
 use futures_util::{Stream, StreamExt};
-use std::path::{Path, PathBuf};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::dump::{ScoreDump, dump_mesh_round};
-use super::viz::{Mode, log_mesh_bricks, log_score_set, log_status};
+use super::dump::ScoreDump;
+use super::viz::{Mode, log_score_set, log_status};
 
 pub(crate) struct Receiver {
     pub(crate) rec: rerun::RecordingStream,
     pub(crate) mode: Mode,
     pub(crate) score_dump: Option<ScoreDump>,
-    pub(crate) mesh_dump: Option<PathBuf>,
     /// Return once the server answers `finish` with `splat`.
     pub(crate) stop_on_splat: bool,
     /// Dump a score set only this many seconds after the last dumped one.
@@ -49,9 +45,7 @@ impl Receiver {
         };
         if matches!(
             header,
-            ServerHeader::ScoreSet { .. }
-                | ServerHeader::MeshBricks { .. }
-                | ServerHeader::Status { .. }
+            ServerHeader::ScoreSet { .. } | ServerHeader::Status { .. }
         ) {
             eprint!("[{:8.2} s] ", self.started.elapsed().as_secs_f64());
         }
@@ -73,27 +67,6 @@ impl Receiver {
                 );
                 log_status(&self.rec, num_splats, train_iters_per_s, last_score_ms);
             }
-            ServerHeader::MeshBricks {
-                version,
-                num_bricks,
-                mesh_ms,
-            } => match decode_mesh_bricks(payload, num_bricks) {
-                Ok(bricks) => {
-                    let dump = self.mesh_dump.as_deref();
-                    match handle_mesh_bricks(
-                        &self.rec,
-                        dump,
-                        version,
-                        mesh_ms,
-                        bytes.len(),
-                        &bricks,
-                    ) {
-                        Ok(line) => eprintln!("{line}"),
-                        Err(e) => eprintln!("mesh dump failed: {e}"),
-                    }
-                }
-                Err(e) => eprintln!("bad mesh_bricks v{version}: {e}"),
-            },
             ServerHeader::Error { message } => eprintln!("server error: {message}"),
             ServerHeader::Splat { ply_len } => {
                 eprintln!("splat written on the server ({ply_len} bytes)");
@@ -124,35 +97,4 @@ impl Receiver {
         }
         log_score_set(&self.rec, version, voxel_size, &cells, self.mode);
     }
-}
-
-/// Logs a round of mesh bricks to rerun and optionally dumps it; returns
-/// the per-round summary line.
-pub(crate) fn handle_mesh_bricks(
-    rec: &rerun::RecordingStream,
-    dump: Option<&Path>,
-    version: u64,
-    mesh_ms: u32,
-    frame_bytes: usize,
-    bricks: &[MeshBrick],
-) -> std::io::Result<String> {
-    let removed = bricks
-        .iter()
-        .filter(|b| matches!(b, MeshBrick::Removed(_)))
-        .count();
-    let triangles: usize = bricks
-        .iter()
-        .map(|b| match b {
-            MeshBrick::Mesh(m) => m.indices.len() / 3,
-            MeshBrick::Removed(_) => 0,
-        })
-        .sum();
-    log_mesh_bricks(rec, mesh_ms, frame_bytes, bricks);
-    if let Some(dir) = dump {
-        dump_mesh_round(dir, version, mesh_ms, frame_bytes, bricks)?;
-    }
-    Ok(format!(
-        "mesh bricks v{version}: {} bricks ({removed} removed, {triangles} triangles), {frame_bytes} bytes, TSDF+mesh {mesh_ms} ms",
-        bricks.len()
-    ))
 }
