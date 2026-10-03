@@ -22,6 +22,13 @@ pub struct Seeds {
 
 const FEATURE_RADIUS_PX: f32 = 24.0;
 
+/// A masked depth pixel is backfilled from a feature point only beyond
+/// this depth: nearer masked pixels are usually reflective or dark
+/// surfaces LiDAR flagged, where a feature 24 px away carries the wrong
+/// depth, while beyond LiDAR's ~5 m working range a triangulated point
+/// is the only signal there is.
+const FEATURE_BACKFILL_MIN_DEPTH_M: f32 = 4.5;
+
 pub fn project(camera: &Camera, size: UVec2, world: Vec3) -> Option<(Vec2, f32)> {
     let local = camera.world_to_local().transform_point3(world);
     if local.z <= 1e-4 {
@@ -84,7 +91,8 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
                 // projected feature point fills in, so far geometry still
                 // seeds outdoors. Still no median fallback: a pixel with
                 // neither source is skipped rather than guessed.
-                d.sample_uv(uv.x, uv.y).or_else(|| feature_depth(px))
+                d.sample_uv(uv.x, uv.y)
+                    .or_else(|| feature_depth(px).filter(|d| *d > FEATURE_BACKFILL_MIN_DEPTH_M))
             } else {
                 // No depth map at all: feature points only.
                 feature_depth(px)
@@ -191,8 +199,9 @@ mod tests {
         let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
         // Pixel (1,1) (grid point at stride 2) has an invalid (0.0) depth
         // reading; the other grid points have valid LiDAR at 2.0. A feature
-        // point at z=3 projects nearby: the masked pixel takes its depth,
-        // the valid ones keep LiDAR's.
+        // point at z=6 (beyond FEATURE_BACKFILL_MIN_DEPTH_M) projects
+        // nearby: the masked pixel takes its depth, the valid ones keep
+        // LiDAR's.
         let mut values = vec![2.0; 16];
         values[4 + 1] = 0.0;
         let depth = DepthMap {
@@ -201,7 +210,7 @@ mod tests {
             values,
             confidence: None,
         };
-        let pts = [Vec3::new(0.0, 0.0, 3.0)];
+        let pts = [Vec3::new(0.0, 0.0, 6.0)];
         let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &pts));
         assert_eq!(seeds.means.len(), 4 * 3, "masked pixel is backfilled");
         let depths: Vec<f32> = seeds.means.chunks_exact(3).map(|p| p[2]).collect();
@@ -211,10 +220,30 @@ mod tests {
             "LiDAR wins where it has a value: {depths:?}"
         );
         assert_eq!(
-            depths.iter().filter(|z| (**z - 3.0).abs() < 1e-4).count(),
+            depths.iter().filter(|z| (**z - 6.0).abs() < 1e-4).count(),
             1,
             "the masked pixel takes the feature depth: {depths:?}"
         );
+    }
+
+    #[test]
+    fn masked_depth_pixel_ignores_near_feature_points() {
+        let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        let mut values = vec![2.0; 16];
+        values[4 + 1] = 0.0;
+        let depth = DepthMap {
+            width: 4,
+            height: 4,
+            values,
+            confidence: None,
+        };
+        // Nearby feature (3 m < FEATURE_BACKFILL_MIN_DEPTH_M): indoors this
+        // is the floater case the gate exists for; the masked pixel stays
+        // unseeded.
+        let pts = [Vec3::new(0.0, 0.0, 3.0)];
+        let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &pts));
+        assert_eq!(seeds.means.len(), 3 * 3);
+        assert!(seeds.means.chunks_exact(3).all(|p| (p[2] - 2.0).abs() < 1e-4));
     }
 
     #[test]
