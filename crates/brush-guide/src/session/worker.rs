@@ -488,3 +488,23 @@ fn append_raw_round(path: &Path, version: u64, raw: &[RawVoxel]) -> std::io::Res
         .open(path)?;
     writeln!(file, "{line}")
 }
+
+/// One JSON line: the round's version and each voxel as
+/// `[kx, ky, kz, n, spread, px_per_m, coverage]`.
+fn append_ingredient_round(
+    path: &Path,
+    version: u64,
+    rows: &[(glam::IVec3, f32, f32, f32, f32)],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let voxels: Vec<(i32, i32, i32, f32, f32, f32, f32)> = rows
+        .iter()
+        .map(|(k, n, s, p, c)| (k.x, k.y, k.z, *n, *s, *p, *c))
+        .collect();
+    let line = serde_json::json!({ "version": version, "voxels": voxels });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{line}")
+}
