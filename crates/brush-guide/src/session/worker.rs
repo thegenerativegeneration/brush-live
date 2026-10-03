@@ -272,6 +272,15 @@ impl Worker {
             self.channels
                 .status
                 .send_modify(|s| s.train_iters_per_s = 0.0);
+            // Dump the SH background's coefficients alongside the export,
+            // when the flag is on: the exported `splat.ply` keeps holes
+            // where sky was (the globe isn't baked into it — see the
+            // backlog's non-goals), so this is the only record of what the
+            // globe learned for this session.
+            if let Some(json) = self.live.sh_background_json().await {
+                let path = self.session_dir.join("sh_background.json");
+                let _ = tokio::fs::write(&path, json).await;
+            }
         }
         result
     }
