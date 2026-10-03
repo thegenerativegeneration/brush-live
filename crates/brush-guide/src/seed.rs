@@ -56,6 +56,16 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
         .collect();
     let radius = FEATURE_RADIUS_PX * to_alpha_px.x;
 
+    // Nearest projected feature point within the radius, as depth.
+    let feature_depth = |px: Vec2| {
+        projected
+            .iter()
+            .map(|(p, d)| (p.distance(px), *d))
+            .filter(|(dist, _)| *dist <= radius)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, d)| d)
+    };
+
     let mut seeds = Seeds {
         means: Vec::new(),
         colors: Vec::new(),
@@ -69,21 +79,15 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
             let px = Vec2::new(x as f32 + half, y as f32 + half).min(size.as_vec2() - 0.5);
             let uv = px / size.as_vec2();
             let Some(depth) = (if let Some(d) = input.depth {
-                // A depth map is available: only seed where it has a
-                // trustworthy value there. No feature-point or median
-                // fallback — a pixel the depth map doesn't cover is
-                // skipped rather than guessed.
-                d.sample_uv(uv.x, uv.y)
+                // Trustworthy depth wins. Where the map has no value
+                // (masked low-confidence, or beyond LiDAR range) a nearby
+                // projected feature point fills in, so far geometry still
+                // seeds outdoors. Still no median fallback: a pixel with
+                // neither source is skipped rather than guessed.
+                d.sample_uv(uv.x, uv.y).or_else(|| feature_depth(px))
             } else {
-                // No depth map at all: seed only from a nearby projected
-                // feature point. No median fallback, which used to plant
-                // flat sheets in open space.
-                projected
-                    .iter()
-                    .map(|(p, d)| (p.distance(px), *d))
-                    .filter(|(dist, _)| *dist <= radius)
-                    .min_by(|a, b| a.0.total_cmp(&b.0))
-                    .map(|(_, d)| d)
+                // No depth map at all: feature points only.
+                feature_depth(px)
             }) else {
                 continue;
             };
@@ -183,12 +187,12 @@ mod tests {
     }
 
     #[test]
-    fn invalid_depth_pixel_is_skipped_not_backfilled_from_feature_point() {
+    fn masked_depth_pixel_backfills_from_a_nearby_feature_point() {
         let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
         // Pixel (1,1) (grid point at stride 2) has an invalid (0.0) depth
-        // reading; pixel (3,1) has a valid one. A feature point sits right
-        // next to the invalid pixel, but with a depth map present it must
-        // never be used to backfill.
+        // reading; the other grid points have valid LiDAR at 2.0. A feature
+        // point at z=3 projects nearby: the masked pixel takes its depth,
+        // the valid ones keep LiDAR's.
         let mut values = vec![2.0; 16];
         values[4 + 1] = 0.0;
         let depth = DepthMap {
@@ -199,15 +203,40 @@ mod tests {
         };
         let pts = [Vec3::new(0.0, 0.0, 3.0)];
         let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &pts));
-        // Only the valid pixel (3,1) (and the two on the y=3 row) should be
-        // seeded: 3 of the 4 grid points survive, none at depth 3.0.
-        assert_eq!(seeds.means.len(), 3 * 3, "invalid pixel must be skipped");
+        assert_eq!(seeds.means.len(), 4 * 3, "masked pixel is backfilled");
+        let depths: Vec<f32> = seeds.means.chunks_exact(3).map(|p| p[2]).collect();
+        assert_eq!(
+            depths.iter().filter(|z| (**z - 2.0).abs() < 1e-4).count(),
+            3,
+            "LiDAR wins where it has a value: {depths:?}"
+        );
+        assert_eq!(
+            depths.iter().filter(|z| (**z - 3.0).abs() < 1e-4).count(),
+            1,
+            "the masked pixel takes the feature depth: {depths:?}"
+        );
+    }
+
+    #[test]
+    fn masked_depth_pixel_without_nearby_feature_point_is_skipped() {
+        // Large rgb image scales FEATURE_RADIUS_PX down to ~0.24 alpha px
+        // (same trick as the no-depth radius test), so the projected point
+        // at alpha (0,0) is outside every grid centre's radius.
+        let rgb = image::RgbImage::from_pixel(400, 400, image::Rgb([0, 0, 0]));
+        let mut values = vec![2.0; 16];
+        values[4 + 1] = 0.0;
+        let depth = DepthMap {
+            width: 4,
+            height: 4,
+            values,
+            confidence: None,
+        };
+        let pts = [Vec3::new(-3.0, -3.0, 3.0)];
+        let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &pts));
+        assert_eq!(seeds.means.len(), 3 * 3, "no backfill outside the radius");
         assert!(
-            seeds
-                .means
-                .chunks_exact(3)
-                .all(|p| (p[2] - 2.0).abs() < 1e-4),
-            "no seed should have picked up the feature-point depth: {:?}",
+            seeds.means.chunks_exact(3).all(|p| (p[2] - 2.0).abs() < 1e-4),
+            "{:?}",
             seeds.means
         );
     }
