@@ -126,7 +126,7 @@ impl Default for GuideConfig {
             seed: 42,
             min_depth_confidence: 2,
             sh_background: false,
-            sh_background_alpha_weight: 0.15,
+            sh_background_alpha_weight: 0.0,
             max_train_steps: None,
         }
     }
