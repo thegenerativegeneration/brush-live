@@ -2,7 +2,7 @@ use crate::config::GuideConfig;
 use crate::keyframe::DecodedKeyframe;
 use crate::seed::{SeedInput, Seeds, seed_points};
 use brush_dataset::config::LoadDatasetConfig;
-use brush_dataset::scene::{Scene, SceneView};
+use brush_dataset::scene::{Scene, SceneBatch, SceneView, view_to_packed_data};
 use brush_dataset::scene_loader::SceneLoader;
 use brush_render::gaussian_splats::{SplatRenderMode, Splats, TextureMode, render_splats};
 use brush_render::sh::rgb_to_sh;
@@ -17,6 +17,7 @@ use clap::Parser;
 use glam::{UVec2, Vec3};
 use rand::{RngExt as _, SeedableRng};
 use std::collections::HashSet;
+use std::ops::Range;
 
 /// `LoadDatasetConfig` is a clap `Args` group; this wrapper parses its CLI defaults.
 #[derive(Parser)]
@@ -45,6 +46,9 @@ pub struct LiveModel {
     last_id: Option<u64>,
     recent: Option<SceneLoader>,
     all: Option<SceneLoader>,
+    /// Views in the recent loader; those after `views_in_recent` are in no
+    /// recent pool yet and get drawn directly in `train_step`.
+    recent_len: usize,
     views_in_recent: usize,
     views_in_all: usize,
     iter: u32,
@@ -82,6 +86,7 @@ impl LiveModel {
             last_id: None,
             recent: None,
             all: None,
+            recent_len: 0,
             views_in_recent: 0,
             views_in_all: 0,
             iter: 0,
@@ -202,6 +207,7 @@ impl LiveModel {
             || n >= self.views_in_recent + RECENT_LOADER_REBUILD_EVERY
         {
             let start = n.saturating_sub(self.config.recent_window);
+            self.recent_len = n - start;
             let recent = Scene::new(self.views[start..].to_vec());
             self.recent = Some(SceneLoader::new(
                 &recent,
@@ -346,13 +352,28 @@ impl LiveModel {
             return;
         };
         let use_recent = self.rng.random::<f32>() < self.config.recent_fraction;
-        let loader = if use_recent {
-            self.recent.as_mut()
+        let pending = use_recent
+            .then(|| {
+                pick_pending(
+                    &mut self.rng,
+                    self.recent_len,
+                    self.views_in_recent..self.views.len(),
+                )
+            })
+            .flatten();
+        let batch = if let Some(i) = pending {
+            load_batch(&self.views[i]).await
         } else {
-            self.all.as_mut()
-        }
-        .expect("loaders exist once views exist");
-        let batch = loader.next_batch().await;
+            let loader = if use_recent {
+                self.recent.as_mut()
+            } else {
+                self.all.as_mut()
+            };
+            loader
+                .expect("loaders exist once views exist")
+                .next_batch()
+                .await
+        };
         let (stepped, _) = trainer.step(batch, splats.train()).await;
         let mut splats = stepped.valid();
         self.iter += 1;
@@ -377,6 +398,57 @@ impl LiveModel {
             self.num_evicted += u64::from(stats.num_evicted);
         }
         self.splats = Some(splats);
+    }
+}
+
+/// For a recent-window draw: one of the `pending` views (added since the
+/// recent loader was built) to train on directly, or `None` to draw from the
+/// loader's `loader_len` views. Every view gets the same share.
+fn pick_pending(
+    rng: &mut impl rand::Rng,
+    loader_len: usize,
+    pending: Range<usize>,
+) -> Option<usize> {
+    let r = rng.random_range(0..loader_len + pending.len());
+    (r >= loader_len).then(|| pending.start + r - loader_len)
+}
+
+/// A training batch for one view, decoded and packed as `SceneLoader` does.
+async fn load_batch(view: &SceneView) -> SceneBatch {
+    let raw = view.image.load().await.expect("keyframe image decodes");
+    let (img_packed, has_alpha) = view_to_packed_data(raw, view.image.alpha_mode());
+    SceneBatch {
+        img_packed,
+        has_alpha,
+        alpha_mode: view.image.alpha_mode(),
+        camera: view.camera,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_views_get_a_loader_views_share() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let draws = 22_000;
+        let mut hits = [0usize; 2];
+        for _ in 0..draws {
+            if let Some(i) = pick_pending(&mut rng, 20, 20..22) {
+                hits[i - 20] += 1;
+            }
+        }
+        // Each of the 22 views should get ~1/22 of the draws (1000).
+        for h in hits {
+            assert!((850..1150).contains(&h), "pending view drawn {h} times");
+        }
+    }
+
+    #[test]
+    fn no_pending_views_always_uses_the_loader() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        assert!((0..1000).all(|_| pick_pending(&mut rng, 20, 20..20).is_none()));
     }
 }
 
