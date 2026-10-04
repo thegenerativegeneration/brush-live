@@ -30,6 +30,9 @@ struct LoadArgs {
 /// of the first ones): every rebuild spawns a fresh set of loader threads.
 const RECENT_LOADER_REBUILD_EVERY: usize = 3;
 
+/// With debug timing on, the step profile is logged every this many steps.
+const PROFILE_LOG_EVERY: u32 = 100;
+
 /// Splats trained incrementally as keyframes arrive. Splats are kept on the
 /// inner (non-autodiff) device between steps.
 pub struct LiveModel {
@@ -56,6 +59,8 @@ pub struct LiveModel {
     num_evicted: u64,
     /// Refines and their time since `take_refine_stats`, for debug timing.
     refine_stats: (u32, f64),
+    /// Seconds spent getting training batches since the last profile log.
+    batch_s: f64,
     rng: rand::rngs::StdRng,
 }
 
@@ -92,6 +97,7 @@ impl LiveModel {
             iter: 0,
             num_evicted: 0,
             refine_stats: (0, 0.0),
+            batch_s: 0.0,
             rng,
         }
     }
@@ -165,6 +171,7 @@ impl LiveModel {
                     self.config.seed,
                 );
                 trainer.set_view_cams(self.view_cams.clone());
+                trainer.set_profiling(crate::timing::enabled());
                 if self.config.evict {
                     trainer.enable_eviction(EvictConfig {
                         headroom: self.config.evict_headroom,
@@ -361,6 +368,7 @@ impl LiveModel {
                 )
             })
             .flatten();
+        let t_batch = web_time::Instant::now();
         let batch = if let Some(i) = pending {
             load_batch(&self.views[i]).await
         } else {
@@ -374,9 +382,28 @@ impl LiveModel {
                 .next_batch()
                 .await
         };
+        self.batch_s += t_batch.elapsed().as_secs_f64();
         let (stepped, _) = trainer.step(batch, splats.train()).await;
         let mut splats = stepped.valid();
         self.iter += 1;
+        if self.iter.is_multiple_of(PROFILE_LOG_EVERY)
+            && let Some(p) = trainer.take_profile()
+            && p.steps > 0
+        {
+            let ms = |s: f64| s * 1e3 / f64::from(p.steps);
+            log::debug!(
+                target: crate::timing::TARGET,
+                "step profile over {} steps at {} splats: batch {:.2} ms, forward {:.2}, loss {:.2}, backward {:.2}, optimizer {:.2}, noise {:.2} ms",
+                p.steps,
+                splats.num_splats(),
+                ms(std::mem::take(&mut self.batch_s)),
+                ms(p.forward_s),
+                ms(p.loss_s),
+                ms(p.backward_s),
+                ms(p.optimizer_s),
+                ms(p.noise_s)
+            );
+        }
         if self.iter.is_multiple_of(self.config.refine_every) {
             crate::timing::sync_splats(&splats).await;
             let t = web_time::Instant::now();

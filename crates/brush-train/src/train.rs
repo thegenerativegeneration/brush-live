@@ -32,6 +32,7 @@ use burn::{
 
 use hashbrown::HashSet;
 use rand::SeedableRng;
+use crate::profile::{StepProfile, device_sync, lap};
 use tracing::{Instrument, trace_span};
 
 pub const BOUND_PERCENTILE: f32 = 0.8;
@@ -96,6 +97,8 @@ pub struct SplatTrainer {
     view_cams: Vec<(glam::Vec3, f32)>,
     /// Keeps the splat count within `max_splats` by evicting; `None` caps growth as Brush does.
     evict: Option<Eviction>,
+    /// Per-phase step timing, when on (`set_profiling`).
+    profile: Option<StepProfile>,
     #[cfg(not(target_family = "wasm"))]
     lpips: Option<lpips::LpipsModel>,
     /// The learned SH environment background; `None` when `config.sh_background`
@@ -222,9 +225,21 @@ impl SplatTrainer {
             evict: None,
             sh_background,
             sh_pixel_centres: None,
+            profile: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
         }
+    }
+
+    /// Turns per-phase step timing on or off; on, every step waits for the
+    /// GPU at each phase boundary (see `profile`).
+    pub fn set_profiling(&mut self, on: bool) {
+        self.profile = on.then(StepProfile::default);
+    }
+
+    /// The phase times since the last call; `None` when profiling is off.
+    pub fn take_profile(&mut self) -> Option<StepProfile> {
+        self.profile.as_mut().map(std::mem::take)
     }
 
     /// Percentile bounding box of the splats, refreshed on each refine.
@@ -504,6 +519,13 @@ impl SplatTrainer {
         }
         self.step_count += 1;
 
+        let profiling = self.profile.is_some();
+        let mut phases = [0.0f64; 5];
+        if profiling {
+            device_sync(&splats.device());
+        }
+        let mut clock = web_time::Instant::now();
+
         let [img_h, img_w] = batch.img_size();
         let camera = batch.camera;
 
@@ -555,6 +577,10 @@ impl SplatTrainer {
             let diff_out = render_splats(render_input, &camera, img_size, render_bg)
                 .instrument(trace_span!("Forward"))
                 .await;
+            if profiling {
+                device_sync(&device);
+                phases[0] = lap(&mut clock);
+            }
 
             let pred_image = diff_out.img;
             let refine_weight_holder = diff_out.refine_weight_holder;
@@ -671,6 +697,10 @@ impl SplatTrainer {
             // Strip the autodiff graph off the loss so consumers can read the
             // scalar later without keeping the backward pass alive.
             let loss_inner = loss.clone().inner();
+            if profiling {
+                device_sync(&device);
+                phases[1] = lap(&mut clock);
+            }
             let mut grads = splats.bwd_validate(loss).await;
 
             // The globe's coefficients are a leaf in this same graph (built
@@ -681,12 +711,16 @@ impl SplatTrainer {
                 sh_bg.step(&mut grads, self.config.sh_background_lr);
             }
 
+            // Refine state accumulates on the inner (non-autodiff) device
+            let refine_weight = refine_weight_holder
+                .grad_remove(&mut grads)
+                .expect("XY gradients need to be calculated.")
+                .without_autodiff();
+            if profiling {
+                device_sync(&device);
+                phases[2] = lap(&mut clock);
+            }
             trace_span!("Housekeeping").in_scope(|| {
-                // Refine state accumulates on the inner (non-autodiff) device
-                let refine_weight = refine_weight_holder
-                    .grad_remove(&mut grads)
-                    .expect("XY gradients need to be calculated.")
-                    .without_autodiff();
                 let device = splats.device().inner();
                 let record = self
                     .refine_record
@@ -759,6 +793,10 @@ impl SplatTrainer {
             });
             splats
         });
+        if profiling {
+            device_sync(&device);
+            phases[3] = lap(&mut clock);
+        }
 
         // Add random noise. Only do this in the growth phase, otherwise
         // let the splats settle in without noise, not much point in exploring regions anymore.
@@ -793,6 +831,12 @@ impl SplatTrainer {
             let out = inner.slice_assign(s![.., 0..3], noised_means);
             Tensor::from_inner(out).require_grad()
         });
+
+        if let Some(p) = self.profile.as_mut() {
+            device_sync(&device);
+            phases[4] = lap(&mut clock);
+            p.add(phases);
+        }
 
         let stats = TrainStepStats {
             num_visible,

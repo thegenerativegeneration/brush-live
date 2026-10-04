@@ -22,6 +22,7 @@ serde.workspace = true
 glam.workspace = true
 rand.workspace = true
 tracing.workspace = true
+web-time.workspace = true
 log.workspace = true
 hashbrown.workspace = true
 ball-tree.workspace = true

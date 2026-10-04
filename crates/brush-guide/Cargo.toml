@@ -39,5 +39,9 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 name = "score_bench"
 test = false
 
+[[example]]
+name = "step_bench"
+test = false
+
 [lints]
 workspace = true
