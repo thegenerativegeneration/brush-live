@@ -16,9 +16,9 @@ pub struct StepProfile {
     pub loss_s: f64,
     /// Backward pass, as far as the refine gradient needs it.
     pub backward_s: f64,
-    /// Refine statistics, the rest of the backward, and the Adam steps.
+    /// The rest of the backward and the Adam steps.
     pub optimizer_s: f64,
-    /// Mean noise.
+    /// Refine statistics and mean noise.
     pub noise_s: f64,
 }
 

@@ -54,13 +54,18 @@ pub trait SplatOps: Backend {
     ///
     /// Full forward pipeline: cull, depth sort, readback, project, rasterize.
     ///
-    /// `refine_weight` is a zero-filled accumulator that catches the per-splat
-    /// refinement weight gradient. Only the `Autodiff` impl reads it; the
-    /// concrete backends ignore it.
+    /// `refine_weight` and `coeffs_grad_sq` are zero-filled accumulators that
+    /// catch per-splat bookkeeping the backward produces: the refinement
+    /// weight gradient, and the mean square of each splat's SH gradient, which
+    /// the optimizer wants reduced and would otherwise square a full
+    /// `[N, coeffs, 3]` tensor to get. Only the `Autodiff` impl writes them;
+    /// the concrete backends ignore both.
     /// `min_scale` is the per-splat Mip-Splatting scale floor `[N]`, folded
     /// into scales and opacity inside the projection kernels (and their
     /// backward). With `has_min_scale` false it is a placeholder the kernels
     /// never read; [`Splats::min_scale_arg`] builds the pair.
+    /// `log_scale_offset` adjusts log-scales before the floor without copying
+    /// transforms. Training supplies zero; the viewer uses `ln(splat_scale)`.
     /// `pass` picks forward-only vs. forward+backward-bookkeeping, and (only
     /// for tests) toggles the C^1 smoothstep around the alpha cutoff.
     #[allow(clippy::too_many_arguments)]
@@ -72,7 +77,9 @@ pub trait SplatOps: Backend {
         raw_opacities: FloatTensor<Self>,
         min_scale: FloatTensor<Self>,
         has_min_scale: bool,
+        log_scale_offset: f32,
         refine_weight: FloatTensor<Self>,
+        coeffs_grad_sq: FloatTensor<Self>,
         render_mode: SplatRenderMode,
         background: Vec3,
         pass: gaussian_splats::RasterPass,

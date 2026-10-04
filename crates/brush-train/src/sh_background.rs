@@ -289,7 +289,7 @@ impl ShBackground {
         };
         let stepped = self
             .adam
-            .step(lr, self.coeffs.clone().inner(), &grad, &mut self.state);
+            .step(lr, self.coeffs.clone().inner(), &grad, None, &mut self.state);
         self.coeffs = Tensor::from_inner(stepped).require_grad();
     }
 
