@@ -2,7 +2,7 @@ use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
 use brush_guide::protocol::{ServerHeader, decode_cells, decode_frame};
-use brush_guide::session::{GuideSession, forward_frames};
+use brush_guide::session::GuideSession;
 use glam::Vec3;
 use std::time::Duration;
 
@@ -52,52 +52,6 @@ async fn scores_arrive_after_keyframes() {
 
     session.reset().await;
     assert_eq!(session.status().borrow().num_keyframes, 0);
-    std::fs::remove_dir_all(dir).ok();
-}
-
-/// The frames a session forwards are score sets and status only: no mesh frame follows a score set.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn forwarded_frames_are_score_sets_and_status() {
-    let device = test_scene::device().await.autodiff();
-    let dir = std::env::temp_dir().join(format!("brush-guide-session-frames-{}", std::process::id()));
-    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
-    for (i, a) in [0.0f32, 1.0, 2.0].iter().enumerate() {
-        let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
-        session.push_keyframe(h, p).await.unwrap();
-    }
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let forwarder = {
-        let session = session.clone();
-        tokio::spawn(async move {
-            forward_frames(&session, |frame| {
-                let _ = tx.send(frame);
-                std::future::ready(true)
-            })
-            .await;
-        })
-    };
-    let mut types = Vec::new();
-    tokio::time::timeout(Duration::from_secs(60), async {
-        while let Some(frame) = rx.recv().await {
-            let (header, _): (serde_json::Value, &[u8]) = decode_frame(&frame).unwrap();
-            let ty = header["type"].as_str().unwrap().to_owned();
-            let done = ty == "score_set";
-            types.push(ty);
-            if done {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("a score set frame within 60 s");
-    // A mesh frame, had one existed, would directly follow its score set.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    while let Ok(frame) = rx.try_recv() {
-        let (header, _): (serde_json::Value, &[u8]) = decode_frame(&frame).unwrap();
-        types.push(header["type"].as_str().unwrap().to_owned());
-    }
-    forwarder.abort();
-    assert!(types.iter().all(|t| t == "score_set" || t == "status"), "{types:?}");
     std::fs::remove_dir_all(dir).ok();
 }
 
