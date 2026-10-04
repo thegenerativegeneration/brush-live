@@ -14,6 +14,8 @@ pub const PREVIEW_FLOATS: usize = 14;
 #[derive(Debug, Default)]
 pub struct PreviewSnapshot {
     pub version: u64,
+    /// The `generation` of the last reset before this snapshot (0 before any).
+    pub generation: u64,
     pub count: u32,
     /// Time the worker spent reading the snapshot back.
     pub readback_ms: f32,

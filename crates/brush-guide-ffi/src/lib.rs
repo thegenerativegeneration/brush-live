@@ -301,14 +301,15 @@ pub unsafe extern "C" fn bge_finish(e: *mut BgeEngine, ply_path: *const c_char) 
     }
 }
 
-/// Clears the session for a new segment (new world frame).
+/// Clears the session for a new segment (new world frame). Preview
+/// snapshots published afterwards carry `generation`.
 ///
 /// # Safety
 /// `e` comes from `bge_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn bge_reset(e: *mut BgeEngine) {
+pub unsafe extern "C" fn bge_reset(e: *mut BgeEngine, generation: u64) {
     let e = unsafe { &*e };
-    e.runtime.block_on(e.session.reset());
+    e.runtime.block_on(e.session.reset(generation));
 }
 
 /// Stops all GPU work, including any `bge_warm_up` running on another

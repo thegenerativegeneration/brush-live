@@ -77,7 +77,8 @@ enum Command {
     Keyframe(KeyframeHeader, Vec<u8>, oneshot::Sender<Result<(), String>>),
     /// Export the splats; `true` also pauses training until the next new keyframe.
     Export(bool, oneshot::Sender<Result<Vec<u8>, String>>),
-    Reset(oneshot::Sender<()>),
+    /// Clear the session; later preview snapshots carry the generation.
+    Reset(u64, oneshot::Sender<()>),
     /// `true` stops training, rounds and keyframe decoding until `false`.
     Pause(bool, oneshot::Sender<()>),
     /// Snapshot interval for the preview; `None` turns it off. No reply.
@@ -202,9 +203,11 @@ impl GuideSession {
             .map_err(SessionError::Rejected)
     }
 
-    pub async fn reset(&self) {
+    /// Clears the session. Preview snapshots published after the reset carry
+    /// `generation`, so the host can tell them from snapshots of the old one.
+    pub async fn reset(&self, generation: u64) {
         let (tx, rx) = oneshot::channel();
-        if self.tx.send(Command::Reset(tx)).await.is_ok() {
+        if self.tx.send(Command::Reset(generation, tx)).await.is_ok() {
             let _ = rx.await;
         }
     }

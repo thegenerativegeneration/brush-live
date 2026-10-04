@@ -46,6 +46,7 @@ fn snapshots_follow_training_pause_off_and_reset() {
     assert_eq!(unsafe { bge_push(e, f.as_ptr(), f.len()) }, 0);
     let first = wait_newer(e, 0, 30);
     assert!(first.count > 0);
+    assert_eq!(first.generation, 0, "generation before any reset");
     let floats = unsafe { std::slice::from_raw_parts(first.data, first.count as usize * 14) };
     for s in floats.chunks_exact(14) {
         let q = (s[3] * s[3] + s[4] * s[4] + s[5] * s[5] + s[6] * s[6]).sqrt();
@@ -87,11 +88,20 @@ fn snapshots_follow_training_pause_off_and_reset() {
     std::thread::sleep(Duration::from_millis(500));
     assert!(latest(e, v).is_none(), "snapshot while off");
 
-    // Reset publishes an empty, newer snapshot.
-    unsafe { bge_reset(e) };
+    // Reset publishes an empty, newer snapshot of the new generation, which
+    // later snapshots carry too.
+    unsafe { bge_reset(e, 7) };
     let empty = wait_newer(e, v, 5);
-    assert_eq!(empty.count, 0);
+    assert_eq!((empty.count, empty.generation), (0, 7));
+    let v = empty.version;
     unsafe { bge_preview_release(empty.handle) };
+    unsafe { bge_set_preview(e, 0) };
+    let f = wire(1);
+    assert_eq!(unsafe { bge_push(e, f.as_ptr(), f.len()) }, 0);
+    let trained = wait_newer(e, v, 30);
+    assert!(trained.count > 0);
+    assert_eq!(trained.generation, 7);
+    unsafe { bge_preview_release(trained.handle) };
 
     unsafe { bge_free(e) };
     std::fs::remove_dir_all(dir).ok();

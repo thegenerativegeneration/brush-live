@@ -22,7 +22,8 @@ BgeEngine *bge_new(const char *config_json, const char *session_dir, BgeOut out,
 int32_t bge_push(BgeEngine *engine, const uint8_t *frame, size_t len);
 // Writes the splat PLY and emits a splat frame.
 int32_t bge_finish(BgeEngine *engine, const char *ply_path);
-void bge_reset(BgeEngine *engine);
+// Clears the session for a new segment; preview snapshots published afterwards carry generation.
+void bge_reset(BgeEngine *engine, uint64_t generation);
 // Returns once this engine runs no GPU work (its own warm-up pauses between sizes). A bge_warm_up
 // running on another thread pauses too, between sizes, until every paused engine is resumed or freed.
 void bge_pause(BgeEngine *engine);
@@ -43,6 +44,8 @@ typedef struct {
     float readback_ms;
     const float *data;
     const void *handle;
+    // The generation passed to the last bge_reset before this snapshot; 0 before any reset.
+    uint64_t generation;
 } BgePreview;
 // interval_ms 0: a snapshot after every training step; > 0: at most every interval_ms; < 0: off.
 // Does not wait for the engine. bge_set_preview and bge_preview_latest may be called from any thread,

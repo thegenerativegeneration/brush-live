@@ -50,7 +50,7 @@ async fn scores_arrive_after_keyframes() {
     let ply = session.export_splat().await.unwrap();
     assert!(ply.starts_with(b"ply"));
 
-    session.reset().await;
+    session.reset(1).await;
     assert_eq!(session.status().borrow().num_keyframes, 0);
     std::fs::remove_dir_all(dir).ok();
 }

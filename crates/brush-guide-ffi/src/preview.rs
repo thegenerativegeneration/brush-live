@@ -15,12 +15,15 @@ pub struct BgePreview {
     pub readback_ms: f32,
     pub data: *const f32,
     pub handle: *const c_void,
+    /// The `generation` passed to the last `bge_reset` before this snapshot.
+    pub generation: u64,
 }
 
 const _: () = assert!(
-    std::mem::size_of::<BgePreview>() == 32
+    std::mem::size_of::<BgePreview>() == 40
         && std::mem::offset_of!(BgePreview, data) == 16
         && std::mem::offset_of!(BgePreview, handle) == 24
+        && std::mem::offset_of!(BgePreview, generation) == 32
 );
 
 impl Default for BgePreview {
@@ -31,6 +34,7 @@ impl Default for BgePreview {
             readback_ms: 0.0,
             data: std::ptr::null(),
             handle: std::ptr::null(),
+            generation: 0,
         }
     }
 }
@@ -64,6 +68,7 @@ pub unsafe extern "C" fn bge_preview_latest(e: *mut BgeEngine, after_version: u6
         count: snap.count,
         readback_ms: snap.readback_ms,
         data: snap.data.as_ptr(),
+        generation: snap.generation,
         handle: Arc::into_raw(snap).cast(),
     };
     unsafe { out.write(preview) };

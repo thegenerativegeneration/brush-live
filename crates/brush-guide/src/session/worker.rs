@@ -152,6 +152,8 @@ struct Worker {
     acc: Between,
     preview: PreviewClock,
     preview_version: u64,
+    /// From the last `Command::Reset`; stamped on every preview snapshot.
+    generation: u64,
 }
 
 #[derive(Default)]
@@ -198,6 +200,7 @@ impl Worker {
             acc: Between::default(),
             preview: PreviewClock::default(),
             preview_version: 0,
+            generation: 0,
         }
     }
 
@@ -251,7 +254,8 @@ impl Worker {
                 let _ = reply.send(result);
             }
             Command::SetPreview(interval) => self.preview.set(interval),
-            Command::Reset(reply) => {
+            Command::Reset(generation, reply) => {
+                self.generation = generation;
                 self.reset();
                 let _ = reply.send(());
             }
@@ -328,6 +332,7 @@ impl Worker {
                 .preview
                 .send_replace(Some(Arc::new(PreviewSnapshot {
                     version: self.preview_version,
+                    generation: self.generation,
                     ..PreviewSnapshot::default()
                 })));
         }
@@ -346,6 +351,7 @@ impl Worker {
             .preview
             .send_replace(Some(Arc::new(PreviewSnapshot {
                 version: self.preview_version,
+                generation: self.generation,
                 count,
                 readback_ms: t.elapsed().as_secs_f32() * 1000.0,
                 data,
