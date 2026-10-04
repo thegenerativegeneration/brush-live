@@ -23,8 +23,8 @@ int32_t bge_push(BgeEngine *engine, const uint8_t *frame, size_t len);
 // Writes the splat PLY and emits a splat frame.
 int32_t bge_finish(BgeEngine *engine, const char *ply_path);
 void bge_reset(BgeEngine *engine);
-// Returns once this engine runs no GPU work (its own warm-up pauses between sizes).
-// A bge_warm_up running at the same time on another thread is not paused.
+// Returns once this engine runs no GPU work (its own warm-up pauses between sizes). A bge_warm_up
+// running on another thread pauses too, between sizes, until every paused engine is resumed or freed.
 void bge_pause(BgeEngine *engine);
 void bge_resume(BgeEngine *engine);
 // Runs the session warm-up (GPU autotuning at the configured splat budget and keyframe size) and

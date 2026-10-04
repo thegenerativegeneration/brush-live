@@ -3,6 +3,7 @@
 //! parameters) or a Fisher pass (coverage and uncertainty per voxel,
 //! eviction importance).
 
+mod drain;
 mod fisher;
 
 use super::preview::{PREVIEW_FLOATS, PreviewClock, PreviewSnapshot};
@@ -16,6 +17,7 @@ use crate::schedule::{Cadence, FisherCost, IterThrottle, Round, RoundScheduler};
 use crate::scores::voxel::{RawVoxel, VoxelAggregator};
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::Device;
+use drain::{Drain, try_take};
 use glam::UVec2;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,30 +50,28 @@ pub(super) async fn worker(
         }
     }
     let mut w = Worker::new(config, device, session_dir, channels);
+    let mut last_step = Duration::ZERO;
     loop {
         // With nothing to train, block for the next command; otherwise just drain.
-        let cmd = if w.idle() {
+        let mut next = if w.idle() {
             match rx.recv().await {
                 Some(c) => Some(c),
                 None => return,
             }
         } else {
-            match rx.try_recv() {
-                Ok(c) => Some(c),
-                Err(mpsc::error::TryRecvError::Empty) => None,
-                Err(mpsc::error::TryRecvError::Disconnected) => return,
-            }
+            let Ok(c) = try_take(&mut rx) else { return };
+            c
         };
-        if let Some(cmd) = cmd {
-            let t = Instant::now();
-            let is_kf = matches!(cmd, Command::Keyframe(..));
-            w.handle(cmd).await;
-            if is_kf {
-                if let Some(s) = w.live.splats() {
-                    crate::timing::sync_splats(s).await;
-                }
-                w.acc.kf_s += t.elapsed().as_secs_f64();
-                w.acc.kfs += 1;
+        // Take further queued commands before the next step, within a
+        // budget, so ingest keeps up when training steps get slow.
+        let mut drain = Drain::new(Instant::now(), last_step);
+        while let Some(cmd) = next {
+            w.handle_timed(cmd).await;
+            drain.handled();
+            next = None;
+            if drain.more(Instant::now()) {
+                let Ok(c) = try_take(&mut rx) else { return };
+                next = c;
             }
         }
 
@@ -82,7 +82,7 @@ pub(super) async fn worker(
         if let Some(wait) = w.throttle.wait_s(w.clock.elapsed().as_secs_f64()) {
             match tokio::time::timeout(Duration::from_secs_f64(wait), rx.recv()).await {
                 Ok(Some(cmd)) => {
-                    w.handle(cmd).await;
+                    w.handle_timed(cmd).await;
                     continue;
                 }
                 Ok(None) => return,
@@ -92,7 +92,8 @@ pub(super) async fn worker(
         w.throttle.record_step(w.clock.elapsed().as_secs_f64());
         let t = Instant::now();
         w.live.train_step().await;
-        w.acc.train_s += t.elapsed().as_secs_f64();
+        last_step = t.elapsed();
+        w.acc.train_s += last_step.as_secs_f64();
         w.acc.steps += 1;
         if w.step_cap_reached() {
             log::info!("max_train_steps reached: training stopped at step {}", w.live.iter());
@@ -207,6 +208,20 @@ impl Worker {
 
     fn step_cap_reached(&self) -> bool {
         self.config.max_train_steps.is_some_and(|n| self.live.iter() >= n)
+    }
+
+    /// [`Self::handle`], counting keyframes and their time for the timing log.
+    async fn handle_timed(&mut self, cmd: Command) {
+        let t = Instant::now();
+        let is_kf = matches!(cmd, Command::Keyframe(..));
+        self.handle(cmd).await;
+        if is_kf {
+            if let Some(s) = self.live.splats() {
+                crate::timing::sync_splats(s).await;
+            }
+            self.acc.kf_s += t.elapsed().as_secs_f64();
+            self.acc.kfs += 1;
+        }
     }
 
     async fn handle(&mut self, cmd: Command) {

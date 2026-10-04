@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::watch;
 
+mod prewarm;
 mod preview;
 pub use preview::*;
 
@@ -48,6 +49,8 @@ pub struct BgeEngine {
     forwarder: tokio::task::JoinHandle<()>,
     warmup: Option<WarmupControl>,
     session_paused: AtomicBool,
+    /// This engine holds the process-wide pre-warm pause.
+    holds_prewarm: AtomicBool,
 }
 
 /// A running warm-up and the flag that pauses it between splat counts.
@@ -59,17 +62,10 @@ struct WarmupControl {
 impl WarmupControl {
     /// Pauses the warm-up; true once it is done or gone (it panicked, which
     /// also releases the session), so the session may be commanded. False
-    /// once it is parked. Checks `ready` first: after the warm-up ends,
-    /// `parked` is closed and reads as false.
+    /// once it is parked.
     async fn pause(&self) -> bool {
         let _ = self.pause.send(true);
-        let mut parked = self.warmup.parked();
-        let mut ready = self.warmup.ready();
-        tokio::select! {
-            biased;
-            _ = ready.wait_for(|r| *r) => true,
-            Ok(_) = parked.wait_for(|p| *p) => false,
-        }
+        prewarm::parked_or_done(self.warmup.parked(), self.warmup.ready()).await
     }
 }
 
@@ -243,6 +239,7 @@ pub unsafe extern "C" fn bge_new(
         forwarder,
         warmup,
         session_paused: AtomicBool::new(false),
+        holds_prewarm: AtomicBool::new(false),
     }))
 }
 
@@ -314,23 +311,28 @@ pub unsafe extern "C" fn bge_reset(e: *mut BgeEngine) {
     e.runtime.block_on(e.session.reset());
 }
 
-/// Stops all GPU work; returns after the step, round or warm-up size in
-/// progress.
+/// Stops all GPU work, including any `bge_warm_up` running on another
+/// thread; returns after the step, round or warm-up size in progress.
 ///
 /// # Safety
 /// `e` comes from `bge_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_pause(e: *mut BgeEngine) {
     let e = unsafe { &*e };
-    if let Some(warmup) = &e.warmup
-        && !e.runtime.block_on(warmup.pause())
-    {
-        // The session takes no commands during the warm-up; `bge_resume`
-        // lets the warm-up go on.
-        return;
+    if !e.holds_prewarm.swap(true, Ordering::SeqCst) {
+        prewarm::hold();
     }
-    e.runtime.block_on(e.session.set_paused(true));
-    e.session_paused.store(true, Ordering::SeqCst);
+    let own_warmup_parked = e
+        .warmup
+        .as_ref()
+        .is_some_and(|warmup| !e.runtime.block_on(warmup.pause()));
+    // The session takes no commands during its own warm-up; `bge_resume`
+    // lets the warm-up go on.
+    if !own_warmup_parked {
+        e.runtime.block_on(e.session.set_paused(true));
+        e.session_paused.store(true, Ordering::SeqCst);
+    }
+    e.runtime.block_on(prewarm::settle());
 }
 
 /// Resumes after `bge_pause`; held keyframes are added in order.
@@ -346,12 +348,16 @@ pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
     if e.session_paused.swap(false, Ordering::SeqCst) {
         e.runtime.block_on(e.session.set_paused(false));
     }
+    if e.holds_prewarm.swap(false, Ordering::SeqCst) {
+        prewarm::release();
+    }
 }
 
 /// Runs the session warm-up to completion. `config_json` is read as in
 /// `bge_new`. Returns 0 on success, 1 on a config error, no GPU adapter or a
 /// panic in the warm-up. The tuning is kept in memory by the process-wide
-/// device, so later sessions reuse it.
+/// device, so later sessions reuse it. While any engine is paused, the
+/// warm-up waits between splat counts.
 ///
 /// # Safety
 /// `config_json` is NUL-terminated UTF-8.
@@ -368,9 +374,11 @@ pub unsafe extern "C" fn bge_warm_up(config_json: *const c_char) -> i32 {
     let Some(device) = device(&runtime) else {
         return 1;
     };
-    let warmup = Warmup::spawn(config, device);
+    let warmup = Warmup::spawn_pausable(config, device, prewarm::flag());
+    let registration = prewarm::register(&warmup);
     let mut ready = warmup.ready();
     let done = runtime.block_on(ready.wait_for(|r| *r)).is_ok();
+    drop(registration);
     drop(warmup);
     runtime.shutdown_background();
     i32::from(!done)
@@ -387,6 +395,9 @@ pub unsafe extern "C" fn bge_free(e: *mut BgeEngine) {
         return;
     }
     let e = unsafe { Box::from_raw(e) };
+    if e.holds_prewarm.swap(false, Ordering::SeqCst) {
+        prewarm::release();
+    }
     let BgeEngine {
         runtime,
         session,
