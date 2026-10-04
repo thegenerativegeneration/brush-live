@@ -61,6 +61,8 @@ pub struct LiveModel {
     refine_stats: (u32, f64),
     /// Seconds spent getting training batches since the last profile log.
     batch_s: f64,
+    /// Whether the trainer times its phases; `batch_s` only accumulates then.
+    profiling: bool,
     rng: rand::rngs::StdRng,
 }
 
@@ -98,6 +100,7 @@ impl LiveModel {
             num_evicted: 0,
             refine_stats: (0, 0.0),
             batch_s: 0.0,
+            profiling: false,
             rng,
         }
     }
@@ -171,7 +174,8 @@ impl LiveModel {
                     self.config.seed,
                 );
                 trainer.set_view_cams(self.view_cams.clone());
-                trainer.set_profiling(crate::timing::enabled());
+                self.profiling = crate::timing::enabled();
+                trainer.set_profiling(self.profiling);
                 if self.config.evict {
                     trainer.enable_eviction(EvictConfig {
                         headroom: self.config.evict_headroom,
@@ -382,7 +386,9 @@ impl LiveModel {
                 .next_batch()
                 .await
         };
-        self.batch_s += t_batch.elapsed().as_secs_f64();
+        if self.profiling {
+            self.batch_s += t_batch.elapsed().as_secs_f64();
+        }
         let (stepped, _) = trainer.step(batch, splats.train()).await;
         let mut splats = stepped.valid();
         self.iter += 1;
@@ -436,6 +442,9 @@ fn pick_pending(
     loader_len: usize,
     pending: Range<usize>,
 ) -> Option<usize> {
+    if pending.is_empty() {
+        return None;
+    }
     let r = rng.random_range(0..loader_len + pending.len());
     (r >= loader_len).then(|| pending.start + r - loader_len)
 }
@@ -455,6 +464,25 @@ async fn load_batch(view: &SceneView) -> SceneBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_pending_views_leave_the_rng_untouched() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let mut fresh = rand::rngs::StdRng::seed_from_u64(7);
+        for _ in 0..10 {
+            assert!(pick_pending(&mut rng, 20, 20..20).is_none());
+        }
+        assert_eq!(rng.random::<u64>(), fresh.random::<u64>());
+    }
+
+    #[test]
+    fn pending_views_after_the_window_slid_map_to_their_indices() {
+        // 35 views pooled at the last rebuild (the loader holds the last 20), 2 new since.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let picked: std::collections::HashSet<usize> =
+            (0..2000).filter_map(|_| pick_pending(&mut rng, 20, 35..37)).collect();
+        assert_eq!(picked, [35, 36].into_iter().collect());
+    }
 
     #[test]
     fn pending_views_get_a_loader_views_share() {

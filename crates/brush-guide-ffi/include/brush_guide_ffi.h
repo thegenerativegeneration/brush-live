@@ -23,6 +23,7 @@ int32_t bge_push(BgeEngine *engine, const uint8_t *frame, size_t len);
 // Writes the splat PLY and emits a splat frame.
 int32_t bge_finish(BgeEngine *engine, const char *ply_path);
 // Clears the session for a new segment; preview snapshots published afterwards carry generation.
+// Snapshots before any reset carry 0, so pass a value different from every earlier one (e.g. 1, 2, …).
 void bge_reset(BgeEngine *engine, uint64_t generation);
 // Returns once this engine runs no GPU work (its own warm-up pauses between sizes). A bge_warm_up
 // running on another thread pauses too, between sizes, until every paused engine is resumed or freed.
