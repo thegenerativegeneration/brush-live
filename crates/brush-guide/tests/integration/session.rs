@@ -233,3 +233,26 @@ async fn step_cap_stops_training_but_keyframes_and_finish_still_work() {
     assert!(len > 0);
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Held-out keyframes are acknowledged, never trained, and their resends stay out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_out_keyframes_stay_out_of_training() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-holdout-{}", std::process::id()));
+    let config = GuideConfig {
+        holdout_every: 2,
+        ..GuideConfig::default()
+    };
+    let session = GuideSession::start(config, device, dir.clone());
+    for (i, a) in [0.0f32, 0.5, 1.0, 1.5].iter().enumerate() {
+        let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
+        session.push_keyframe(h, p).await.unwrap();
+    }
+    let (h, p) = test_scene::keyframe(1, Vec3::new(0.0, 0.0, 2.0));
+    session.push_keyframe(h, p).await.unwrap();
+    assert_eq!(session.status().borrow().num_keyframes, 2);
+    let ids: Vec<u64> =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("holdout.json")).unwrap()).unwrap();
+    assert_eq!(ids, vec![1, 3]);
+    std::fs::remove_dir_all(dir).ok();
+}

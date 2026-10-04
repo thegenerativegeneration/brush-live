@@ -86,6 +86,12 @@ pub struct GuideConfig {
     /// `finish` still exports. For fixed-step measurement runs; `None` trains
     /// until the session ends.
     pub max_train_steps: Option<u32>,
+    /// Hold every this many new keyframes out of training and seeding and
+    /// score the splats on them (PSNR, SSIM in the log, black background), for
+    /// replays. 0 off; 2 or more (1 would hold out every keyframe and counts as 0).
+    pub holdout_every: u32,
+    /// Seconds between held-out scorings; there is one more at finish.
+    pub eval_interval_s: f32,
 }
 
 impl Default for GuideConfig {
@@ -128,6 +134,8 @@ impl Default for GuideConfig {
             sh_background: false,
             sh_background_alpha_weight: 0.0,
             max_train_steps: None,
+            holdout_every: 0,
+            eval_interval_s: 30.0,
         }
     }
 }

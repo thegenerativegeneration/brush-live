@@ -5,6 +5,7 @@
 
 mod drain;
 mod fisher;
+mod holdout;
 
 use super::preview::{PREVIEW_FLOATS, PreviewClock, PreviewSnapshot};
 use super::splat_read::{SplatRead, view_cones};
@@ -19,6 +20,7 @@ use brush_render::gaussian_splats::Splats;
 use burn::tensor::Device;
 use drain::{Drain, try_take};
 use glam::UVec2;
+use holdout::Holdout;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,6 +116,9 @@ pub(super) async fn worker(
                 Round::Fisher(max_views) => w.fisher_pass(now, max_views).await,
             }
         }
+        if w.holdout.due(w.clock.elapsed().as_secs_f64()) {
+            w.eval_holdout().await;
+        }
         w.publish_status();
         brush_async::yield_now().await;
     }
@@ -154,6 +159,7 @@ struct Worker {
     preview_version: u64,
     /// From the last `Command::Reset`; stamped on every preview snapshot.
     generation: u64,
+    holdout: Holdout,
 }
 
 #[derive(Default)]
@@ -168,6 +174,7 @@ impl Worker {
     fn new(config: GuideConfig, device: Device, session_dir: PathBuf, channels: Channels) -> Self {
         let clock = Instant::now();
         let live = LiveModel::new(config.clone(), device.clone());
+        let holdout = Holdout::new(config.holdout_every, config.eval_interval_s);
         let mut voxels = VoxelAggregator::new(
             config.voxel_size,
             config.min_cell_opacity,
@@ -201,6 +208,7 @@ impl Worker {
             preview: PreviewClock::default(),
             preview_version: 0,
             generation: 0,
+            holdout,
         }
     }
 
@@ -264,13 +272,20 @@ impl Worker {
 
     async fn add_keyframe(&mut self, h: &KeyframeHeader, payload: &[u8]) -> Result<(), String> {
         // A resend must not overwrite the stored image of the first send.
-        if self.live.contains(h.id) {
+        if self.live.contains(h.id) || self.holdout.contains(h.id) {
             return Ok(());
         }
         let kf = decode_keyframe(h, payload, &self.session_dir)
             .await
             .map_err(|e| e.to_string())?;
+        if self.holdout.next_is_held() {
+            // Fail before recording, so a resend is tried again.
+            kf.view.image.load().await.map_err(|e| e.to_string())?;
+            self.holdout.add_held(h.id, kf.camera, kf.view, &self.session_dir);
+            return Ok(());
+        }
         if self.live.add_keyframe(kf).await {
+            self.holdout.note_trained();
             self.sizes.push(UVec2::new(h.width, h.height));
             if self.finished {
                 self.finished = false;
@@ -278,6 +293,28 @@ impl Worker {
             }
         }
         Ok(())
+    }
+
+    /// Scores the splats on the held-out views and logs the result.
+    async fn eval_holdout(&mut self) {
+        let now = self.clock.elapsed().as_secs_f64();
+        let Some(splats) = self.live.splats() else {
+            return;
+        };
+        if let Some(r) = self.holdout.eval(splats, now).await {
+            // Eval time does not count against the training step rate.
+            self.rate_window.0 += r.ms / 1e3;
+            log::info!(
+                "eval at {now:.2} s: {} held-out views, psnr {:.2} dB, ssim {:.4}; iter {}, {} splats ({:.0} ms, black background{})",
+                r.views,
+                r.psnr,
+                r.ssim,
+                self.live.iter(),
+                splats.num_splats(),
+                r.ms,
+                if self.config.sh_background { ", SH background not composited" } else { "" }
+            );
+        }
     }
 
     /// The splats as PLY; `finish` also pauses training.
@@ -289,6 +326,7 @@ impl Worker {
             None => Err("no splats yet".to_owned()),
         };
         if finish && result.is_ok() {
+            self.eval_holdout().await;
             self.finished = true;
             self.channels
                 .status
@@ -313,6 +351,7 @@ impl Worker {
         }
         let config = &self.config;
         self.live = LiveModel::new(config.clone(), self.device.clone());
+        self.holdout = Holdout::new(config.holdout_every, config.eval_interval_s);
         self.voxels.reset();
         self.scheduler = scheduler(config);
         self.throttle = IterThrottle::new(config.max_iters_per_s);
