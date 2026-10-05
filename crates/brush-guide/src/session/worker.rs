@@ -103,7 +103,10 @@ pub(super) async fn worker(
         w.totals_s.train += dt;
         w.acc.steps += 1;
         if w.step_cap_reached() {
-            log::info!("max_train_steps reached: training stopped at step {}", w.live.iter());
+            log::info!(
+                "max_train_steps reached: training stopped at step {}",
+                w.live.iter()
+            );
         }
         if w.preview.due(Instant::now()) {
             w.wait_for_training();
@@ -272,7 +275,9 @@ impl Worker {
     }
 
     fn step_cap_reached(&self) -> bool {
-        self.config.max_train_steps.is_some_and(|n| self.live.iter() >= n)
+        self.config
+            .max_train_steps
+            .is_some_and(|n| self.live.iter() >= n)
     }
 
     /// Waits for all queued GPU work, which is training's unless an
@@ -352,7 +357,8 @@ impl Worker {
         if self.holdout.next_is_held() {
             // Fail before recording, so a resend is tried again.
             kf.view.image.load().await.map_err(|e| e.to_string())?;
-            self.holdout.add_held(h.id, kf.camera, kf.view, &self.session_dir);
+            self.holdout
+                .add_held(h.id, kf.camera, kf.view, &self.session_dir);
             return Ok(());
         }
         if self.live.add_keyframe(kf).await {
@@ -383,7 +389,11 @@ impl Worker {
                 self.live.iter(),
                 splats.num_splats(),
                 r.ms,
-                if self.config.sh_background { ", SH background not composited" } else { "" }
+                if self.config.sh_background {
+                    ", SH background not composited"
+                } else {
+                    ""
+                }
             );
         }
     }

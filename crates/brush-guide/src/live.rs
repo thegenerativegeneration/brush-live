@@ -480,8 +480,9 @@ mod tests {
     fn pending_views_after_the_window_slid_map_to_their_indices() {
         // 35 views pooled at the last rebuild (the loader holds the last 20), 2 new since.
         let mut rng = rand::rngs::StdRng::seed_from_u64(3);
-        let picked: std::collections::HashSet<usize> =
-            (0..2000).filter_map(|_| pick_pending(&mut rng, 20, 35..37)).collect();
+        let picked: std::collections::HashSet<usize> = (0..2000)
+            .filter_map(|_| pick_pending(&mut rng, 20, 35..37))
+            .collect();
         assert_eq!(picked, [35, 36].into_iter().collect());
     }
 

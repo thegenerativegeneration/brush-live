@@ -1,9 +1,9 @@
+mod frames;
 mod preview;
 mod splat_read;
 #[cfg(test)]
 mod tests;
 mod worker;
-mod frames;
 
 pub use frames::forward_frames;
 

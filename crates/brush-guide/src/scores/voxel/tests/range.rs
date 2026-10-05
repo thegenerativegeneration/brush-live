@@ -16,7 +16,10 @@ fn unchanged_sigma_survives_a_collapsing_pass_population() {
     };
     // Pass 1: V (σ 0.4) tops a wide range against A (σ 0.1).
     let first = agg.aggregate(
-        &[g([0.5; 3], 1.0, 0.0, 0.4), g([5.5, 0.5, 0.5], 1.0, 0.0, 0.1)],
+        &[
+            g([0.5; 3], 1.0, 0.0, 0.4),
+            g([5.5, 0.5, 0.5], 1.0, 0.0, 0.1),
+        ],
         &[],
         0.0,
     );
@@ -38,7 +41,10 @@ fn unchanged_sigma_survives_a_collapsing_pass_population() {
 /// identical pass maps exactly as if the NaN pass never happened.
 #[test]
 fn nan_pass_leaves_range_unchanged() {
-    let round = [g([0.5; 3], 1.0, 0.0, 0.4), g([5.5, 0.5, 0.5], 1.0, 0.0, 0.1)];
+    let round = [
+        g([0.5; 3], 1.0, 0.0, 0.4),
+        g([5.5, 0.5, 0.5], 1.0, 0.0, 0.1),
+    ];
     let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
     agg.aggregate(&round, &[], 0.0);
     agg.aggregate(&[none(0.5)], &[], 1.0);
@@ -52,16 +58,25 @@ fn nan_pass_leaves_range_unchanged() {
 fn reset_clears_the_smoothed_range() {
     let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
     agg.aggregate(
-        &[g([0.5; 3], 1.0, 0.0, 0.1), g([5.5, 0.5, 0.5], 1.0, 0.0, 0.4)],
+        &[
+            g([0.5; 3], 1.0, 0.0, 0.1),
+            g([5.5, 0.5, 0.5], 1.0, 0.0, 0.4),
+        ],
         &[],
         0.0,
     );
     agg.reset();
     let cells = agg.aggregate(
-        &[g([0.5; 3], 1.0, 0.0, 0.19), g([5.5, 0.5, 0.5], 1.0, 0.0, 0.21)],
+        &[
+            g([0.5; 3], 1.0, 0.0, 0.19),
+            g([5.5, 0.5, 0.5], 1.0, 0.0, 0.21),
+        ],
         &[],
         1.0,
     );
     let top = cells.iter().find(|c| c.center[0] > 1.0).unwrap();
-    assert_eq!(top.uncertainty, 255, "fresh range from the first pass after reset");
+    assert_eq!(
+        top.uncertainty, 255,
+        "fresh range from the first pass after reset"
+    );
 }

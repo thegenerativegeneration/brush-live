@@ -124,7 +124,10 @@ fn long_captures_keep_newest_and_take_one_view_per_stratum() {
     let picked = v.select(322, 5, 7);
     assert_eq!(picked.len(), 30);
     assert!(picked.windows(2).all(|w| w[0] < w[1]), "sorted, unique");
-    assert!((312..322).all(|i| picked.contains(&i)), "newest 10 included");
+    assert!(
+        (312..322).all(|i| picked.contains(&i)),
+        "newest 10 included"
+    );
     // 20 strata over the 312 older views: one pick in each.
     for (j, &i) in picked[..20].iter().enumerate() {
         assert!((j * 312 / 20..(j + 1) * 312 / 20).contains(&i), "{j}: {i}");

@@ -1,10 +1,10 @@
+use super::metrics::reference_focal;
 use brush_render::bwd::render_splats;
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use burn::module::Module;
 use burn::tensor::{Distribution, Tensor, s};
 use glam::{UVec2, Vec3};
-use super::metrics::reference_focal;
 
 pub struct PassView {
     pub camera: Camera,

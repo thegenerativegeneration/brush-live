@@ -13,7 +13,10 @@ fn pruned_voxel_restarts_uninformed() {
     let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
     // Two voxels so the pass has a range; V at x=0 gets informed bytes.
     agg.aggregate(
-        &[g([0.5; 3], 1.0, 0.8, 0.1), g([5.5, 0.5, 0.5], 1.0, 0.2, 0.4)],
+        &[
+            g([0.5; 3], 1.0, 0.8, 0.1),
+            g([5.5, 0.5, 0.5], 1.0, 0.2, 0.4),
+        ],
         &[],
         0.0,
     );
@@ -33,7 +36,10 @@ fn pruned_voxel_restarts_uninformed() {
 fn short_absence_keeps_bytes() {
     let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
     agg.aggregate(
-        &[g([0.5; 3], 1.0, 0.8, 0.1), g([5.5, 0.5, 0.5], 1.0, 0.2, 0.4)],
+        &[
+            g([0.5; 3], 1.0, 0.8, 0.1),
+            g([5.5, 0.5, 0.5], 1.0, 0.2, 0.4),
+        ],
         &[],
         0.0,
     );
@@ -65,7 +71,10 @@ fn absent_voxels_are_pruned_from_memory() {
 #[test]
 fn fisher_scored_voxel_survives_pruning() {
     let mut agg = VoxelAggregator::new(1.0, 0.1, SCALE);
-    let k = [g([0.5; 3], 1.0, 0.6, 0.1), g([5.5, 0.5, 0.5], 1.0, 0.2, 0.4)];
+    let k = [
+        g([0.5; 3], 1.0, 0.6, 0.1),
+        g([5.5, 0.5, 0.5], 1.0, 0.2, 0.4),
+    ];
     for i in 0..=PRUNE_AFTER_ROUNDS + 1 {
         agg.update_fisher(&k);
         agg.cells(&row(5, 1), &[], i as f64);

@@ -247,11 +247,19 @@ mod tests {
 
         let at_min = [Vec3::new(0.0, 0.0, FEATURE_BACKFILL_MIN_DEPTH_M)];
         let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &at_min));
-        assert_eq!(seeds.means.len(), 3 * 3, "exactly at the minimum is rejected");
+        assert_eq!(
+            seeds.means.len(),
+            3 * 3,
+            "exactly at the minimum is rejected"
+        );
 
         let just_beyond = [Vec3::new(0.0, 0.0, FEATURE_BACKFILL_MIN_DEPTH_M + 0.1)];
         let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &just_beyond));
-        assert_eq!(seeds.means.len(), 4 * 3, "just beyond the minimum backfills");
+        assert_eq!(
+            seeds.means.len(),
+            4 * 3,
+            "just beyond the minimum backfills"
+        );
     }
 
     #[test]
@@ -271,7 +279,12 @@ mod tests {
         let pts = [Vec3::new(0.0, 0.0, 3.0)];
         let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &pts));
         assert_eq!(seeds.means.len(), 3 * 3);
-        assert!(seeds.means.chunks_exact(3).all(|p| (p[2] - 2.0).abs() < 1e-4));
+        assert!(
+            seeds
+                .means
+                .chunks_exact(3)
+                .all(|p| (p[2] - 2.0).abs() < 1e-4)
+        );
     }
 
     #[test]
@@ -292,7 +305,10 @@ mod tests {
         let seeds = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &pts));
         assert_eq!(seeds.means.len(), 3 * 3, "no backfill outside the radius");
         assert!(
-            seeds.means.chunks_exact(3).all(|p| (p[2] - 2.0).abs() < 1e-4),
+            seeds
+                .means
+                .chunks_exact(3)
+                .all(|p| (p[2] - 2.0).abs() < 1e-4),
             "{:?}",
             seeds.means
         );

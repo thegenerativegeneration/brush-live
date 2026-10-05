@@ -9,8 +9,8 @@ use crate::scores::pass::{PassView, score_pass};
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};
 use brush_render::AlphaMode;
 use brush_render::camera::Camera;
-use brush_render::kernels::camera_model::CameraModel;
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
+use brush_render::kernels::camera_model::CameraModel;
 use brush_train::config::TrainConfig;
 use brush_train::train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds};
 use burn::module::Module as _;
@@ -57,7 +57,11 @@ impl Warmup {
     /// Like [`Self::spawn`], but the warm-up stops between splat counts while
     /// `pause` is true; the count in progress finishes first. [`Self::parked`]
     /// tells when it waits.
-    pub fn spawn_pausable(config: GuideConfig, device: Device, pause: watch::Receiver<bool>) -> Self {
+    pub fn spawn_pausable(
+        config: GuideConfig,
+        device: Device,
+        pause: watch::Receiver<bool>,
+    ) -> Self {
         let (tx, ready) = watch::channel(false);
         let (parked_tx, parked) = watch::channel(false);
         let mut gate = Gate {
@@ -68,7 +72,11 @@ impl Warmup {
         actor
             .run(move || async move {
                 let sizes = warmup_sizes(config.max_splats);
-                log::info!("warm-up: {} splat counts up to {}", sizes.len(), config.max_splats);
+                log::info!(
+                    "warm-up: {} splat counts up to {}",
+                    sizes.len(),
+                    config.max_splats
+                );
                 let secs = warm_up_gated(&config, &device, Some(&mut gate)).await;
                 log::info!("warm-up done in {secs:.1} s; sessions start now");
                 let _ = tx.send(true);
@@ -155,7 +163,10 @@ async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&
 
 /// `n` small Gaussians spread through the camera's view between 1 and 5 m.
 fn dummy_splats(n: u32, camera: &Camera, rng: &mut impl rand::Rng, device: &Device) -> Splats {
-    let (tx, ty) = ((camera.fov_x / 2.0).tan() as f32, (camera.fov_y / 2.0).tan() as f32);
+    let (tx, ty) = (
+        (camera.fov_x / 2.0).tan() as f32,
+        (camera.fov_y / 2.0).tan() as f32,
+    );
     let n = n as usize;
     let means: Vec<f32> = (0..n)
         .flat_map(|_| {
@@ -240,7 +251,9 @@ mod tests {
     fn sizes_cover_each_bucket_up_to_the_budget() {
         assert_eq!(
             warmup_sizes(750_000),
-            vec![4096, 8192, 16384, 32768, 65536, 131_072, 262_144, 524_288, 750_000]
+            vec![
+                4096, 8192, 16384, 32768, 65536, 131_072, 262_144, 524_288, 750_000
+            ]
         );
         assert_eq!(warmup_sizes(1 << 14), vec![4096, 8192, 16384]);
         assert_eq!(warmup_sizes(100), vec![4096]);
