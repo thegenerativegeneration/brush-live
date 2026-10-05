@@ -1,6 +1,7 @@
 //! Reading a nerfstudio-style capture export: `transforms.json`, depth and
 //! confidence files, feature points.
 
+use brush_guide::protocol::{ClientHeader, decode_frame, mono_block};
 use clap::ValueEnum;
 use glam::Vec3;
 use serde::Deserialize;
@@ -14,6 +15,14 @@ pub(crate) enum DepthMode {
     All,
     /// Send depth with confidence; the server masks low-confidence depth.
     High,
+}
+
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+pub(crate) enum MonoMode {
+    /// Copy the phone's mono-depth block into each keyframe that has one.
+    On,
+    /// Send no mono depth.
+    Off,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +91,39 @@ pub(crate) fn load_depth(
         None
     };
     Ok(Some((depth_bytes, confidence, [w, h])))
+}
+
+/// A frame's mono-depth block (size, raw float16 bytes) from the phone's
+/// wire frame `wire/<image stem>.bin`. `None` without that file or without
+/// a block; an error for an unreadable or malformed file, or a block whose
+/// sides are outside 1..=1024.
+pub(crate) fn load_mono(dir: &Path, frame: &Frame) -> anyhow::Result<Option<([u32; 2], Vec<u8>)>> {
+    let Some(stem) = Path::new(&frame.file_path).file_stem() else {
+        return Ok(None);
+    };
+    let path = dir
+        .join("wire")
+        .join(format!("{}.bin", stem.to_string_lossy()));
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let (header, payload) = decode_frame::<ClientHeader>(&bytes)?;
+    let ClientHeader::Keyframe(h) = header else {
+        anyhow::bail!("{}: not a keyframe frame", path.display());
+    };
+    let Some((size, block)) = mono_block(&h, payload)? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        size.iter().all(|s| (1..=1024).contains(s)),
+        "{}: mono depth size {}x{} outside 1..=1024",
+        path.display(),
+        size[0],
+        size[1]
+    );
+    Ok(Some((size, block.to_vec())))
 }
 
 /// Reads an ASCII PLY whose first three vertex properties are x y z.

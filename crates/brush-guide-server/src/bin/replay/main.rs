@@ -11,7 +11,9 @@ mod viz;
 use brush_guide::protocol::{ClientHeader, KeyframeHeader, encode_frame};
 use brush_guide::seed::project;
 use clap::Parser;
-use dataset::{Depth, DepthMode, Frame, Transforms, feature_points, load_depth};
+use dataset::{
+    Depth, DepthMode, Frame, MonoMode, Transforms, feature_points, load_depth, load_mono,
+};
 use dump::ScoreDump;
 use futures_util::{Sink, SinkExt, StreamExt};
 use glam::{Mat4, UVec2, Vec3};
@@ -49,6 +51,12 @@ struct Args {
     /// Whether to send the export's depth (and confidence) alongside each keyframe.
     #[arg(long, value_enum, default_value_t = DepthMode::High)]
     depth: DepthMode,
+    /// Whether to copy the phone's mono-depth block from `wire/<id>.bin` into
+    /// each keyframe that has one. The server's feature-point scale fallback
+    /// then sees this tool's feature points (from `points.ply`), not the
+    /// phone's per-frame points, so that fallback is not reproduced exactly.
+    #[arg(long, value_enum, default_value_t = MonoMode::On)]
+    mono: MonoMode,
     /// Append one JSON line per received `score_set` to this file. Each cell is
     /// `[x, y, z, coverage, uncertainty, age, nx, ny, nz, density,
     /// uninformed]`, with `nx, ny, nz = 0, 0, 0` when the cell has no normal.
@@ -145,6 +153,7 @@ where
 {
     let mut path_points = Vec::new();
     let mut warned_missing_conf = false;
+    let mut mono_frames = 0usize;
     let frames = t.frames.iter().cycle().take(t.frames.len() * args.loops);
     for (i, f) in frames.enumerate() {
         let (header, jpeg) = keyframe_header(args, t, f, i)?;
@@ -173,11 +182,25 @@ where
             .take(args.points_per_frame)
             .copied()
             .collect();
+        let mono = match args.mono {
+            MonoMode::Off => None,
+            MonoMode::On => load_mono(&args.dataset, f).unwrap_or_else(|e| {
+                eprintln!("warning: {}: mono depth skipped: {e}", f.file_path);
+                None
+            }),
+        };
+        mono_frames += usize::from(mono.is_some());
         let header = KeyframeHeader {
             num_points: visible.len() as u32,
+            mono_depth_size: mono.as_ref().map(|(size, _)| *size),
             ..header
         };
-        let payload = keyframe_payload(jpeg, depth.as_ref(), &visible);
+        let payload = keyframe_payload(
+            jpeg,
+            depth.as_ref(),
+            &visible,
+            mono.as_ref().map(|(_, block)| block.as_slice()),
+        );
         sink.send(Message::binary(encode_frame(
             &ClientHeader::Keyframe(header),
             &payload,
@@ -191,6 +214,9 @@ where
             &rerun::LineStrips3D::new([path_points.clone()]),
         )?;
         tokio::time::sleep(Duration::from_secs_f32(1.0 / args.rate)).await;
+    }
+    if args.mono == MonoMode::On {
+        println!("{mono_frames} keyframes carried the phone's mono depth");
     }
     Ok(())
 }
@@ -251,8 +277,14 @@ fn keyframe_header(
     Ok((header, jpeg))
 }
 
-/// JPEG, then depth and confidence if any, then the points as f32 xyz.
-fn keyframe_payload(jpeg: Vec<u8>, depth: Option<&Depth>, points: &[Vec3]) -> Vec<u8> {
+/// JPEG, then depth and confidence if any, then the points as f32 xyz, then
+/// the mono-depth block if any.
+fn keyframe_payload(
+    jpeg: Vec<u8>,
+    depth: Option<&Depth>,
+    points: &[Vec3],
+    mono: Option<&[u8]>,
+) -> Vec<u8> {
     let mut payload = jpeg;
     if let Some((depth_bytes, confidence, _)) = depth {
         payload.extend_from_slice(depth_bytes);
@@ -264,6 +296,9 @@ fn keyframe_payload(jpeg: Vec<u8>, depth: Option<&Depth>, points: &[Vec3]) -> Ve
         for v in p.to_array() {
             payload.extend_from_slice(&v.to_le_bytes());
         }
+    }
+    if let Some(mono) = mono {
+        payload.extend_from_slice(mono);
     }
     payload
 }
