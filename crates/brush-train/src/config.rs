@@ -85,6 +85,11 @@ pub struct TrainConfig {
     #[clap(long, help_heading = "Training options", default_value = "0.2")]
     pub ssim_weight: f32,
 
+    /// Compute the SSIM term every this many steps: 1 every step, 0 never.
+    /// Steps without it train on the L1 term alone at its usual weight.
+    #[clap(long, help_heading = "Training options", default_value = "1")]
+    pub ssim_every: u32,
+
     /// Factor of the opacity decay.
     #[arg(long, help_heading = "Training options", default_value = "0.004")]
     pub opac_decay: f32,

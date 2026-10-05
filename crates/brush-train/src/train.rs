@@ -87,7 +87,6 @@ pub struct SplatTrainer {
     lr_mean_columns: Tensor<2>,
     refine_record: Option<RefineRecord>,
     optim: Option<SplatOptim>,
-    ssim_enabled: bool,
     bounds: BoundingBox,
     step_count: u32,
     max_sh_degree: u32,
@@ -110,6 +109,17 @@ pub struct SplatTrainer {
     /// `sh_background::pixel_centres`); directions are rebuilt from it on the
     /// GPU each step, so nothing per view is cached.
     sh_pixel_centres: Option<(glam::UVec2, Tensor<2>)>,
+}
+
+/// `(l1, ssim)` kernel weights for `step` (1-based). The RGB loss is
+/// `(1 - w) * L1 - w * SSIM`; steps that skip SSIM keep the L1 weight and
+/// pass an SSIM weight of 0, which selects the L1-only loss kernel.
+pub(crate) fn loss_weights(ssim_weight: f32, ssim_every: u32, step: u32) -> (f32, f32) {
+    if ssim_weight <= 0.0 {
+        return (1.0, 0.0);
+    }
+    let ssim_now = ssim_every != 0 && step % ssim_every == 0;
+    (1.0 - ssim_weight, if ssim_now { -ssim_weight } else { 0.0 })
 }
 
 fn inv_sigmoid(x: Tensor<1>) -> Tensor<1> {
@@ -176,8 +186,6 @@ impl SplatTrainer {
             1.0
         };
 
-        let ssim_enabled = config.ssim_weight > 0.0;
-
         // Optimizer state lives on the inner device.
         let opt_device = device.clone().inner();
         let (rot, scale) = (config.lr_rotation as f32, config.lr_scale as f32);
@@ -217,7 +225,6 @@ impl SplatTrainer {
             lr_mean_columns,
             optim: None,
             refine_record: None,
-            ssim_enabled,
             bounds,
             step_count: 0,
             max_sh_degree: 0,
@@ -606,11 +613,11 @@ impl SplatTrainer {
             // a = 1 would pull predicted alpha to fully opaque); we feed
             // `pred` with 4 channels and the kernel's `c == 3` workgroup
             // emits `|pred.a - gt.a|` into the alpha channel.
-            let (l1_w, ssim_w) = if self.ssim_enabled {
-                (1.0 - self.config.ssim_weight, -self.config.ssim_weight)
-            } else {
-                (1.0, 0.0)
-            };
+            let (l1_w, ssim_w) = loss_weights(
+                self.config.ssim_weight,
+                self.config.ssim_every,
+                self.step_count,
+            );
             // Only composite when there's a real alpha channel and a non-zero
             // bg to mix in; the kernel skips the per-pixel `(1-a)*bg` math
             // entirely when this is None. `ImageLossConfig::composite_bg`
@@ -1465,3 +1472,34 @@ mod profile_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "sh_background_integration_tests.rs"]
 mod sh_background_integration_tests;
+
+#[cfg(test)]
+mod loss_weight_tests {
+    use super::loss_weights;
+
+    #[test]
+    fn every_step_keeps_todays_weights() {
+        for step in 1..10 {
+            assert_eq!(loss_weights(0.2, 1, step), (0.8, -0.2));
+        }
+    }
+
+    #[test]
+    fn every_k_uses_ssim_on_multiples_and_keeps_l1_weight() {
+        let got: Vec<_> = (1..=8).map(|s| loss_weights(0.2, 4, s)).collect();
+        for (i, (l1, ssim)) in got.iter().enumerate() {
+            let step = i as u32 + 1;
+            assert_eq!(*l1, 0.8, "step {step}");
+            assert_eq!(*ssim, if step % 4 == 0 { -0.2 } else { 0.0 }, "step {step}");
+        }
+    }
+
+    #[test]
+    fn never_and_zero_weight_have_no_ssim() {
+        for step in 1..10 {
+            assert_eq!(loss_weights(0.2, 0, step), (0.8, 0.0));
+            assert_eq!(loss_weights(0.0, 1, step), (1.0, 0.0));
+            assert_eq!(loss_weights(0.0, 0, step), (1.0, 0.0));
+        }
+    }
+}
