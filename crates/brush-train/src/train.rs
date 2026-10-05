@@ -288,6 +288,12 @@ impl SplatTrainer {
         e.fresh = true;
     }
 
+    /// Eviction importance per splat in splat order; `None` without eviction state.
+    pub async fn importance(&self) -> Option<Vec<f32>> {
+        let life = self.evict.as_ref()?.life.as_ref()?;
+        Some(crate::evict::read_f32(life.importance.clone()).await)
+    }
+
     /// Splats inside `cone` are never evicted.
     pub fn set_protect_cone(&mut self, cone: Option<ProtectCone>) {
         if let Some(e) = self.evict.as_mut() {
@@ -382,7 +388,7 @@ impl SplatTrainer {
                 ev.recent.backlog = 0;
             }
         }
-        if !ev.fresh {
+        if ev.config.external_importance && !ev.fresh {
             return (dead, 0);
         }
         let shortfall = std::mem::take(&mut ev.seed_shortfall);
@@ -576,6 +582,7 @@ impl SplatTrainer {
             num_visible,
             loss_inner,
             refine_weight,
+            importance,
             max_radius,
             coeffs_grad_sq,
         ) = {
@@ -737,6 +744,13 @@ impl SplatTrainer {
             }
             // Reduced in the backward off the compact rows, so the dense SH
             // gradient never gets squared just to be summed away.
+            let importance = diff_out
+                .importance_holder
+                .grad_remove(&mut grads)
+                .map(Tensor::without_autodiff)
+                .unwrap_or_else(|| {
+                    Tensor::zeros([splats.num_splats() as usize], &device.clone().inner())
+                });
             let coeffs_grad_sq = diff_out
                 .coeffs_grad_sq_holder
                 .grad_remove(&mut grads)
@@ -749,6 +763,7 @@ impl SplatTrainer {
                 diff_out.num_visible,
                 loss_inner,
                 refine_weight,
+                importance,
                 max_radius,
                 coeffs_grad_sq,
             )
@@ -827,7 +842,7 @@ impl SplatTrainer {
             let record = self
                 .refine_record
                 .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
-            record.gather_stats(refine_weight, visible.clone(), max_radius);
+            record.gather_stats(refine_weight, importance, visible.clone(), max_radius);
             if let Some(e) = self.evict.as_mut() {
                 e.life
                     .get_or_insert_with(|| SplatLife::new(splats.num_splats() as usize, &device));
@@ -890,6 +905,15 @@ impl SplatTrainer {
             .refine_record
             .take()
             .expect("Can only refine if refine stats are initialized");
+        if let Some(e) = self.evict.as_mut()
+            && !e.config.external_importance
+            && let Some(life) = e.life.as_mut()
+        {
+            life.update_importance(
+                refiner.importance_sum.clone(),
+                refiner.importance_views.clone(),
+            );
+        }
 
         let max_allowed_bounds = self.bounds.extent.max_element() * 100.0;
 

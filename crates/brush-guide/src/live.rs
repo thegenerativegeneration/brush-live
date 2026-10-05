@@ -184,6 +184,7 @@ impl LiveModel {
                         min_age: self.config.evict_min_age,
                         max_cell_fraction: self.config.evict_max_cell_fraction,
                         recent_refines: self.config.evict_recent_refines,
+                        external_importance: true,
                     });
                 }
                 self.trainer = Some(trainer);

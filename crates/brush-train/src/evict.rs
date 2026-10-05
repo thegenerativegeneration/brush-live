@@ -14,13 +14,15 @@
 //! growth may fill up to `max_splats · (1 − headroom / 2)`; the last
 //! `headroom / 2` stays free for seeding new keyframes.
 //!
-//! Importance is supplied from outside (`set_importance`) per splat and is
-//! carried through append, prune and split like the optimizer state. Splats
+//! Importance is the Speedy-Splat score accumulated in the refine record,
+//! averaged per seeing view over the refine window (temporarily it can
+//! instead be supplied from outside via `set_importance`). It is per splat
+//! and carried through append, prune and split like the optimizer state. Splats
 //! that were never scored, are younger than `min_age` refines, or lie in the
 //! protected view cone are never evicted. Within one eviction no 1 m cell
 //! loses more than `max_cell_fraction` of its splats, so a spatially
-//! correlated low score cannot wipe a region in one go, and a new importance
-//! set must arrive between two evictions so each one ranks fresh scores.
+//! correlated low score cannot wipe a region in one go. With external importance a new set
+//! must arrive between two evictions so each one ranks fresh scores.
 
 use crate::config::TrainConfig;
 use crate::lod::top_k_indices;
@@ -37,6 +39,8 @@ pub struct EvictConfig {
     pub max_cell_fraction: f32,
     /// Refines a seeded cell stays newly observed for.
     pub recent_refines: u32,
+    /// Temporary: true takes importance from `set_importance` with the freshness gate, false from the refine record.
+    pub external_importance: bool,
 }
 
 /// Seeds one keyframe must place in a cell to mark it newly observed, so a
@@ -215,6 +219,13 @@ impl SplatLife {
 
     /// Takes new scores; NaN keeps a splat's previous score, or 0 if it was
     /// never scored (+inf).
+    /// Mean importance per seeing view over the refine window; splats no view saw keep theirs.
+    pub(crate) fn update_importance(&mut self, sum: Tensor<1>, views: Tensor<1>) {
+        let seen = views.clone().greater_elem(0.0);
+        let mean = sum.div(views.clamp_min(1.0));
+        self.importance = self.importance.clone().mask_where(seen, mean);
+    }
+
     pub(crate) fn set_importance(&mut self, values: &[f32]) {
         let device = self.importance.device();
         let new: Tensor<1> =

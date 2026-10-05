@@ -50,7 +50,7 @@ fn batch() -> SceneBatch {
 
 /// A trainer at a 60-splat budget with growth and force-splits off, so a
 /// refine changes the count only by pruning; one step taken.
-async fn trainer_at_budget(min_age: u32) -> (SplatTrainer, Splats) {
+async fn trainer_at_budget(min_age: u32, external: bool) -> (SplatTrainer, Splats) {
     let device: Device = brush_cube::test_helpers::test_device().await.into();
     let device = device.autodiff();
     let mut config = TrainConfig::parse_from(["test"]);
@@ -65,6 +65,7 @@ async fn trainer_at_budget(min_age: u32) -> (SplatTrainer, Splats) {
         min_age,
         max_cell_fraction: 1.0,
         recent_refines: 2,
+        external_importance: external,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
     (trainer, s.valid())
@@ -89,7 +90,7 @@ fn importance() -> Vec<f32> {
 
 #[tokio::test]
 async fn eviction_removes_lowest_and_keeps_adam_rows_aligned() {
-    let (mut trainer, s) = trainer_at_budget(0).await;
+    let (mut trainer, s) = trainer_at_budget(0, true).await;
     trainer.set_importance(&importance());
     trainer.note_seed_shortfall(1);
 
@@ -148,7 +149,7 @@ async fn eviction_removes_lowest_and_keeps_adam_rows_aligned() {
 /// No eviction: no demand, blocked demand without a new keyframe, and a keyframe whose seeds land elsewhere.
 #[tokio::test]
 async fn no_eviction_without_demand() {
-    let (mut trainer, s) = trainer_at_budget(0).await;
+    let (mut trainer, s) = trainer_at_budget(0, true).await;
     trainer.set_importance(&importance());
     let (s, stats) = trainer.refine(1, s).await;
     assert_eq!(stats.num_evicted, 0);
@@ -156,7 +157,10 @@ async fn no_eviction_without_demand() {
 
     let (mut trainer, s) = split_trainer_at_budget().await;
     let (s, stats) = trainer.refine(1, s).await;
-    assert_eq!(stats.num_evicted, 0, "blocked demand without a new keyframe");
+    assert_eq!(
+        stats.num_evicted, 0,
+        "blocked demand without a new keyframe"
+    );
     assert_eq!(stats.num_split_oversized, 0);
     assert_eq!(s.num_splats() as usize, N);
 
@@ -171,14 +175,14 @@ async fn no_eviction_without_demand() {
 #[tokio::test]
 async fn young_and_unscored_splats_are_protected() {
     // Age 1 after this refine, below min_age 2.
-    let (mut trainer, s) = trainer_at_budget(2).await;
+    let (mut trainer, s) = trainer_at_budget(2, true).await;
     trainer.set_importance(&importance());
     trainer.note_seed_shortfall(1);
     let (_, stats) = trainer.refine(1, s).await;
     assert_eq!(stats.num_evicted, 0);
 
     // Never scored: importance stays +inf.
-    let (mut trainer, s) = trainer_at_budget(0).await;
+    let (mut trainer, s) = trainer_at_budget(0, true).await;
     trainer.note_seed_shortfall(1);
     let (_, stats) = trainer.refine(1, s).await;
     assert_eq!(stats.num_evicted, 0);
@@ -186,7 +190,7 @@ async fn young_and_unscored_splats_are_protected() {
 
 #[tokio::test]
 async fn splats_in_the_protect_cone_are_kept() {
-    let (mut trainer, s) = trainer_at_budget(0).await;
+    let (mut trainer, s) = trainer_at_budget(0, true).await;
     // Ascending importance: without the cone, splats 0..6 would go.
     trainer.set_importance(&(0..N).map(|i| i as f32).collect::<Vec<_>>());
     // Splats sit at x = 0.01·i, z = 2. A cone from the origin along +z with
@@ -224,6 +228,7 @@ async fn eviction_then_split_fills_to_growth_limit() {
         min_age: 0,
         max_cell_fraction: 1.0,
         recent_refines: 2,
+        external_importance: true,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
     trainer.set_importance(&importance());
@@ -260,7 +265,7 @@ async fn eviction_then_split_fills_to_growth_limit() {
 
 #[tokio::test]
 async fn evicts_once_per_importance_set_and_nan_keeps_scores() {
-    let (mut trainer, s) = trainer_at_budget(0).await;
+    let (mut trainer, s) = trainer_at_budget(0, true).await;
     trainer.set_importance(&importance());
     trainer.note_seed_shortfall(1);
     let (s, stats) = trainer.refine(1, s).await;
@@ -312,6 +317,7 @@ async fn split_trainer_at_budget() -> (SplatTrainer, Splats) {
         min_age: 0,
         max_cell_fraction: 1.0,
         recent_refines: 2,
+        external_importance: true,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
     trainer.set_importance(&importance());
@@ -337,4 +343,110 @@ async fn evictions_stop_once_the_keyframe_window_passes() {
         assert_eq!(next.num_splats(), 57);
         s = next;
     }
+}
+
+/// Overwrites the record's importance totals as if every splat was seen once with score `imp[i]`
+/// (`f32::NAN` -> not seen this window).
+fn record_importance(trainer: &mut SplatTrainer, imp: &[f32]) {
+    let rec = trainer.refine_record.as_mut().expect("record after a step");
+    let device = rec.vis_weight.device();
+    let seen: Vec<f32> = imp
+        .iter()
+        .map(|x| if x.is_nan() { 0.0 } else { 1.0 })
+        .collect();
+    let sum: Vec<f32> = imp
+        .iter()
+        .map(|x| if x.is_nan() { 0.0 } else { *x })
+        .collect();
+    rec.importance_sum = Tensor::from_data(TensorData::new(sum, [imp.len()]), &device);
+    rec.importance_views = Tensor::from_data(TensorData::new(seen, [imp.len()]), &device);
+}
+
+async fn life_importance(trainer: &SplatTrainer) -> Vec<f32> {
+    trainer.importance().await.expect("eviction state")
+}
+
+#[tokio::test]
+async fn a_step_records_importance_for_visible_splats() {
+    let (trainer, _) = trainer_at_budget(0, false).await;
+    let rec = trainer.refine_record.as_ref().expect("record");
+    let views = rows(rec.importance_views.clone().unsqueeze_dim::<2>(1)).await;
+    let sum = rows(rec.importance_sum.clone().unsqueeze_dim::<2>(1)).await;
+    assert!(
+        views.iter().any(|v| v[0] == 1.0),
+        "some splat seen in the one step"
+    );
+    for (v, s) in views.iter().zip(&sum) {
+        assert_eq!(
+            v[0] > 0.0,
+            s[0] > 0.0,
+            "views count exactly the steps with a score"
+        );
+    }
+}
+
+#[tokio::test]
+async fn recorded_importance_drives_eviction_without_any_external_call() {
+    let (mut trainer, s) = trainer_at_budget(0, false).await;
+    record_importance(&mut trainer, &importance());
+    trainer.note_seed_shortfall(1);
+    let (s, stats) = trainer.refine(1, s).await;
+    assert_eq!(stats.num_evicted, 6);
+    let imp = importance();
+    let kept: Vec<f32> = (0..N).filter(|&i| imp[i] >= 6.0).map(|i| imp[i]).collect();
+    assert_eq!(life_importance(&trainer).await, kept);
+    assert_eq!(s.num_splats() as usize, N - 6);
+}
+
+#[tokio::test]
+async fn importance_is_the_mean_over_seeing_views_and_unseen_splats_keep_theirs() {
+    let (mut trainer, s) = trainer_at_budget(0, false).await;
+    {
+        let rec = trainer.refine_record.as_mut().unwrap();
+        let device = rec.vis_weight.device();
+        let sum: Vec<f32> = (0..N)
+            .map(|i| if i == 0 { 0.0 } else { 2.0 * i as f32 })
+            .collect();
+        let views: Vec<f32> = (0..N).map(|i| if i == 0 { 0.0 } else { 2.0 }).collect();
+        rec.importance_sum = Tensor::from_data(TensorData::new(sum, [N]), &device);
+        rec.importance_views = Tensor::from_data(TensorData::new(views, [N]), &device);
+    }
+    let (s, _) = trainer.refine(1, s).await;
+    let first = life_importance(&trainer).await;
+    assert_eq!(first[5], 5.0, "sum / views");
+    assert!(first[0].is_infinite(), "never seen -> still unscored");
+    let (s, _) = trainer.step(batch(), s.train()).await;
+    let mut second = vec![f32::NAN; N];
+    second[7] = 1.0;
+    record_importance(&mut trainer, &second);
+    let _ = trainer.refine(2, s.valid()).await;
+    let after = life_importance(&trainer).await;
+    assert_eq!(after[5], 5.0, "unseen this window -> keeps its score");
+    assert_eq!(after[7], 1.0);
+}
+
+#[tokio::test]
+async fn never_scored_splats_are_not_evicted() {
+    let (mut trainer, s) = trainer_at_budget(0, false).await;
+    record_importance(&mut trainer, &[f32::NAN; N]);
+    trainer.note_seed_shortfall(1);
+    let (_, stats) = trainer.refine(1, s).await;
+    assert_eq!(stats.num_evicted, 0);
+}
+
+#[tokio::test]
+async fn record_rows_stay_aligned_through_pad_and_keep() {
+    let device: Device = brush_cube::test_helpers::test_device().await.into();
+    let mut rec = RefineRecord::new(3, &device);
+    rec.importance_sum = Tensor::from_floats([1.0, 2.0, 3.0], &device);
+    rec.importance_views = Tensor::from_floats([1.0, 1.0, 2.0], &device);
+    let rec = rec.pad(2).keep(Tensor::from_ints([4, 2, 0], &device));
+    assert_eq!(
+        rows(rec.importance_sum.unsqueeze_dim::<2>(1)).await,
+        vec![vec![0.0], vec![3.0], vec![1.0]]
+    );
+    assert_eq!(
+        rows(rec.importance_views.unsqueeze_dim::<2>(1)).await,
+        vec![vec![0.0], vec![2.0], vec![1.0]]
+    );
 }
