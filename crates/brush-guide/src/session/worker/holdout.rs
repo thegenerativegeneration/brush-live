@@ -152,6 +152,7 @@ async fn score_view(
 mod tests {
     use super::*;
     use brush_dataset::load_image::LoadImage;
+    use brush_render::gaussian_splats::{SplatRenderMode, inverse_sigmoid};
     use brush_vfs::BrushVfs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -223,6 +224,40 @@ mod tests {
         h.last_eval_s = Some(10.0);
         assert!(!h.due(39.0));
         assert!(h.due(40.0));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn eval_scores_views_that_load_and_skips_the_missing_one() {
+        let dir = std::env::temp_dir().join(format!("holdout-eval-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let camera = Camera::new(
+            glam::Vec3::ZERO,
+            glam::Quat::IDENTITY,
+            1.0,
+            1.0,
+            glam::vec2(0.5, 0.5),
+            brush_render::kernels::camera_model::CameraModel::Pinhole,
+        );
+        let mut h = Holdout::new(2, 30.0);
+        h.add_held(1, camera.clone(), view(&dir, 1), &dir);
+        h.add_held(2, camera, view(&dir, 2), &dir);
+        std::fs::remove_file(dir.join("2.jpg")).unwrap();
+
+        let device = brush_cube::test_helpers::test_device().await.into();
+        let n = 20;
+        let splats = Splats::from_raw(
+            (0..n).flat_map(|i| [i as f32 * 0.01, 0.0, 2.0]).collect(),
+            [1.0, 0.0, 0.0, 0.0].repeat(n),
+            vec![-3.0; n * 3],
+            vec![0.5; n * 3],
+            vec![inverse_sigmoid(0.5); n],
+            SplatRenderMode::Default,
+            &device,
+        );
+        let result = h.eval(&splats, 0.0).await.expect("one view scores");
+        assert_eq!(result.views, 1);
+        assert!(result.psnr.is_finite(), "psnr {}", result.psnr);
         std::fs::remove_dir_all(dir).ok();
     }
 }

@@ -13,7 +13,9 @@ use clap::Parser;
 
 fn splats(n: usize, device: &Device) -> Splats {
     Splats::from_raw(
-        (0..n).flat_map(|i| [i as f32 * 0.01, 0.0, 2.0]).collect(),
+        (0..n)
+            .flat_map(|i| [i as f32 * 0.01, i as f32 * 0.005, 2.0 + i as f32 * 0.003])
+            .collect(),
         [1.0, 0.0, 0.0, 0.0].repeat(n),
         vec![-3.0; n * 3],
         vec![0.5; n * 3],
@@ -46,7 +48,8 @@ fn batch() -> SceneBatch {
     }
 }
 
-async fn run(profiling: bool) -> Vec<Vec<f32>> {
+/// The means after three steps.
+async fn run(profiling: bool) -> Vec<f32> {
     let device: Device = brush_cube::test_helpers::test_device().await.into();
     let device = device.autodiff();
     let config = TrainConfig::parse_from(["test"]);
@@ -64,32 +67,38 @@ async fn run(profiling: bool) -> Vec<Vec<f32>> {
     } else {
         assert!(profile.is_none());
     }
-    let mut out = Vec::new();
-    for data in [s.means().into_data_async().await] {
-        out.push(data.unwrap().try_into_vec::<f32>().unwrap());
-    }
-    out
+    s.means()
+        .into_data_async()
+        .await
+        .unwrap()
+        .try_into_vec::<f32>()
+        .unwrap()
 }
 
 #[tokio::test]
 async fn profiling_does_not_change_the_step() {
+    let initial = {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        splats(60, &device)
+            .means()
+            .into_data_async()
+            .await
+            .unwrap()
+            .try_into_vec::<f32>()
+            .unwrap()
+    };
     let plain = run(false).await;
     let profiled = run(true).await;
-    for (name, (a, b)) in [
-        "means",
-        "rotations",
-        "log_scales",
-        "sh_coeffs",
-        "raw_opacities",
-    ]
-    .iter()
-    .zip(plain.iter().zip(&profiled))
-    {
-        let max_diff = a
-            .iter()
-            .zip(b)
-            .map(|(x, y)| (x - y).abs())
-            .fold(0.0f32, f32::max);
-        assert!(max_diff <= 1e-6, "{name} differ by up to {max_diff}");
-    }
+    let max_diff = plain
+        .iter()
+        .zip(&profiled)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    assert!(max_diff <= 1e-6, "means differ by up to {max_diff}");
+    let moved = plain
+        .iter()
+        .zip(&initial)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    assert!(moved > 1e-6, "means did not move from their initial values");
 }
