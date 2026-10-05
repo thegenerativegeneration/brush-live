@@ -98,6 +98,14 @@ pub struct GuideConfig {
     /// Plumbed into `TrainConfig::ssim_every`: compute the SSIM loss term
     /// every this many training steps (1 every step, 0 never).
     pub ssim_every: u32,
+    /// Seed from the phone's mono-depth block where LiDAR and feature points
+    /// leave a pixel empty (`mono`). Frames without the block are unaffected.
+    pub mono_seeding: bool,
+    /// With a LiDAR depth map, mono depth seeds only at this depth or beyond.
+    pub mono_min_depth_with_lidar_m: f32,
+    /// Accepted per-keyframe mono scale, inclusive; a fit outside is rejected
+    /// and the keyframe seeds without mono depth.
+    pub mono_scale_range: (f32, f32),
 }
 
 impl Default for GuideConfig {
@@ -144,6 +152,9 @@ impl Default for GuideConfig {
             eval_interval_s: 30.0,
             profile_steps: false,
             ssim_every: 1,
+            mono_seeding: true,
+            mono_min_depth_with_lidar_m: 4.5,
+            mono_scale_range: (0.3, 3.0),
         }
     }
 }
@@ -178,5 +189,23 @@ mod ssim_every_tests {
     fn field_parses() {
         let cfg: GuideConfig = serde_json::from_str(r#"{"ssim_every": 4}"#).expect("parses");
         assert_eq!(cfg.ssim_every, 4);
+    }
+}
+
+#[cfg(test)]
+mod mono_tests {
+    use super::GuideConfig;
+
+    #[test]
+    fn mono_defaults_and_overrides() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert!(cfg.mono_seeding);
+        assert_eq!(cfg.mono_min_depth_with_lidar_m, 4.5);
+        assert_eq!(cfg.mono_scale_range, (0.3, 3.0));
+        let cfg: GuideConfig =
+            serde_json::from_str(r#"{"mono_seeding": false, "mono_scale_range": [0.5, 2.0]}"#)
+                .expect("parses");
+        assert!(!cfg.mono_seeding);
+        assert_eq!(cfg.mono_scale_range, (0.5, 2.0));
     }
 }
