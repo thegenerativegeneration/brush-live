@@ -1,6 +1,6 @@
 use crate::config::GuideConfig;
 use crate::keyframe::DecodedKeyframe;
-use crate::mono::mono_seed_for;
+use crate::mono::{MonoSeed, ScaleFit, mono_seed_for};
 use crate::seed::{SeedInput, Seeds, seed_points};
 use brush_dataset::config::LoadDatasetConfig;
 use brush_dataset::scene::{Scene, SceneBatch, SceneView, view_to_packed_data};
@@ -264,15 +264,23 @@ impl LiveModel {
         }
     }
 
-    fn initial_splats(&mut self, kf: &DecodedKeyframe, size: UVec2) -> Splats {
-        let (mono, fit) = mono_seed_for(
+    fn mono_input<'a>(
+        &self,
+        kf: &'a DecodedKeyframe,
+        size: UVec2,
+    ) -> (Option<MonoSeed<'a>>, ScaleFit) {
+        mono_seed_for(
             kf.mono.as_ref(),
             kf.depth.as_ref(),
             &kf.camera,
             size,
             &kf.points,
             &self.config,
-        );
+        )
+    }
+
+    fn initial_splats(&mut self, kf: &DecodedKeyframe, size: UVec2) -> Splats {
+        let (mono, fit) = self.mono_input(kf, size);
         let seeds = seed_points(&SeedInput {
             camera: &kf.camera,
             alpha: &vec![0.0; (size.x * size.y) as usize],
@@ -337,14 +345,7 @@ impl LiveModel {
             .expect("alpha readback")
             .try_to_vec::<f32>()
             .expect("f32 alpha");
-        let (mono, fit) = mono_seed_for(
-            kf.mono.as_ref(),
-            kf.depth.as_ref(),
-            &kf.camera,
-            size,
-            &kf.points,
-            &self.config,
-        );
+        let (mono, fit) = self.mono_input(kf, size);
         let seeds = seed_points(&SeedInput {
             camera: &kf.camera,
             alpha: &alpha,
