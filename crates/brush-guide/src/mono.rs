@@ -17,6 +17,8 @@ pub const MIN_FEATURE_SAMPLES: usize = 20;
 pub enum ScaleSource {
     Lidar,
     Features,
+    /// Too few samples for a fit: the network's own metric scale (1.0).
+    Metric,
 }
 
 /// Outcome of a keyframe's mono scale fit.
@@ -24,8 +26,6 @@ pub enum ScaleSource {
 pub enum ScaleFit {
     /// Mono seeding is off or the keyframe has no mono block.
     Absent,
-    /// Too few samples from LiDAR and from feature points.
-    TooFewSamples,
     /// A median ratio outside `mono_scale_range`.
     Rejected {
         source: ScaleSource,
@@ -53,10 +53,10 @@ impl fmt::Display for ScaleFit {
         let name = |s: &ScaleSource| match s {
             ScaleSource::Lidar => "lidar",
             ScaleSource::Features => "features",
+            ScaleSource::Metric => "metric",
         };
         match self {
             Self::Absent => write!(f, "absent"),
-            Self::TooFewSamples => write!(f, "none"),
             Self::Rejected {
                 source,
                 scale,
@@ -130,7 +130,9 @@ fn feature_ratios(
 /// One scale for a keyframe's mono depth: the median LiDAR / mono ratio if
 /// at least `MIN_LIDAR_SAMPLES` LiDAR pixels qualify, else the median
 /// feature-point depth / mono ratio if at least `MIN_FEATURE_SAMPLES` points
-/// do. A median outside `range` (inclusive) is rejected.
+/// do. With fewer of both, the network's own metric scale (1.0, samples of
+/// the larger source) is trusted. A median outside `range` (inclusive) is
+/// rejected, with no fallback.
 pub fn fit_scale(
     mono: &DepthMap,
     lidar: Option<&DepthMap>,
@@ -148,7 +150,11 @@ pub fn fit_scale(
     } else {
         let from_features = feature_ratios(mono, camera, image_size, points);
         if from_features.len() < MIN_FEATURE_SAMPLES {
-            return ScaleFit::TooFewSamples;
+            return ScaleFit::Fitted {
+                source: ScaleSource::Metric,
+                scale: 1.0,
+                samples: from_lidar.len().max(from_features.len()),
+            };
         }
         (ScaleSource::Features, from_features)
     };
@@ -347,12 +353,28 @@ mod tests {
     }
 
     #[test]
-    fn too_few_samples_give_no_scale() {
+    fn too_few_samples_trust_the_metric_scale() {
         let mono = map(16, 12, |_, _| 2.0);
         let few = features(MIN_FEATURE_SAMPLES - 1, 5.0);
+        let fit = fit_scale(&mono, None, 2, &cam(), size(), &few, RANGE);
         assert_eq!(
-            fit_scale(&mono, None, 2, &cam(), size(), &few, RANGE),
-            ScaleFit::TooFewSamples
+            fit,
+            ScaleFit::Fitted {
+                source: ScaleSource::Metric,
+                scale: 1.0,
+                samples: MIN_FEATURE_SAMPLES - 1
+            }
+        );
+        assert_eq!(fit.scale(), Some(1.0));
+        assert_eq!(fit.to_string(), "metric 1.000 (19 samples)");
+        let fit = fit_scale(&mono, None, 2, &cam(), size(), &[], RANGE);
+        assert_eq!(
+            fit,
+            ScaleFit::Fitted {
+                source: ScaleSource::Metric,
+                scale: 1.0,
+                samples: 0
+            }
         );
         let invalid_mono = map(16, 12, |_, _| 0.0);
         assert_eq!(
@@ -365,8 +387,74 @@ mod tests {
                 &features(25, 5.0),
                 RANGE
             ),
-            ScaleFit::TooFewSamples,
+            ScaleFit::Fitted {
+                source: ScaleSource::Metric,
+                scale: 1.0,
+                samples: 0
+            },
             "points on invalid mono pixels do not count"
+        );
+    }
+
+    #[test]
+    fn metric_sample_count_is_the_larger_source() {
+        let mono = map(16, 12, |_, _| 2.0);
+        let lidar = map(20, 15, |x, y| {
+            if ((y * 20 + x) as usize) < 50 {
+                3.0
+            } else {
+                0.0
+            }
+        });
+        let fit = fit_scale(
+            &mono,
+            Some(&lidar),
+            2,
+            &cam(),
+            size(),
+            &features(10, 5.0),
+            RANGE,
+        );
+        assert_eq!(
+            fit,
+            ScaleFit::Fitted {
+                source: ScaleSource::Metric,
+                scale: 1.0,
+                samples: 50
+            }
+        );
+    }
+
+    #[test]
+    fn metric_seeds_keep_the_lidar_gate_and_the_cap() {
+        let config = GuideConfig::default();
+        let mono = map(16, 12, |x, _| if x < 8 { 3.0 } else { 150.0 });
+        let lidar = map(20, 15, |_, _| 0.0);
+        let (seed, fit) = mono_seed_for(Some(&mono), Some(&lidar), &cam(), size(), &[], &config);
+        assert!(matches!(
+            fit,
+            ScaleFit::Fitted {
+                source: ScaleSource::Metric,
+                ..
+            }
+        ));
+        let seed = seed.expect("fitted");
+        assert_eq!(seed.scale, 1.0);
+        assert_eq!(
+            seed.depth_at(Vec2::new(0.1, 0.5)),
+            None,
+            "3 m < 4.5 m with a LiDAR map"
+        );
+        assert_eq!(seed.depth_at(Vec2::new(0.9, 0.5)), None, "150 m > cap");
+        let mono = map(16, 12, |_, _| 6.0);
+        let (seed, _) = mono_seed_for(Some(&mono), Some(&lidar), &cam(), size(), &[], &config);
+        assert_eq!(seed.unwrap().depth_at(Vec2::new(0.5, 0.5)), Some(6.0));
+        let mono = map(16, 12, |_, _| 3.0);
+        let (seed, _) = mono_seed_for(Some(&mono), None, &cam(), size(), &[], &config);
+        assert_eq!(
+            seed.unwrap().depth_at(Vec2::new(0.5, 0.5)),
+            Some(3.0),
+            "no LiDAR map: all distances"
         );
     }
 
