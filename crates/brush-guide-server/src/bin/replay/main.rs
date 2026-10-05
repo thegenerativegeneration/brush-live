@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         dump_every_s: args.dump_every,
         started: started.into_std(),
         last_dump: None,
+        skipped: None,
     };
     let receiver = tokio::spawn(receiver.run(source));
 

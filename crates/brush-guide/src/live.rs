@@ -1,4 +1,4 @@
-use crate::config::GuideConfig;
+use crate::config::{EvictionImportance, GuideConfig};
 use crate::keyframe::DecodedKeyframe;
 use crate::mono::{MonoSeed, ScaleFit, mono_seed_for};
 use crate::seed::{SeedInput, Seeds, seed_points};
@@ -143,6 +143,12 @@ impl LiveModel {
         }
     }
 
+    /// The trainer's eviction importance in current splat order; `None`
+    /// without eviction or before training starts.
+    pub async fn importance(&self) -> Option<Vec<f32>> {
+        self.trainer.as_ref()?.importance().await
+    }
+
     /// Refines and their seconds since the last call.
     pub fn take_refine_stats(&mut self) -> (u32, f64) {
         std::mem::take(&mut self.refine_stats)
@@ -184,7 +190,8 @@ impl LiveModel {
                         min_age: self.config.evict_min_age,
                         max_cell_fraction: self.config.evict_max_cell_fraction,
                         recent_refines: self.config.evict_recent_refines,
-                        external_importance: true,
+                        external_importance: self.config.eviction_importance
+                            == EvictionImportance::Fisher,
                     });
                 }
                 self.trainer = Some(trainer);

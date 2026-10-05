@@ -256,3 +256,36 @@ async fn held_out_keyframes_stay_out_of_training() {
     assert_eq!(ids, vec![1, 3]);
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// With `finish_fisher`, finishing publishes a final score set whose cells are informed and writes both importances.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finish_fisher_informs_the_final_score_set_and_dumps_importance() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!(
+        "brush-guide-session-finishfisher-{}",
+        std::process::id()
+    ));
+    let config = GuideConfig {
+        finish_fisher: true,
+        ..GuideConfig::default()
+    };
+    let session = GuideSession::start(config, device, dir.clone());
+    let scores = session.scores();
+    for (i, a) in [0.0f32, 1.0, 2.0].iter().enumerate() {
+        let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
+        session.push_keyframe(h, p).await.unwrap();
+    }
+    session.finish(&dir.join("splat.ply")).await.unwrap();
+    let set = scores.borrow().clone().expect("a final score set");
+    assert!(
+        set.cells.iter().any(|c| !c.uninformed),
+        "finish pass informs cells"
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("importance.json")).unwrap()).unwrap();
+    assert_eq!(
+        json["fisher"].as_array().unwrap().len(),
+        json["train"].as_array().unwrap().len()
+    );
+    std::fs::remove_dir_all(dir).ok();
+}

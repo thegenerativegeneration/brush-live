@@ -408,6 +408,12 @@ impl Worker {
         };
         if finish && result.is_ok() {
             self.eval_holdout().await;
+            if self.config.finish_fisher {
+                let t = Instant::now();
+                self.finish_pass(self.clock.elapsed().as_secs_f64()).await;
+                self.voxel_round(self.clock.elapsed().as_secs_f64()).await;
+                self.totals_s.fisher += t.elapsed().as_secs_f64();
+            }
             self.finished = true;
             self.channels
                 .status

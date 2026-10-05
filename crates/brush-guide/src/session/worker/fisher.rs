@@ -14,25 +14,36 @@
 //! drift.
 
 use super::{Worker, append_ingredient_round, append_raw_round};
+use crate::config::EvictionImportance;
 use crate::schedule::{FisherCost, ViewSample};
 use crate::scores::importance::importances;
 use crate::scores::metrics::gaussian_metrics;
-use crate::scores::pass::{PassView, score_pass};
+use crate::scores::pass::{PassOutput, PassView, score_pass};
 use crate::session::splat_read::SplatRead;
 use web_time::Instant;
+
+/// One pass's outputs, for the caller's log, cost model and dumps.
+struct PassRun {
+    out: PassOutput,
+    read: SplatRead,
+    /// Per-splat eviction importance, computed when eviction is on.
+    importance: Option<Vec<f32>>,
+    /// Seconds in the render and backward.
+    t_pass: f64,
+    /// Voxels the pass scored.
+    scored: usize,
+}
 
 impl Worker {
     /// One Fisher pass over at most `max_views` views; `start` is when it
     /// started. Its bytes reach the phone with the next voxel round.
     pub(super) async fn fisher_pass(&mut self, start: f64, max_views: usize) {
-        let config = &self.config;
-        let splats = self.live.splats().expect("views imply splats").clone();
         let num_views = self.live.views().len();
         let sample = ViewSample::new(max_views);
         let pass = self.fisher_passes;
         self.fisher_passes += 1;
         let views: Vec<PassView> = sample
-            .select(num_views, pass, config.seed)
+            .select(num_views, pass, self.config.seed)
             .into_iter()
             .map(|i| PassView {
                 camera: self.live.views()[i].camera,
@@ -42,7 +53,70 @@ impl Worker {
                 weight: sample.weight(i, num_views),
             })
             .collect();
+        let num_pass_views = views.len();
+        let run = self.run_pass(views).await;
 
+        let num_splats = self.live.splats().map_or(0, |s| s.num_splats());
+        let duration = self.clock.elapsed().as_secs_f64() - start;
+        self.scheduler.fisher.record(start, duration);
+        self.fisher_cost = Some((
+            FisherCost {
+                per_view_s: run.t_pass / num_pass_views.max(1) as f64,
+                fixed_s: (duration - run.t_pass).max(0.0),
+            },
+            num_splats,
+        ));
+        log::info!(
+            "fisher pass {pass} at {start:.2} s: {num_pass_views} of {num_views} views (up to {max_views}), \
+             {:.0} ms, {} voxels, {num_splats} splats",
+            duration * 1e3,
+            run.scored,
+        );
+    }
+
+    /// At finish: one Fisher pass over every view (weight 1), and
+    /// `importance.json` with the pass's and the trainer's importance in
+    /// splat order. The caller runs the voxel round that publishes it.
+    pub(super) async fn finish_pass(&mut self, start: f64) {
+        let views: Vec<PassView> = self
+            .live
+            .views()
+            .iter()
+            .zip(&self.sizes)
+            .map(|(v, &img_size)| PassView {
+                camera: v.camera,
+                img_size,
+                weight: 1.0,
+            })
+            .collect();
+        let num_views = views.len();
+        // Before the pass: with `EvictionImportance::Fisher` the pass
+        // overwrites the trainer's importance with its own.
+        let train = self.live.importance().await;
+        let run = self.run_pass(views).await;
+        let fisher = run
+            .importance
+            .unwrap_or_else(|| importances(&run.out, &run.read.rots, &run.read.scales));
+        let path = self.session_dir.join("importance.json");
+        let json = serde_json::json!({
+            "fisher": finite_or_null(&fisher),
+            "train": train.as_deref().map(finite_or_null),
+        });
+        if let Err(e) = std::fs::write(&path, json.to_string()) {
+            log::warn!("importance dump to {}: {e}", path.display());
+        }
+        log::info!(
+            "finish fisher pass: {num_views} views, {:.0} ms",
+            (self.clock.elapsed().as_secs_f64() - start) * 1e3
+        );
+    }
+
+    /// Render and backward over `views`: per-voxel coverage and uncertainty
+    /// into the voxel state, per-splat eviction importance (handed to the
+    /// trainer only with `EvictionImportance::Fisher`), and the raw dumps.
+    async fn run_pass(&mut self, views: Vec<PassView>) -> PassRun {
+        let config = &self.config;
+        let splats = self.live.splats().expect("views imply splats").clone();
         let t = Instant::now();
         let out = score_pass(&splats, &views, &config.pass).await;
         let t_pass = t.elapsed().as_secs_f64();
@@ -53,9 +127,15 @@ impl Worker {
         let read = SplatRead::new(&splats).await;
         let t_read = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        if config.evict {
-            let importance = importances(&out, &read.rots, &read.scales);
-            self.live.set_importance(&importance);
+        // Computed in both arms so they spend the same time; only the
+        // Fisher arm hands it to the trainer.
+        let importance = config
+            .evict
+            .then(|| importances(&out, &read.rots, &read.scales));
+        if let Some(importance) = &importance
+            && config.eviction_importance == EvictionImportance::Fisher
+        {
+            self.live.set_importance(importance);
         }
         let t_importance = t.elapsed().as_secs_f64();
         let t = Instant::now();
@@ -85,27 +165,10 @@ impl Worker {
                 log::warn!("raw coverage dump to {}: {e}", path.display());
             }
         }
-
-        let duration = self.clock.elapsed().as_secs_f64() - start;
-        self.scheduler.fisher.record(start, duration);
-        self.fisher_cost = Some((
-            FisherCost {
-                per_view_s: t_pass / views.len().max(1) as f64,
-                fixed_s: (duration - t_pass).max(0.0),
-            },
-            splats.num_splats(),
-        ));
-        log::info!(
-            "fisher pass {pass} at {start:.2} s: {} of {num_views} views (up to {max_views}), {:.0} ms, \
-             {scored} voxels, {} splats",
-            views.len(),
-            duration * 1e3,
-            splats.num_splats()
-        );
         log::debug!(
             target: crate::timing::TARGET,
-            "fisher: {} views, pass {:.0} ms, metrics {:.0} ms, splat readback {:.0} ms, importance {:.0} ms, \
-             gaussian prep {:.0} ms, voxel aggregate {:.0} ms",
+            "fisher: {} views, pass {:.0} ms, metrics {:.0} ms, splat readback {:.0} ms, \
+             importance {:.0} ms, gaussian prep {:.0} ms, voxel aggregate {:.0} ms",
             views.len(),
             t_pass * 1e3,
             t_metrics * 1e3,
@@ -114,7 +177,19 @@ impl Worker {
             t_prep * 1e3,
             t_agg * 1e3
         );
+        PassRun {
+            out,
+            read,
+            importance,
+            t_pass,
+            scored,
+        }
     }
+}
+
+/// Values as JSON numbers, non-finite ones as `null`.
+fn finite_or_null(values: &[f32]) -> Vec<Option<f32>> {
+    values.iter().map(|&v| v.is_finite().then_some(v)).collect()
 }
 
 /// Per-voxel coverage ingredients of one Fisher pass, for the calibration

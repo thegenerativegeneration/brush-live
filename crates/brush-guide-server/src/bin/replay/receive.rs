@@ -1,29 +1,35 @@
 //! Handling of server frames: visualised, optionally dumped, summarised
 //! on stderr.
 
-use brush_guide::protocol::{CELL_BYTES, ServerHeader, decode_cells, decode_frame};
+use brush_guide::protocol::{CELL_BYTES, Cell, ServerHeader, decode_cells, decode_frame};
 use futures_util::{Stream, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::dump::ScoreDump;
 use super::viz::{Mode, log_score_set, log_status};
 
+/// How long the replay keeps reading frames after `splat`.
+const LINGER: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub(crate) struct Receiver {
     pub(crate) rec: rerun::RecordingStream,
     pub(crate) mode: Mode,
     pub(crate) score_dump: Option<ScoreDump>,
-    /// Return once the server answers `finish` with `splat`.
+    /// Return `LINGER` after the server answers `finish` with `splat`.
     pub(crate) stop_on_splat: bool,
     /// Dump a score set only this many seconds after the last dumped one.
     pub(crate) dump_every_s: f32,
     /// When the replay connected; received frames are stamped relative to it.
     pub(crate) started: std::time::Instant,
     pub(crate) last_dump: Option<std::time::Instant>,
+    /// The newest score set `dump_every_s` skipped, written at `splat` so the
+    /// dump ends with the set the server published before it.
+    pub(crate) skipped: Option<(u64, f32, Vec<Cell>)>,
 }
 
 impl Receiver {
-    /// Handles binary frames until the connection ends, or until `splat`
-    /// with `stop_on_splat`.
+    /// Handles binary frames until the connection ends, or until `LINGER`
+    /// after `splat` with `stop_on_splat`, dumping every score set then.
     pub(crate) async fn run<E>(
         mut self,
         mut source: impl Stream<Item = Result<Message, E>> + Unpin,
@@ -33,6 +39,21 @@ impl Receiver {
                 && self.handle(&bytes)
                 && self.stop_on_splat
             {
+                // The server publishes the final score set before it answers
+                // `finish`, but the socket may deliver `splat` first.
+                if let (Some(dump), Some((version, voxel_size, cells))) =
+                    (self.score_dump.as_mut(), self.skipped.take())
+                {
+                    dump.write(version, voxel_size, &cells);
+                }
+                self.dump_every_s = 0.0;
+                let deadline = tokio::time::Instant::now() + LINGER;
+                while let Ok(Some(Ok(msg))) = tokio::time::timeout_at(deadline, source.next()).await
+                {
+                    if let Message::Binary(bytes) = msg {
+                        self.handle(&bytes);
+                    }
+                }
                 return;
             }
         }
@@ -90,12 +111,15 @@ impl Receiver {
         let due = self
             .last_dump
             .is_none_or(|t| t.elapsed().as_secs_f32() >= self.dump_every_s);
-        if let Some(dump) = self.score_dump.as_mut()
-            && due
-        {
-            dump.write(version, voxel_size, &cells);
-            self.last_dump = Some(std::time::Instant::now());
-        }
         log_score_set(&self.rec, version, voxel_size, &cells, self.mode);
+        if let Some(dump) = self.score_dump.as_mut() {
+            if due {
+                dump.write(version, voxel_size, &cells);
+                self.last_dump = Some(std::time::Instant::now());
+                self.skipped = None;
+            } else if self.stop_on_splat {
+                self.skipped = Some((version, voxel_size, cells));
+            }
+        }
     }
 }

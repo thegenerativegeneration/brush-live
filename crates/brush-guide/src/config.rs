@@ -14,6 +14,8 @@ pub struct GuideConfig {
     /// (see `brush_train::evict`). Off: growth stops at the cap. On by
     /// default, since a growing scene reaches any fixed budget eventually.
     pub evict: bool,
+    /// Which per-splat score eviction ranks by (see `EvictionImportance`).
+    pub eviction_importance: EvictionImportance,
     /// Fraction of `max_splats` one eviction frees.
     pub evict_headroom: f32,
     /// Refines a splat must survive before it can be evicted.
@@ -72,6 +74,12 @@ pub struct GuideConfig {
     /// Appends each round's per-voxel positional σ and coverage to
     /// `raw_uncertainty.jsonl` in the session directory, for calibration.
     pub dump_raw_uncertainty: bool,
+    /// At `finish`, run one Fisher pass over every view (weight 1) and one
+    /// voxel round, so the final score set carries coverage and uncertainty
+    /// from all views, and write `importance.json` (`{"fisher": [..],
+    /// "train": [..]}`, splat order, non-finite as `null`) to the session
+    /// directory. For offline gates; the phone leaves it off.
+    pub finish_fisher: bool,
     pub pass: PassConfig,
     pub coverage: CoverageParams,
     pub seed: u64,
@@ -115,6 +123,7 @@ impl Default for GuideConfig {
             min_cell_opacity: 0.1,
             max_splats: 750_000,
             evict: true,
+            eviction_importance: EvictionImportance::Train,
             evict_headroom: 0.1,
             evict_min_age: 3,
             evict_max_cell_fraction: 0.3,
@@ -141,6 +150,7 @@ impl Default for GuideConfig {
             fisher_lambda_rel: 1e-3,
             sigma_pix: 0.05,
             dump_raw_uncertainty: false,
+            finish_fisher: false,
             pass: PassConfig::default(),
             coverage: CoverageParams::default(),
             seed: 42,
@@ -157,6 +167,16 @@ impl Default for GuideConfig {
             mono_scale_range: (0.3, 3.0),
         }
     }
+}
+
+/// Source of the per-splat score eviction ranks by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EvictionImportance {
+    /// Accumulated by the trainer's backward pass over training steps.
+    Train,
+    /// From the live Fisher pass (`scores::importance`).
+    Fisher,
 }
 
 impl GuideConfig {
@@ -189,6 +209,23 @@ mod ssim_every_tests {
     fn field_parses() {
         let cfg: GuideConfig = serde_json::from_str(r#"{"ssim_every": 4}"#).expect("parses");
         assert_eq!(cfg.ssim_every, 4);
+    }
+}
+
+#[cfg(test)]
+mod eviction_importance_tests {
+    use super::{EvictionImportance, GuideConfig};
+
+    #[test]
+    fn defaults_to_train_and_parses_fisher() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!(cfg.eviction_importance, EvictionImportance::Train);
+        assert!(!cfg.finish_fisher);
+        let cfg: GuideConfig =
+            serde_json::from_str(r#"{"eviction_importance": "fisher", "finish_fisher": true}"#)
+                .expect("parses");
+        assert_eq!(cfg.eviction_importance, EvictionImportance::Fisher);
+        assert!(cfg.finish_fisher);
     }
 }
 
