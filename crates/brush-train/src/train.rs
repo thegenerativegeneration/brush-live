@@ -684,8 +684,7 @@ impl SplatTrainer {
 
             // The kernel takes the RGBA image as rendered (or, with the
             // globe on, the RGBA image with the globe composited in).
-            // `loss` is only reassigned by the LPIPS path below, which is
-            // compiled out on wasm — so `mut` is unused there.
+            // `loss` is reassigned below by the globe penalty and LPIPS.
             let mut loss = image_loss(pred_final.clone(), gt_packed.clone(), cfg);
             if let Some(penalty) = globe_alpha_penalty {
                 loss = loss + penalty;

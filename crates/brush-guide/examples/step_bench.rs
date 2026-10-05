@@ -159,7 +159,7 @@ async fn main() {
         trainer.set_profiling(false);
         let n = f64::from(p.steps);
         println!(
-            "{:>8} splats: forward {:.2}, loss {:.2}, backward {:.2}, optimizer {:.2}, noise {:.2}",
+            "{:>8} splats: forward {:.2}, loss {:.2}, backward {:.2}, optimizer {:.2}, stats+noise {:.2}",
             stepped.num_splats(),
             p.forward_s * 1e3 / n,
             p.loss_s * 1e3 / n,

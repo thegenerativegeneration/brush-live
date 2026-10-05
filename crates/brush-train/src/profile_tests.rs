@@ -1,5 +1,6 @@
 //! Profiling only adds device syncs: a profiled step must give the same
-//! parameters as an unprofiled one from the same state.
+//! means as an unprofiled one from the same state. Rotations and scales are
+//! not compared: they vary between two identical unprofiled runs.
 
 use super::*;
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};
@@ -45,7 +46,7 @@ fn batch() -> SceneBatch {
     }
 }
 
-async fn run(profiling: bool) -> Vec<f32> {
+async fn run(profiling: bool) -> Vec<Vec<f32>> {
     let device: Device = brush_cube::test_helpers::test_device().await.into();
     let device = device.autodiff();
     let config = TrainConfig::parse_from(["test"]);
@@ -57,22 +58,38 @@ async fn run(profiling: bool) -> Vec<f32> {
         let (stepped, _) = trainer.step(batch(), s.train()).await;
         s = stepped.valid();
     }
-    s.means()
-        .into_data_async()
-        .await
-        .unwrap()
-        .try_into_vec::<f32>()
-        .unwrap()
+    let profile = trainer.take_profile();
+    if profiling {
+        assert_eq!(profile.expect("profiling on records a profile").steps, 3);
+    } else {
+        assert!(profile.is_none());
+    }
+    let mut out = Vec::new();
+    for data in [s.means().into_data_async().await] {
+        out.push(data.unwrap().try_into_vec::<f32>().unwrap());
+    }
+    out
 }
 
 #[tokio::test]
 async fn profiling_does_not_change_the_step() {
     let plain = run(false).await;
     let profiled = run(true).await;
-    let max_diff = plain
-        .iter()
-        .zip(&profiled)
-        .map(|(a, b)| (a - b).abs())
-        .fold(0.0f32, f32::max);
-    assert!(max_diff <= 1e-6, "means differ by up to {max_diff}");
+    for (name, (a, b)) in [
+        "means",
+        "rotations",
+        "log_scales",
+        "sh_coeffs",
+        "raw_opacities",
+    ]
+    .iter()
+    .zip(plain.iter().zip(&profiled))
+    {
+        let max_diff = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_diff <= 1e-6, "{name} differ by up to {max_diff}");
+    }
 }
