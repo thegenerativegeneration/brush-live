@@ -39,15 +39,6 @@ impl Cadence {
         now_s >= self.next_due()
     }
 
-    pub fn has_run(&self) -> bool {
-        self.last.is_some()
-    }
-
-    /// Duration of the last round; 0 before the first.
-    pub fn last_duration(&self) -> f64 {
-        self.last.map_or(0.0, |(_, d)| d)
-    }
-
     /// Records a round that started at `start_s`. A start less than half an
     /// interval after it was due counts as on time, so the time the worker
     /// needs to notice a round is due (a training step) does not add up

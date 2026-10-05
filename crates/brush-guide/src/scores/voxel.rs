@@ -70,10 +70,10 @@ pub const UNINFORMED_COVERAGE: u8 = 0;
 /// information about it); such cells also carry `Cell::uninformed`.
 pub const UNINFORMED_UNCERTAINTY: u8 = 255;
 
-/// Voxel rounds a voxel's state survives with no Gaussian occupying it and
-/// no Fisher pass scoring it (~1 min at the 2 s cadence): long enough that
-/// an opacity flicker or one missed pass loses nothing, short enough that
-/// memory tracks the live set and a re-seeded region starts as new.
+/// Voxel rounds a voxel's state survives with no Gaussian occupying it
+/// (~1 min at the 2 s cadence): long enough that an opacity flicker loses
+/// nothing, short enough that memory tracks the live set and a re-seeded
+/// region starts as new.
 const PRUNE_AFTER_ROUNDS: u64 = 30;
 
 /// EMA weight of a pass's p5–p95 `ln σ` range. Matches the per-voxel byte

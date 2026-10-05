@@ -12,7 +12,7 @@ use crate::scores::pass::{PassOutput, PassView, score_pass};
 use crate::session::splat_read::SplatRead;
 use web_time::Instant;
 
-/// One pass's outputs, for the caller's log, cost model and dumps.
+/// One pass's outputs, for the caller's log and dumps.
 struct PassRun {
     out: PassOutput,
     read: SplatRead,

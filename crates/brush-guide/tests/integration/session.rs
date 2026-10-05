@@ -270,11 +270,25 @@ async fn finish_fisher_informs_the_final_score_set_and_dumps_importance() {
         ..GuideConfig::default()
     };
     let session = GuideSession::start(config, device, dir.clone());
-    let scores = session.scores();
+    let mut scores = session.scores();
     for (i, a) in [0.0f32, 1.0, 2.0].iter().enumerate() {
         let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
         session.push_keyframe(h, p).await.unwrap();
     }
+    let live = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            scores.changed().await.unwrap();
+            if let Some(s) = scores.borrow().clone() {
+                return s;
+            }
+        }
+    })
+    .await
+    .expect("a live score set within 60 s");
+    assert!(
+        !live.cells.is_empty() && live.cells.iter().all(|c| c.uninformed),
+        "live cells are uninformed"
+    );
     session.finish(&dir.join("splat.ply")).await.unwrap();
     let set = scores.borrow().clone().expect("a final score set");
     assert!(
@@ -283,9 +297,9 @@ async fn finish_fisher_informs_the_final_score_set_and_dumps_importance() {
     );
     let json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("importance.json")).unwrap()).unwrap();
-    assert_eq!(
-        json["fisher"].as_array().unwrap().len(),
-        json["train"].as_array().unwrap().len()
-    );
+    let fisher = json["fisher"].as_array().unwrap().len();
+    assert!(fisher > 0, "importance arrays are not empty");
+    assert_eq!(fisher, json["train"].as_array().unwrap().len());
+    assert_eq!(fisher, session.status().borrow().num_splats as usize);
     std::fs::remove_dir_all(dir).ok();
 }

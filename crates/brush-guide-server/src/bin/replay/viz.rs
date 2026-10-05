@@ -17,6 +17,8 @@ pub(crate) enum Mode {
 }
 
 const GREY: [u8; 3] = [150, 150, 150];
+/// Cells no Fisher pass has scored: geometry only, darker than the new-cell grey.
+const NEUTRAL: [u8; 3] = [70, 70, 70];
 const RED: [u8; 3] = [230, 40, 40];
 const YELLOW: [u8; 3] = [240, 200, 40];
 const BLUE: [u8; 3] = [40, 110, 240];
@@ -26,21 +28,25 @@ pub(crate) const AGREEMENT_LEGEND: &str = "Agreement mode, weak cells only:\n\n\
     * red: weak by coverage and by uncertainty\n\
     * blue: weak by coverage only\n\
     * purple: weak by uncertainty only\n\
-    * grey: first seen less than 3 s ago\n\n\
+    * grey: first seen less than 3 s ago\n\
+    * dark grey: not scored by a Fisher pass (live sets; informed after `finish`)\n\n\
     Uncertainty is ranked within each round, so its share of weak cells stays roughly \
     constant; compare where the colours sit, not how many there are.";
 
 fn weak_coverage(c: &Cell) -> bool {
-    c.coverage < 80
+    !c.uninformed && c.coverage < 80
 }
 
 fn weak_uncertainty(c: &Cell) -> bool {
-    c.uncertainty > 200
+    !c.uninformed && c.uncertainty > 200
 }
 
 fn cell_color(c: &Cell, mode: Mode) -> Option<[u8; 3]> {
     if c.age < 3 {
         return Some(GREY);
+    }
+    if c.uninformed {
+        return Some(NEUTRAL);
     }
     let (wc, wu) = (weak_coverage(c), weak_uncertainty(c));
     if matches!(mode, Mode::Agreement) {
@@ -149,4 +155,43 @@ pub(crate) fn log_status(
         "status/score_ms",
         &rerun::Scalars::new(vec![last_score_ms as f64]),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cell(uninformed: bool, age: u8) -> Cell {
+        Cell {
+            center: [0.0; 3],
+            coverage: if uninformed { 0 } else { 10 },
+            uncertainty: if uninformed { 255 } else { 250 },
+            age,
+            normal: None,
+            density: 20,
+            uninformed,
+        }
+    }
+
+    #[test]
+    fn uninformed_cells_are_neutral_and_never_weak() {
+        let c = cell(true, 10);
+        assert!(!weak_coverage(&c) && !weak_uncertainty(&c));
+        for mode in [
+            Mode::Coverage,
+            Mode::Uncertainty,
+            Mode::Both,
+            Mode::Agreement,
+        ] {
+            assert_eq!(cell_color(&c, mode), Some(NEUTRAL));
+        }
+    }
+
+    #[test]
+    fn new_cells_stay_distinguishable_and_informed_weak_cells_are_red() {
+        assert_eq!(cell_color(&cell(true, 0), Mode::Coverage), Some(GREY));
+        assert_ne!(GREY, NEUTRAL);
+        assert_eq!(cell_color(&cell(false, 10), Mode::Coverage), Some(RED));
+        assert_eq!(cell_color(&cell(false, 10), Mode::Agreement), Some(RED));
+    }
 }
