@@ -48,6 +48,10 @@ pub struct WorkerTimes {
     pub preview_ms: u64,
     pub voxel_ms: u64,
     pub fisher_ms: u64,
+    /// Worker uptime over the same span: the denominator for the shares.
+    pub uptime_ms: u64,
+    /// Time the iteration cap held the next training step back.
+    pub throttle_ms: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -75,6 +79,8 @@ impl StatusMsg {
                 preview_ms: self.times.preview_ms,
                 voxel_ms: self.times.voxel_ms,
                 fisher_ms: self.times.fisher_ms,
+                uptime_ms: self.times.uptime_ms,
+                throttle_ms: self.times.throttle_ms,
             },
             &[],
         )

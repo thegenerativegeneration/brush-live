@@ -210,6 +210,8 @@ fn status_header_round_trips_worker_times() {
         preview_ms: 200,
         voxel_ms: 900,
         fisher_ms: 700,
+        uptime_ms: 9000,
+        throttle_ms: 400,
     };
     let frame = encode_frame(&h, &[]);
     let (back, rest): (ServerHeader, _) = decode_frame(&frame).unwrap();
@@ -231,6 +233,8 @@ fn status_header_without_worker_times_decodes() {
             preview_ms,
             voxel_ms,
             fisher_ms,
+            uptime_ms,
+            throttle_ms,
             ..
         } => assert_eq!(
             [
@@ -239,9 +243,11 @@ fn status_header_without_worker_times_decodes() {
                 ingest_ms,
                 preview_ms,
                 voxel_ms,
-                fisher_ms
+                fisher_ms,
+                uptime_ms,
+                throttle_ms
             ],
-            [0; 6]
+            [0; 8]
         ),
         other => panic!("not a status: {other:?}"),
     }
@@ -316,6 +322,8 @@ fn write_golden_fixtures() {
                     preview_ms: 0,
                     voxel_ms: 0,
                     fisher_ms: 0,
+                    uptime_ms: 0,
+                    throttle_ms: 0,
                 },
                 &[],
             ),

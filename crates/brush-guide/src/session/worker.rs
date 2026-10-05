@@ -68,7 +68,7 @@ pub(super) async fn worker(
         // budget, so ingest keeps up when training steps get slow.
         let mut drain = Drain::new(Instant::now(), last_step);
         while let Some(cmd) = next {
-            w.handle_timed(cmd).await;
+            w.handle(cmd).await;
             drain.handled();
             next = None;
             if drain.more(Instant::now()) {
@@ -82,9 +82,12 @@ pub(super) async fn worker(
         }
         // Over the iteration cap: sleep until the next step is allowed, waking early for a command.
         if let Some(wait) = w.throttle.wait_s(w.clock.elapsed().as_secs_f64()) {
-            match tokio::time::timeout(Duration::from_secs_f64(wait), rx.recv()).await {
+            let t = Instant::now();
+            let woken = tokio::time::timeout(Duration::from_secs_f64(wait), rx.recv()).await;
+            w.totals_s.throttle += t.elapsed().as_secs_f64();
+            match woken {
                 Ok(Some(cmd)) => {
-                    w.handle_timed(cmd).await;
+                    w.handle(cmd).await;
                     continue;
                 }
                 Ok(None) => return,
@@ -95,25 +98,22 @@ pub(super) async fn worker(
         let t = Instant::now();
         w.live.train_step().await;
         last_step = t.elapsed();
-        w.acc.train_s += last_step.as_secs_f64();
-        w.totals_s.train += last_step.as_secs_f64();
+        let dt = last_step.as_secs_f64();
+        w.acc.train_s += dt;
+        w.totals_s.train += dt;
         w.acc.steps += 1;
         if w.step_cap_reached() {
             log::info!("max_train_steps reached: training stopped at step {}", w.live.iter());
         }
         if w.preview.due(Instant::now()) {
+            w.wait_for_training();
             let t = Instant::now();
             w.publish_preview().await;
             w.totals_s.preview += t.elapsed().as_secs_f64();
         }
         let now = w.clock.elapsed().as_secs_f64();
         if let Some(round) = w.scheduler.next(now, w.fisher_cost()) {
-            let t = Instant::now();
-            if let Some(s) = w.live.splats() {
-                crate::timing::sync_splats(s).await;
-            }
-            w.acc.train_s += t.elapsed().as_secs_f64();
-            w.totals_s.train += t.elapsed().as_secs_f64();
+            w.wait_for_training();
             let now = w.clock.elapsed().as_secs_f64();
             let t = Instant::now();
             match round {
@@ -136,16 +136,30 @@ pub(super) async fn worker(
 }
 
 /// Seconds spent per activity; see [`WorkerTimes`].
-#[derive(Default)]
 struct ActivityTotals {
+    /// When the totals started; `uptime_ms` counts from here.
+    start: Instant,
     train: f64,
     ingest: f64,
     preview: f64,
     voxel: f64,
     fisher: f64,
+    throttle: f64,
 }
 
 impl ActivityTotals {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            train: 0.0,
+            ingest: 0.0,
+            preview: 0.0,
+            voxel: 0.0,
+            fisher: 0.0,
+            throttle: 0.0,
+        }
+    }
+
     fn to_times(&self) -> WorkerTimes {
         let ms = |s: f64| (s * 1e3) as u64;
         WorkerTimes {
@@ -154,6 +168,8 @@ impl ActivityTotals {
             preview_ms: ms(self.preview),
             voxel_ms: ms(self.voxel),
             fisher_ms: ms(self.fisher),
+            uptime_ms: ms(self.start.elapsed().as_secs_f64()),
+            throttle_ms: ms(self.throttle),
         }
     }
 }
@@ -232,7 +248,7 @@ impl Worker {
             scheduler,
             throttle,
             fisher_passes: 0,
-            totals_s: ActivityTotals::default(),
+            totals_s: ActivityTotals::new(),
             fisher_cost: None,
             version: 0,
             last_score_ms: 0,
@@ -259,19 +275,20 @@ impl Worker {
         self.config.max_train_steps.is_some_and(|n| self.live.iter() >= n)
     }
 
-    /// [`Self::handle`], counting keyframes and their time for the timing log.
-    async fn handle_timed(&mut self, cmd: Command) {
+    /// Waits for all queued GPU work, which is training's unless an
+    /// activity left some behind, and counts the wait as training. Without
+    /// it the next activity's timer would include the wait.
+    fn wait_for_training(&mut self) {
         let t = Instant::now();
-        let is_kf = matches!(cmd, Command::Keyframe(..));
-        self.handle(cmd).await;
-        if is_kf {
-            if let Some(s) = self.live.splats() {
-                crate::timing::sync_splats(s).await;
-            }
-            self.acc.kf_s += t.elapsed().as_secs_f64();
-            self.totals_s.ingest += t.elapsed().as_secs_f64();
-            self.acc.kfs += 1;
+        if let Err(e) = self.device.sync() {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                log::warn!("worker: device sync failed ({e:?}); activity times are unreliable");
+            });
         }
+        let dt = t.elapsed().as_secs_f64();
+        self.acc.train_s += dt;
+        self.totals_s.train += dt;
     }
 
     async fn handle(&mut self, cmd: Command) {
@@ -309,7 +326,22 @@ impl Worker {
         }
     }
 
+    /// [`Self::ingest`], counting the keyframe and its time as ingest.
     async fn add_keyframe(&mut self, h: &KeyframeHeader, payload: &[u8]) -> Result<(), String> {
+        self.wait_for_training();
+        let t = Instant::now();
+        let result = self.ingest(h, payload).await;
+        if let Some(s) = self.live.splats() {
+            crate::timing::sync_splats(s).await;
+        }
+        let dt = t.elapsed().as_secs_f64();
+        self.acc.kf_s += dt;
+        self.totals_s.ingest += dt;
+        self.acc.kfs += 1;
+        result
+    }
+
+    async fn ingest(&mut self, h: &KeyframeHeader, payload: &[u8]) -> Result<(), String> {
         // A resend must not overwrite the stored image of the first send.
         if self.live.contains(h.id) || self.holdout.contains(h.id) {
             return Ok(());
@@ -395,7 +427,7 @@ impl Worker {
         self.scheduler = scheduler(config);
         self.throttle = IterThrottle::new(config.max_iters_per_s);
         self.fisher_passes = 0;
-        self.totals_s = ActivityTotals::default();
+        self.totals_s = ActivityTotals::new();
         self.fisher_cost = None;
         self.sizes.clear();
         self.finished = false;

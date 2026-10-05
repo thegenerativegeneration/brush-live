@@ -86,6 +86,10 @@ pub enum ServerHeader {
         voxel_ms: u64,
         #[serde(default)]
         fisher_ms: u64,
+        #[serde(default)]
+        uptime_ms: u64,
+        #[serde(default)]
+        throttle_ms: u64,
     },
     Splat {
         ply_len: u64,
