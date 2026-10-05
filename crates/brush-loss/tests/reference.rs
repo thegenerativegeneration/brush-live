@@ -10,6 +10,7 @@ use brush_loss::{
     psnr_from_mse,
 };
 use burn::tensor::{Device, Int, Tensor, TensorData};
+use glam::Vec3;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 #[cfg(target_family = "wasm")]
@@ -356,49 +357,73 @@ async fn l1_only_map_matches_cpu_reference() {
     }
 }
 
+/// Per-channel `(diff, gt_alpha)` of the L1 term: `pred - gt_eff`, with
+/// `gt_eff = gt + (1 - gt.a) * bg` when compositing.
+fn l1_diffs(bytes_a: &[u8], bytes_b: &[u8], bg: Option<Vec3>) -> Vec<(f32, f32)> {
+    bytes_a
+        .chunks_exact(4)
+        .zip(bytes_b.chunks_exact(4))
+        .flat_map(|(p, g)| {
+            let ga = decode_gt(g[3]);
+            (0..3).map(move |c| {
+                let gt_eff = decode_gt(g[c]) + bg.map_or(0.0, |bg| (1.0 - ga) * bg[c]);
+                (p[c] as f32 / 255.0 - gt_eff, ga)
+            })
+        })
+        .collect()
+}
+
 #[wasm_bindgen_test(unsupported = tokio::test)]
 async fn l1_only_reduced_loss_and_gradient_match_reference() {
     let device =
         burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let (h, w) = (37, 53);
     let bytes_a = make_pattern(h, w, 5, 1);
+    // Alpha (every fourth byte) varies across pixels.
     let bytes_b = make_pattern(h, w, 7, 11);
     let l1_w = 0.8_f32;
-    let cfg = ImageLossConfig {
-        l1_weight: l1_w,
-        ssim_weight: 0.0,
-        composite_bg: None,
-        mask: false,
-        alpha_weight: 0.0,
-    };
-    let pred = pred_from_bytes(&bytes_a, h, w, &device).require_grad();
-    let gt = gt_packed_from_bytes(&bytes_b, h, w, &device);
-    let loss = image_loss(pred.clone(), gt, cfg);
-    let value = to_vec(loss.clone()).await[0];
-    let grads = loss.backward();
-    let grad = to_vec(pred.grad(&grads).expect("grad")).await;
-
     let n = (h * w * 3) as f32;
-    let reference = l1_reference(&bytes_a, &bytes_b, false);
-    let want = l1_w * reference.iter().sum::<f32>() / n;
-    assert!(
-        (value - want).abs() < 1e-5,
-        "loss {value} vs reference {want}"
-    );
+    let bg = Vec3::new(0.2, 0.5, 0.8);
+    for (mask, composite_bg) in [
+        (false, None),
+        (true, None),
+        (false, Some(bg)),
+        (true, Some(bg)),
+    ] {
+        let cfg = ImageLossConfig {
+            l1_weight: l1_w,
+            ssim_weight: 0.0,
+            composite_bg,
+            mask,
+            alpha_weight: 0.0,
+        };
+        let pred = pred_from_bytes(&bytes_a, h, w, &device).require_grad();
+        let gt = gt_packed_from_bytes(&bytes_b, h, w, &device);
+        let loss = image_loss(pred.clone(), gt, cfg);
+        let value = to_vec(loss.clone()).await[0];
+        let grads = loss.backward();
+        let grad = to_vec(pred.grad(&grads).expect("grad")).await;
 
-    for ((i, g), (p, t)) in grad.iter().enumerate().zip(
-        bytes_a
-            .chunks_exact(4)
-            .zip(bytes_b.chunks_exact(4))
-            .flat_map(|(p, g)| (0..3).map(move |c| (p[c], g[c]))),
-    ) {
-        let diff = p as f32 / 255.0 - decode_gt(t);
-        let sign = diff.signum() * f32::from(diff != 0.0);
-        let want = l1_w * sign / n;
+        let terms = l1_diffs(&bytes_a, &bytes_b, composite_bg);
+        let weight = |ga: f32| if mask { ga } else { 1.0 };
+        let want = terms
+            .iter()
+            .map(|&(d, ga)| l1_w * d.abs() * weight(ga))
+            .sum::<f32>()
+            / n;
         assert!(
-            (g - want).abs() <= 1e-6 * want.abs().max(1e-6),
-            "grad[{i}] = {g}, want {want}"
+            (value - want).abs() < 1e-5,
+            "mask {mask} composite {composite_bg:?}: loss {value} vs reference {want}"
         );
+
+        for (i, (g, &(diff, ga))) in grad.iter().zip(&terms).enumerate() {
+            let sign = diff.signum() * f32::from(diff != 0.0);
+            let want = l1_w * sign * weight(ga) / n;
+            assert!(
+                (g - want).abs() <= 1e-6 * want.abs().max(1e-6),
+                "mask {mask} composite {composite_bg:?}: grad[{i}] = {g}, want {want}"
+            );
+        }
     }
 }
 

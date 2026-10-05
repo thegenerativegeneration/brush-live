@@ -179,6 +179,12 @@ fn dummy_splats(n: u32, camera: &Camera, rng: &mut impl rand::Rng, device: &Devi
     )
 }
 
+/// The two warm-up steps cover both loss variants: 1 and 0 stay as they are,
+/// any k >= 2 becomes 2 (step 1 L1-only, step 2 with SSIM).
+fn warmup_ssim_every(ssim_every: u32) -> u32 {
+    ssim_every.min(2)
+}
+
 async fn train_steps(
     config: &GuideConfig,
     device: &Device,
@@ -189,6 +195,7 @@ async fn train_steps(
 ) -> Splats {
     let mut train_config = TrainConfig::parse_from(["brush-guide-warmup"]);
     train_config.max_splats = config.max_splats;
+    train_config.ssim_every = warmup_ssim_every(config.ssim_every);
     let bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
     let mut trainer = SplatTrainer::new_seeded(&train_config, device, bounds, config.seed);
     let pixels: Vec<u8> = (0..image.x * image.y * 3).map(|_| rng.random()).collect();
@@ -214,6 +221,14 @@ async fn train_steps(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warmup_ssim_every_covers_both_loss_variants() {
+        assert_eq!(warmup_ssim_every(0), 0);
+        assert_eq!(warmup_ssim_every(1), 1);
+        assert_eq!(warmup_ssim_every(2), 2);
+        assert_eq!(warmup_ssim_every(7), 2);
+    }
 
     #[test]
     fn warmup_image_is_four_by_three_at_the_long_side() {

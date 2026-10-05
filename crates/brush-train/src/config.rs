@@ -86,7 +86,9 @@ pub struct TrainConfig {
     pub ssim_weight: f32,
 
     /// Compute the SSIM term every this many steps: 1 every step, 0 never.
-    /// Steps without it train on the L1 term alone at its usual weight.
+    /// Steps without it train on the L1 term alone at its usual weight, so the
+    /// reported training loss alternates between steps with and without the
+    /// SSIM term.
     #[clap(long, help_heading = "Training options", default_value = "1")]
     pub ssim_every: u32,
 
