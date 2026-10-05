@@ -1,4 +1,5 @@
 use crate::keyframe::DepthMap;
+use crate::mono::MonoSeed;
 use brush_render::camera::Camera;
 use glam::{UVec2, Vec2, Vec3};
 
@@ -13,11 +14,16 @@ pub struct SeedInput<'a> {
     pub points: &'a [Vec3],
     pub stride: u32,
     pub alpha_threshold: f32,
+    /// Phone mono depth with its fitted scale: fills grid pixels that LiDAR
+    /// and feature points leave empty.
+    pub mono: Option<MonoSeed<'a>>,
 }
 
 pub struct Seeds {
     pub means: Vec<f32>,
     pub colors: Vec<Vec3>,
+    /// How many of the seeds came from mono depth.
+    pub mono: usize,
 }
 
 const FEATURE_RADIUS_PX: f32 = 24.0;
@@ -76,6 +82,7 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
     let mut seeds = Seeds {
         means: Vec::new(),
         colors: Vec::new(),
+        mono: 0,
     };
     let half = input.stride as f32 / 2.0;
     for y in (0..size.y).step_by(input.stride as usize) {
@@ -85,24 +92,30 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
             }
             let px = Vec2::new(x as f32 + half, y as f32 + half).min(size.as_vec2() - 0.5);
             let uv = px / size.as_vec2();
-            let Some(depth) = (if let Some(d) = input.depth {
+            let measured = if let Some(d) = input.depth {
                 // Trustworthy depth wins. Where the map has no value
                 // (masked low-confidence, or beyond LiDAR range) a
                 // projected feature point fills in, but only if it is
                 // itself beyond FEATURE_BACKFILL_MIN_DEPTH_M: nearer
                 // masked pixels are usually reflective/dark surfaces
                 // LiDAR flagged, where a nearby feature carries the
-                // wrong depth, so those are still skipped. Still no
-                // median fallback: a pixel with neither source is
-                // skipped rather than guessed.
+                // wrong depth, so those are still skipped.
                 d.sample_uv(uv.x, uv.y)
                     .or_else(|| feature_depth(px).filter(|fd| *fd > FEATURE_BACKFILL_MIN_DEPTH_M))
             } else {
-                // No depth map at all: feature points only.
+                // No depth map at all: feature points first.
                 feature_depth(px)
-            }) else {
-                continue;
             };
+            // Mono depth only where no measured source has a value. A pixel
+            // with no source at all is skipped rather than guessed.
+            let (depth, from_mono) = match measured {
+                Some(d) => (d, false),
+                None => match input.mono.as_ref().and_then(|m| m.depth_at(uv)) {
+                    Some(d) => (d, true),
+                    None => continue,
+                },
+            };
+            seeds.mono += usize::from(from_mono);
             seeds
                 .means
                 .extend(unproject(input.camera, size, px, depth).to_array());
@@ -120,6 +133,7 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mono::MonoSeed;
     use brush_render::kernels::camera_model::CameraModel;
 
     fn cam() -> Camera {
@@ -149,6 +163,7 @@ mod tests {
             points,
             stride: 2,
             alpha_threshold: 0.5,
+            mono: None,
         }
     }
 
@@ -333,5 +348,206 @@ mod tests {
             "no median fallback: {:?}",
             seeds.means
         );
+    }
+
+    fn mono_map(values: Vec<f32>) -> DepthMap {
+        DepthMap {
+            width: 4,
+            height: 4,
+            values,
+            confidence: None,
+        }
+    }
+
+    fn with_mono<'a>(
+        base: SeedInput<'a>,
+        map: &'a DepthMap,
+        scale: f32,
+        min_depth_m: f32,
+    ) -> SeedInput<'a> {
+        SeedInput {
+            mono: Some(MonoSeed {
+                depth: map,
+                scale,
+                min_depth_m,
+            }),
+            ..base
+        }
+    }
+
+    fn depths(seeds: &Seeds) -> Vec<f32> {
+        seeds.means.chunks_exact(3).map(|p| p[2]).collect()
+    }
+
+    #[test]
+    fn lidar_wins_over_mono() {
+        let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        let depth = mono_map(vec![2.0; 16]);
+        let mono = mono_map(vec![10.0; 16]);
+        let seeds = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, Some(&depth), &[]),
+            &mono,
+            1.0,
+            0.0,
+        ));
+        assert_eq!(depths(&seeds), vec![2.0; 4]);
+        assert_eq!(seeds.mono, 0);
+    }
+
+    #[test]
+    fn feature_backfill_comes_before_mono() {
+        let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        let mut values = vec![2.0; 16];
+        values[4 + 1] = 0.0;
+        let depth = mono_map(values);
+        let mono = mono_map(vec![10.0; 16]);
+        let pts = [Vec3::new(0.0, 0.0, 6.0)];
+        let seeds = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, Some(&depth), &pts),
+            &mono,
+            1.0,
+            4.5,
+        ));
+        assert_eq!(seeds.mono, 0);
+        assert_eq!(
+            depths(&seeds)
+                .iter()
+                .filter(|z| (**z - 6.0).abs() < 1e-4)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn with_lidar_mono_fills_masked_pixels_only_from_the_min_depth_on() {
+        let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        let mut values = vec![2.0; 16];
+        values[4 + 1] = 0.0;
+        let depth = mono_map(values);
+        let far = mono_map(vec![10.0; 16]);
+        let seeds = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, Some(&depth), &[]),
+            &far,
+            1.0,
+            4.5,
+        ));
+        assert_eq!(seeds.mono, 1);
+        assert_eq!(
+            depths(&seeds)
+                .iter()
+                .filter(|z| (**z - 10.0).abs() < 1e-4)
+                .count(),
+            1
+        );
+
+        let near = mono_map(vec![3.0; 16]);
+        let seeds = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, Some(&depth), &[]),
+            &near,
+            1.0,
+            4.5,
+        ));
+        assert_eq!(
+            (seeds.mono, seeds.colors.len()),
+            (0, 3),
+            "3 m is inside the LiDAR gate"
+        );
+
+        let at_gate = mono_map(vec![4.5; 16]);
+        let seeds = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, Some(&depth), &[]),
+            &at_gate,
+            1.0,
+            4.5,
+        ));
+        assert_eq!(seeds.mono, 1, "the gate is inclusive");
+    }
+
+    #[test]
+    fn without_lidar_mono_seeds_at_all_distances_after_feature_points() {
+        let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        let mono = mono_map(vec![1.0; 16]);
+        let seeds = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, None, &[]),
+            &mono,
+            2.0,
+            0.0,
+        ));
+        assert_eq!(depths(&seeds), vec![2.0; 4]);
+        assert_eq!(seeds.mono, 4);
+
+        let pts = [Vec3::new(0.0, 0.0, 3.0)];
+        let seeds = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, None, &pts),
+            &mono,
+            2.0,
+            0.0,
+        ));
+        assert!(
+            depths(&seeds).iter().all(|z| (z - 3.0).abs() < 1e-4),
+            "{:?}",
+            depths(&seeds)
+        );
+        assert_eq!(seeds.mono, 0);
+    }
+
+    #[test]
+    fn mono_beyond_100_m_and_invalid_mono_values_are_not_seeded() {
+        // Grid centres sample map indices 5, 7, 13 and 15.
+        let rgb = image::RgbImage::from_pixel(4, 4, image::Rgb([0, 0, 0]));
+        let mut values = vec![0.0; 16];
+        values[5] = 50.0;
+        values[7] = 60.0;
+        values[13] = f32::NAN;
+        values[15] = -5.0;
+        let mono = mono_map(values);
+        let seeds = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, None, &[]),
+            &mono,
+            2.0,
+            0.0,
+        ));
+        assert_eq!(
+            depths(&seeds),
+            vec![100.0],
+            "100 m is the inclusive cap, 120 m is out"
+        );
+        assert_eq!(seeds.mono, 1);
+    }
+
+    /// Mono depth only adds seeds: dropping them leaves exactly the seeds of the same frame without mono.
+    #[test]
+    fn mono_only_adds_seeds_where_nothing_else_did() {
+        // Large image: the feature radius shrinks to ~0.24 alpha px, so the point at alpha (1, 1)
+        // backfills grid pixel (1, 1) only; (3, 3) is masked with no feature and takes mono.
+        let rgb = image::RgbImage::from_fn(400, 400, |x, y| {
+            image::Rgb([(x % 251) as u8, (y % 241) as u8, 7])
+        });
+        let mut values = vec![2.0; 16];
+        values[5] = 0.0;
+        values[15] = 0.0;
+        let depth = mono_map(values);
+        let pts = [Vec3::new(-3.0, -3.0, 6.0)];
+        let mono = mono_map(vec![20.0; 16]);
+        let without = seed_points(&input(&[0.0; 16], &rgb, Some(&depth), &pts));
+        let with = seed_points(&with_mono(
+            input(&[0.0; 16], &rgb, Some(&depth), &pts),
+            &mono,
+            1.0,
+            4.5,
+        ));
+        assert_eq!(
+            (without.colors.len(), with.colors.len(), with.mono),
+            (3, 4, 1)
+        );
+        let pairs = |s: &Seeds, skip_z: Option<f32>| -> Vec<(Vec<f32>, Vec3)> {
+            s.means
+                .chunks_exact(3)
+                .zip(&s.colors)
+                .filter(|(p, _)| skip_z.is_none_or(|z| (p[2] - z).abs() > 1e-4))
+                .map(|(p, c)| (p.to_vec(), *c))
+                .collect()
+        };
+        assert_eq!(pairs(&with, Some(20.0)), pairs(&without, None));
     }
 }

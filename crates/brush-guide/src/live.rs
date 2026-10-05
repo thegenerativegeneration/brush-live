@@ -1,5 +1,6 @@
 use crate::config::GuideConfig;
 use crate::keyframe::DecodedKeyframe;
+use crate::mono::mono_seed_for;
 use crate::seed::{SeedInput, Seeds, seed_points};
 use brush_dataset::config::LoadDatasetConfig;
 use brush_dataset::scene::{Scene, SceneBatch, SceneView, view_to_packed_data};
@@ -259,10 +260,19 @@ impl LiveModel {
                 .flat_map(|&i| seeds.means[i * 3..i * 3 + 3].iter().copied())
                 .collect(),
             colors: keep.iter().map(|&i| seeds.colors[i]).collect(),
+            mono: seeds.mono,
         }
     }
 
     fn initial_splats(&mut self, kf: &DecodedKeyframe, size: UVec2) -> Splats {
+        let (mono, fit) = mono_seed_for(
+            kf.mono.as_ref(),
+            kf.depth.as_ref(),
+            &kf.camera,
+            size,
+            &kf.points,
+            &self.config,
+        );
         let seeds = seed_points(&SeedInput {
             camera: &kf.camera,
             alpha: &vec![0.0; (size.x * size.y) as usize],
@@ -272,7 +282,16 @@ impl LiveModel {
             points: &kf.points,
             stride: self.config.seed_stride_px,
             alpha_threshold: self.config.seed_alpha_threshold,
+            mono,
         });
+        log::debug!(
+            target: crate::timing::TARGET,
+            "keyframe {}: {} initial seeds (depth {}, mono {fit}, {} mono seeds)",
+            kf.id,
+            seeds.colors.len(),
+            kf.depth.is_some(),
+            seeds.mono
+        );
         let seeds = self.cap_seeds(seeds, 0);
         let splats = if seeds.colors.len() >= 3 {
             self.seeds_to_splats(seeds.means, &seeds.colors)
@@ -318,6 +337,14 @@ impl LiveModel {
             .expect("alpha readback")
             .try_to_vec::<f32>()
             .expect("f32 alpha");
+        let (mono, fit) = mono_seed_for(
+            kf.mono.as_ref(),
+            kf.depth.as_ref(),
+            &kf.camera,
+            size,
+            &kf.points,
+            &self.config,
+        );
         let seeds = seed_points(&SeedInput {
             camera: &kf.camera,
             alpha: &alpha,
@@ -327,13 +354,15 @@ impl LiveModel {
             points: &kf.points,
             stride: (self.config.seed_stride_px / 4).max(1),
             alpha_threshold: self.config.seed_alpha_threshold,
+            mono,
         });
         log::debug!(
             target: crate::timing::TARGET,
-            "keyframe {}: {} seeds (depth {}) onto {current} splats",
+            "keyframe {}: {} seeds (depth {}, mono {fit}, {} mono seeds) onto {current} splats",
             kf.id,
             seeds.colors.len(),
-            kf.depth.is_some()
+            kf.depth.is_some(),
+            seeds.mono
         );
         let seeds = self.cap_seeds(seeds, current);
         (seeds.colors.len() >= 3).then(|| {

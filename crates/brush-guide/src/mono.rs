@@ -1,10 +1,11 @@
 //! Monocular depth from the phone (MoGe-2): a per-keyframe scale fit to
 //! LiDAR or feature points, and the seeding input built from it.
 
+use crate::config::GuideConfig;
 use crate::keyframe::DepthMap;
 use crate::seed::project;
 use brush_render::camera::Camera;
-use glam::{UVec2, Vec3};
+use glam::{UVec2, Vec2, Vec3};
 use std::fmt;
 
 /// Fewest confident LiDAR pixels with a mono value for a LiDAR scale fit.
@@ -168,9 +169,65 @@ pub fn fit_scale(
     }
 }
 
+/// Scaled mono depth beyond this is not seeded.
+pub const MONO_MAX_DEPTH_M: f32 = 100.0;
+
+/// Mono depth ready for seeding: the map, its fitted scale and the nearest
+/// depth it may seed.
+pub struct MonoSeed<'a> {
+    pub depth: &'a DepthMap,
+    pub scale: f32,
+    /// `mono_min_depth_with_lidar_m` when the keyframe has a LiDAR map, else 0.
+    pub min_depth_m: f32,
+}
+
+impl MonoSeed<'_> {
+    /// Scaled mono depth at `uv` (fractions of the image), if valid and within
+    /// `[min_depth_m, MONO_MAX_DEPTH_M]`.
+    pub fn depth_at(&self, uv: Vec2) -> Option<f32> {
+        let d = self.depth.sample_uv(uv.x, uv.y)? * self.scale;
+        (d.is_finite() && d > 0.0 && d >= self.min_depth_m && d <= MONO_MAX_DEPTH_M).then_some(d)
+    }
+}
+
+/// The keyframe's mono seeding input and the fit behind it. `lidar` is the
+/// keyframe's LiDAR map (masked or not; confidence is checked here too).
+pub fn mono_seed_for<'a>(
+    mono: Option<&'a DepthMap>,
+    lidar: Option<&DepthMap>,
+    camera: &Camera,
+    image_size: UVec2,
+    points: &[Vec3],
+    config: &GuideConfig,
+) -> (Option<MonoSeed<'a>>, ScaleFit) {
+    let Some(mono) = mono.filter(|_| config.mono_seeding) else {
+        return (None, ScaleFit::Absent);
+    };
+    let fit = fit_scale(
+        mono,
+        lidar,
+        config.min_depth_confidence,
+        camera,
+        image_size,
+        points,
+        config.mono_scale_range,
+    );
+    let seed = fit.scale().map(|scale| MonoSeed {
+        depth: mono,
+        scale,
+        min_depth_m: if lidar.is_some() {
+            config.mono_min_depth_with_lidar_m
+        } else {
+            0.0
+        },
+    });
+    (seed, fit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::GuideConfig;
     use brush_render::kernels::camera_model::CameraModel;
 
     const RANGE: (f32, f32) = (0.3, 3.0);
@@ -338,5 +395,55 @@ mod tests {
         assert!(matches!(fit_for(0.2), ScaleFit::Rejected { .. }));
         assert_eq!(fit_for(3.0).scale(), Some(3.0));
         assert_eq!(fit_for(0.3).scale(), Some(0.3));
+    }
+
+    #[test]
+    fn mostly_masked_lidar_fits_on_features_but_keeps_the_lidar_min_depth() {
+        let config = GuideConfig::default();
+        let mono = map(16, 12, |_, _| 2.0);
+        let lidar = map(20, 15, |x, y| if x == 0 && y < 5 { 3.0 } else { 0.0 });
+        let pts = features(25, 5.0);
+        let (seed, fit) = mono_seed_for(Some(&mono), Some(&lidar), &cam(), size(), &pts, &config);
+        assert_eq!(
+            fit,
+            ScaleFit::Fitted {
+                source: ScaleSource::Features,
+                scale: 2.5,
+                samples: 25
+            }
+        );
+        let seed = seed.expect("fitted");
+        assert_eq!(seed.scale, 2.5);
+        assert_eq!(seed.min_depth_m, config.mono_min_depth_with_lidar_m);
+
+        let (seed, _) = mono_seed_for(Some(&mono), None, &cam(), size(), &pts, &config);
+        assert_eq!(
+            seed.expect("fitted").min_depth_m,
+            0.0,
+            "no LiDAR map: all distances"
+        );
+    }
+
+    #[test]
+    fn switched_off_absent_or_rejected_mono_gives_no_seed() {
+        let mono = map(16, 12, |_, _| 2.0);
+        let pts = features(25, 5.0);
+        let off = GuideConfig {
+            mono_seeding: false,
+            ..GuideConfig::default()
+        };
+        let (seed, fit) = mono_seed_for(Some(&mono), None, &cam(), size(), &pts, &off);
+        assert!(seed.is_none());
+        assert_eq!(fit, ScaleFit::Absent);
+
+        let on = GuideConfig::default();
+        let (seed, fit) = mono_seed_for(None, None, &cam(), size(), &pts, &on);
+        assert!(seed.is_none());
+        assert_eq!(fit, ScaleFit::Absent);
+
+        let far = features(25, 50.0);
+        let (seed, fit) = mono_seed_for(Some(&mono), None, &cam(), size(), &far, &on);
+        assert!(seed.is_none());
+        assert!(matches!(fit, ScaleFit::Rejected { scale, .. } if scale == 25.0));
     }
 }
