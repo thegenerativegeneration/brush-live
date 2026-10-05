@@ -82,8 +82,8 @@ pub fn create_random_splats(
             // Log-uniform depth so we don't over-pack near the camera
             let depth = (rng.random_range(ln_near..ln_far)).exp();
 
-            // Camera looks along -Z in local space
-            let local_point = Vec3::new(dx * depth, dy * depth, -depth);
+            // Brush cameras look along +Z, y down
+            let local_point = Vec3::new(dx * depth, dy * depth, depth);
             let world_point = local_to_world.transform_point3(local_point);
 
             [world_point.x, world_point.y, world_point.z]
@@ -291,5 +291,59 @@ mod tests {
         // reasonable.
         assert!(bb.center.is_finite());
         assert!(bb.extent.is_finite());
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tokio::test]
+    async fn random_splats_lie_in_front_of_a_camera() {
+        use brush_render::kernels::camera_model::CameraModel;
+        use glam::{Quat, Vec2};
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let cam = |pos: Vec3, rot: Quat| {
+            Camera::new(pos, rot, 1.0, 0.7, Vec2::splat(0.5), CameraModel::Pinhole)
+        };
+        let cameras = [
+            cam(
+                Vec3::new(1.0, -2.0, 3.0),
+                Quat::from_euler(glam::EulerRot::XYZ, 0.4, -0.8, 0.3),
+            ),
+            cam(
+                Vec3::new(-4.0, 0.5, 2.0),
+                Quat::from_euler(glam::EulerRot::XYZ, -0.6, 2.1, 0.1),
+            ),
+        ];
+        let config = RandomSplatsConfig { init_count: 300 };
+
+        for cams in [&cameras[..1], &cameras[..]] {
+            let mut rng = StdRng::seed_from_u64(7);
+            let splats = create_random_splats(
+                &config,
+                cams,
+                Some(2.0),
+                &mut rng,
+                SplatRenderMode::Default,
+                &device,
+            );
+            let means: Vec<f32> = splats
+                .means()
+                .into_data_async()
+                .await
+                .expect("readback")
+                .try_into_vec()
+                .expect("Wrong type");
+            assert_eq!(means.len(), 300 * 3);
+
+            for m in means.chunks_exact(3) {
+                let mean = Vec3::new(m[0], m[1], m[2]);
+                let visible = cams.iter().any(|c| {
+                    let l = c.world_to_local().transform_point3(mean);
+                    let (tx, ty) = ((c.fov_x * 0.5).tan() as f32, (c.fov_y * 0.5).tan() as f32);
+                    l.z > 0.0 && (l.x / l.z).abs() <= tx + 1e-3 && (l.y / l.z).abs() <= ty + 1e-3
+                });
+                assert!(visible, "splat {mean:?} is not inside any camera frustum");
+            }
+        }
     }
 }
