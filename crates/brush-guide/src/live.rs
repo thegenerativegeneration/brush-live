@@ -77,6 +77,7 @@ impl LiveModel {
         train_config.refine_every = config.refine_every;
         train_config.sh_background = config.sh_background;
         train_config.sh_background_alpha_weight = config.sh_background_alpha_weight;
+        train_config.ssim_every = config.ssim_every;
         let mut load_config = LoadArgs::parse_from(["brush-guide"]).load;
         load_config.max_scene_batch_cache_size = config.loader_cache_bytes;
         let rng = rand::rngs::StdRng::seed_from_u64(config.seed);

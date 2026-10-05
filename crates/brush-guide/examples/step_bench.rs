@@ -5,8 +5,8 @@
 //! assumes 4:3 images; splats use SH degree 1; measured blocks run no refine.
 //!
 //! Usage: `cargo run --release -p brush-guide --features brush-cube/metal
-//! --example step_bench [-- <dataset dir>]` from `server/brush`
-//! (default `../../datasets/segment-1`).
+//! --example step_bench [-- <dataset dir> [<ssim_every>]]` from `server/brush`
+//! (default `../../datasets/segment-1`; `ssim_every` default 1, 0 never).
 
 use brush_dataset::config::LoadDatasetConfig;
 use brush_dataset::load_dataset;
@@ -52,6 +52,10 @@ async fn main() {
     let dir = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "../../datasets/segment-1".to_owned());
+    let ssim_every: u32 = std::env::args()
+        .nth(2)
+        .map_or(1, |s| s.parse().expect("ssim_every is a number"));
+    println!("ssim_every {ssim_every}");
     let device = Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let vfs = Arc::new(BrushVfs::from_path(Path::new(&dir)).await.expect("dataset dir"));
 
@@ -69,6 +73,7 @@ async fn main() {
 
     let mut train_config = TrainConfig::parse_from(["step_bench"]);
     train_config.total_train_iters = 1_000_000_000;
+    train_config.ssim_every = ssim_every;
     let mut sets = Vec::new();
     for target in TARGETS {
         let stride = (total / target).max(1);

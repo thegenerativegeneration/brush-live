@@ -95,6 +95,9 @@ pub struct GuideConfig {
     /// Time training-step phases (GPU synced at each boundary; slower steps)
     /// and log them every 100 steps on `brush_guide::timing` at debug.
     pub profile_steps: bool,
+    /// Plumbed into `TrainConfig::ssim_every`: compute the SSIM loss term
+    /// every this many training steps (1 every step, 0 never).
+    pub ssim_every: u32,
 }
 
 impl Default for GuideConfig {
@@ -140,6 +143,7 @@ impl Default for GuideConfig {
             holdout_every: 0,
             eval_interval_s: 30.0,
             profile_steps: false,
+            ssim_every: 1,
         }
     }
 }
@@ -157,5 +161,22 @@ impl GuideConfig {
             ridge: self.fisher_ridge(),
             sigma_pix: self.sigma_pix,
         }
+    }
+}
+
+#[cfg(test)]
+mod ssim_every_tests {
+    use super::GuideConfig;
+
+    #[test]
+    fn missing_field_defaults_to_every_step() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!(cfg.ssim_every, 1);
+    }
+
+    #[test]
+    fn field_parses() {
+        let cfg: GuideConfig = serde_json::from_str(r#"{"ssim_every": 4}"#).expect("parses");
+        assert_eq!(cfg.ssim_every, 4);
     }
 }
