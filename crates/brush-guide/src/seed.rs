@@ -35,6 +35,21 @@ const FEATURE_RADIUS_PX: f32 = 24.0;
 /// is the only signal there is.
 const FEATURE_BACKFILL_MIN_DEPTH_M: f32 = 4.5;
 
+/// Largest seed grid spacing, in pixels.
+pub const MAX_SEED_STRIDE_PX: u32 = 64;
+
+/// Grid spacing for a `width` x `height` keyframe: a fully uncovered view seeds
+/// about `fraction * max_splats` splats, but never closer than `min_stride`.
+pub fn stride_for(width: u32, height: u32, max_splats: u32, fraction: f32, min_stride: u32) -> u32 {
+    let target = fraction * max_splats as f32;
+    let stride = if target > 0.0 && target.is_finite() {
+        ((width as f32 * height as f32) / target).sqrt().round()
+    } else {
+        MAX_SEED_STRIDE_PX as f32
+    };
+    (stride as u32).clamp(min_stride.max(1), MAX_SEED_STRIDE_PX.max(min_stride))
+}
+
 pub fn project(camera: &Camera, size: UVec2, world: Vec3) -> Option<(Vec2, f32)> {
     let local = camera.world_to_local().transform_point3(world);
     if local.z <= 1e-4 {
@@ -134,6 +149,26 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
 mod tests {
     use super::*;
     use crate::mono::MonoSeed;
+
+    #[test]
+    fn stride_follows_the_budget() {
+        let f = 0.05;
+        assert_eq!(stride_for(320, 240, 25_000, f, 4), 8);
+        assert_eq!(stride_for(500, 375, 50_000, f, 4), 9);
+        assert_eq!(stride_for(960, 720, 25_000, f, 4), 24);
+        assert_eq!(stride_for(100, 75, 5_000, f, 4), 5);
+        assert_eq!(stride_for(160, 120, 5_000, f, 4), 9);
+        assert_eq!(stride_for(4000, 3000, 5_000, f, 4), 64);
+        assert_eq!(stride_for(10, 10, 200_000, f, 4), 4);
+    }
+
+    #[test]
+    fn stride_degenerate_inputs_use_the_maximum() {
+        assert_eq!(stride_for(320, 240, 0, 0.05, 4), 64);
+        assert_eq!(stride_for(320, 240, 25_000, 0.0, 4), 64);
+        assert_eq!(stride_for(320, 240, 25_000, -1.0, 4), 64);
+        assert_eq!(stride_for(320, 240, 25_000, f32::NAN, 4), 64);
+    }
     use brush_render::kernels::camera_model::CameraModel;
 
     fn cam() -> Camera {

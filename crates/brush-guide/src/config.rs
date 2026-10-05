@@ -45,7 +45,12 @@ pub struct GuideConfig {
     /// start so GPU autotuning happens before the first session.
     pub warmup: bool,
     pub sh_degree: u32,
+    /// Smallest spacing, in pixels, of the grid a keyframe seeds new splats
+    /// on. The spacing itself follows from `seed_view_fraction`.
     pub seed_stride_px: u32,
+    /// A fully uncovered view seeds at most about this fraction of
+    /// `max_splats`; the seed grid's spacing follows from it.
+    pub seed_view_fraction: f32,
     pub seed_alpha_threshold: f32,
     pub init_random_count: usize,
     /// Absolute ridge on a voxel's summed position Fisher before inversion.
@@ -123,7 +128,8 @@ impl Default for GuideConfig {
             min_score_interval_s: 2.0,
             warmup: true,
             sh_degree: 1,
-            seed_stride_px: 8,
+            seed_stride_px: 4,
+            seed_view_fraction: 0.05,
             seed_alpha_threshold: 0.5,
             init_random_count: 5000,
             fisher_lambda: 1e-6,
@@ -162,6 +168,21 @@ impl GuideConfig {
             ridge: self.fisher_ridge(),
             sigma_pix: self.sigma_pix,
         }
+    }
+}
+
+#[cfg(test)]
+mod seed_stride_tests {
+    use super::GuideConfig;
+
+    #[test]
+    fn defaults_and_old_configs_parse() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!(cfg.seed_stride_px, 4);
+        assert_eq!(cfg.seed_view_fraction, 0.05);
+        let cfg: GuideConfig = serde_json::from_str(r#"{"seed_stride_px": 8}"#).expect("parses");
+        assert_eq!(cfg.seed_stride_px, 8);
+        assert_eq!(cfg.seed_view_fraction, 0.05);
     }
 }
 

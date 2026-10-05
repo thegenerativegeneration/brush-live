@@ -1,7 +1,7 @@
 use crate::config::GuideConfig;
 use crate::keyframe::DecodedKeyframe;
 use crate::mono::{MonoSeed, ScaleFit, mono_seed_for};
-use crate::seed::{SeedInput, Seeds, seed_points};
+use crate::seed::{SeedInput, Seeds, seed_points, stride_for};
 use brush_dataset::config::LoadDatasetConfig;
 use brush_dataset::scene::{Scene, SceneBatch, SceneView, view_to_packed_data};
 use brush_dataset::scene_loader::SceneLoader;
@@ -277,6 +277,17 @@ impl LiveModel {
         )
     }
 
+    /// Seed grid spacing for a keyframe decoded at `size`.
+    fn seed_stride(&self, size: UVec2) -> u32 {
+        stride_for(
+            size.x,
+            size.y,
+            self.config.max_splats,
+            self.config.seed_view_fraction,
+            self.config.seed_stride_px,
+        )
+    }
+
     fn initial_splats(&mut self, kf: &DecodedKeyframe, size: UVec2) -> Splats {
         let (mono, fit) = self.mono_input(kf, size);
         let seeds = seed_points(&SeedInput {
@@ -286,7 +297,7 @@ impl LiveModel {
             rgb: &kf.image,
             depth: kf.depth.as_ref(),
             points: &kf.points,
-            stride: self.config.seed_stride_px,
+            stride: self.seed_stride(size),
             alpha_threshold: self.config.seed_alpha_threshold,
             mono,
         });
@@ -351,7 +362,7 @@ impl LiveModel {
             rgb: &kf.image,
             depth: kf.depth.as_ref(),
             points: &kf.points,
-            stride: (self.config.seed_stride_px / 4).max(1),
+            stride: (self.seed_stride(size) / 4).max(1),
             alpha_threshold: self.config.seed_alpha_threshold,
             mono,
         });
