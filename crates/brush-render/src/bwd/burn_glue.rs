@@ -31,6 +31,7 @@ pub(crate) struct SplatGrads<B: Backend> {
     pub v_coeffs: FloatTensor<B>,
     pub v_raw_opac: FloatTensor<B>,
     pub v_refine_weight: FloatTensor<B>,
+    pub v_importance: FloatTensor<B>,
 }
 
 /// Concrete backward kernels behind [`SplatOps::render`]. Deliberately not
@@ -50,11 +51,11 @@ mod bwd_ops {
 
     #[burn::backend::backend_extension(Fusion)]
     pub(crate) trait SplatBwdOps: Backend {
-        /// Returns sparse `v_combined` `[num_visible, 10]` indexed by
+        /// Returns sparse `v_combined` `[num_visible, 11]` indexed by
         /// `compact_gid`: eight projected-splat gradients, then the raw opacity
-        /// gradient and the refinement weight.
+        /// gradient, the refinement weight and the importance.
         #[allow(clippy::too_many_arguments)]
-        #[fusion(dtype = v_output, shape = Shape::new([projected_splats[0], 10]))]
+        #[fusion(dtype = v_output, shape = Shape::new([projected_splats[0], 11]))]
         fn rasterize_bwd(
             out_img: FloatTensor<Self>,
             projected_splats: FloatTensor<Self>,
@@ -108,6 +109,7 @@ fn project_bwd_metadata(
         v_coeffs: f32_spec(Shape::new([rows, coeffs, 3])),
         v_raw_opac: f32_spec(Shape::new([rows])),
         v_refine_weight: f32_spec(Shape::new([rows])),
+        v_importance: f32_spec(Shape::new([rows])),
     }
 }
 
@@ -138,7 +140,7 @@ struct GaussianBackwardState<B: Backend> {
 #[derive(Debug)]
 struct RenderBackwards;
 
-const NUM_BWD_ARGS: usize = 5;
+const NUM_BWD_ARGS: usize = 6;
 
 // Implement gradient registration when rendering backwards.
 impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
@@ -160,6 +162,7 @@ impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
         let [
             transforms_parent,
             refine_weight,
+            importance_parent,
             coeffs_parent,
             raw_opacity_parent,
             coeffs_grad_sq_parent,
@@ -206,6 +209,10 @@ impl<B: Backend + SplatBwdOps> Backward<B, NUM_BWD_ARGS> for RenderBackwards {
             grads.register::<B>(node.id, dense(splat_grads.v_refine_weight));
         }
 
+        if let Some(node) = importance_parent {
+            grads.register::<B>(node.id, dense(splat_grads.v_importance));
+        }
+
         if let Some(node) = coeffs_parent {
             grads.register::<B>(node.id, dense(splat_grads.v_coeffs));
         }
@@ -241,6 +248,10 @@ pub struct SplatOutputDiff {
     /// backend (no gradients). Zero for culled splats.
     pub opacities: Tensor<1>,
     pub refine_weight_holder: Tensor<1>,
+    /// Catches the per-splat importance `Σ_px (∂I/∂g)²` of this render
+    /// (Speedy-Splat): its gradient is dense `[N]`, zero for culled or
+    /// never-hit splats.
+    pub importance_holder: Tensor<1>,
     /// Catches the per-splat mean square of the SH gradient (see
     /// [`SplatOps::render`]). Its gradient is `[N, 1, 1]`, broadcasting over
     /// the coefficients, so it feeds Adam's second moment directly.
@@ -287,6 +298,7 @@ pub async fn render_splats_with_pass(
     );
 
     let refine_weight_holder = Tensor::<1>::zeros([1], &device).require_grad();
+    let importance_holder = Tensor::<1>::zeros([1], &device).require_grad();
     let coeffs_grad_sq_holder = Tensor::<3>::zeros([1, 1, 1], &device).require_grad();
 
     // The 3D-filter floor is applied inside the projection kernels. It lives
@@ -315,6 +327,7 @@ pub async fn render_splats_with_pass(
         has_min_scale,
         0.0,
         refine_weight_holder.clone().into_dispatch(),
+        importance_holder.clone().into_dispatch(),
         coeffs_grad_sq_holder.clone().into_dispatch(),
         render_mode,
         background,
@@ -329,6 +342,7 @@ pub async fn render_splats_with_pass(
         max_radius: Tensor::from_dispatch(output.aux.max_radius).without_autodiff(),
         opacities: Tensor::from_dispatch(output.aux.opacities).without_autodiff(),
         refine_weight_holder,
+        importance_holder,
         coeffs_grad_sq_holder,
     }
 }
@@ -345,6 +359,7 @@ impl<B: Backend + SplatOps + SplatBwdOps, C: CheckpointStrategy> SplatOps for Au
         has_min_scale: bool,
         log_scale_offset: f32,
         refine_weight: FloatTensor<Self>,
+        importance: FloatTensor<Self>,
         coeffs_grad_sq: FloatTensor<Self>,
         render_mode: SplatRenderMode,
         background: Vec3,
@@ -354,6 +369,7 @@ impl<B: Backend + SplatOps + SplatBwdOps, C: CheckpointStrategy> SplatOps for Au
             .prepare::<NoCheckpointing>([
                 transforms.node(),
                 refine_weight.node(),
+                importance.node(),
                 sh_coeffs.node(),
                 raw_opacities.node(),
                 coeffs_grad_sq.node(),
@@ -376,6 +392,7 @@ impl<B: Backend + SplatOps + SplatBwdOps, C: CheckpointStrategy> SplatOps for Au
             has_min_scale,
             log_scale_offset,
             refine_weight.into_primitive(),
+            importance.into_primitive(),
             coeffs_grad_sq.into_primitive(),
             render_mode,
             background,

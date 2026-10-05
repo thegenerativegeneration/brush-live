@@ -108,6 +108,7 @@ impl SplatOps for CubeBackend {
         has_min_scale: bool,
         log_scale_offset: f32,
         _refine_weight: FloatTensor<Self>,
+        _importance: FloatTensor<Self>,
         _coeffs_grad_sq: FloatTensor<Self>,
         render_mode: SplatRenderMode,
         background: Vec3,

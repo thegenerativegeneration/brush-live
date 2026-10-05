@@ -6,6 +6,8 @@
 //! `T` is responsible for `(splat=T, pixel=i-T)`. Each thread accumulates
 //! the full gradient for its splat in registers and emits a single atomic
 //! add per gradient component per batch.
+//! A splat's 11 components are eight projected-splat gradients, then the
+//! raw opacity gradient, the refinement weight and the importance.
 //!
 //! The atomic accumulation is parametrised by the [`AtomicAddF32`] trait:
 //! `HfAtomicAdd` (native `Atomic<f32>::fetch_add`) when the device
@@ -39,6 +41,7 @@ pub struct SplatGrad {
     pub rgb_b: f32,
     pub alpha: f32,
     pub refine: f32,
+    pub importance: f32,
 }
 
 #[cube]
@@ -54,6 +57,7 @@ fn zero_grad() -> SplatGrad {
         rgb_b: 0.0f32,
         alpha: 0.0f32,
         refine: 0.0f32,
+        importance: 0.0f32,
     }
 }
 
@@ -144,7 +148,7 @@ pub fn rasterize_backwards_kernel<A: AtomicAddF32>(
             smooth_cutoff,
         );
         if splat_active {
-            let base = (compact_gid * 10u32) as usize;
+            let base = (compact_gid * 11u32) as usize;
             A::add(&v_splats[base], grad.xy_x);
             A::add(&v_splats[base + 1], grad.xy_y);
             A::add(&v_splats[base + 2], grad.conic_x);
@@ -155,6 +159,7 @@ pub fn rasterize_backwards_kernel<A: AtomicAddF32>(
             A::add(&v_splats[base + 7], grad.rgb_b);
             A::add(&v_splats[base + 8], grad.alpha);
             A::add(&v_splats[base + 9], grad.refine);
+            A::add(&v_splats[base + 10], grad.importance);
         }
         batch_idx += 1u32;
     }
@@ -337,22 +342,22 @@ fn accumulate_grads_for_batch(
                         grad.rgb_b += select(splat.color_b >= 0.0f32, vis * v_o_z, 0.0f32);
 
                         let ra = 1.0f32 / (1.0f32 - alpha_eff);
-                        let dot_rgb = ((state_w * clamped_r - state_x) * v_o_x
-                            + (state_w * clamped_g - state_y) * v_o_y
-                            + (state_w * clamped_b - state_z) * v_o_z)
-                            * ra;
+                        // ∂C/∂α_eff per channel.
+                        let d_r = (state_w * clamped_r - state_x) * ra;
+                        let d_g = (state_w * clamped_g - state_y) * ra;
+                        let d_b = (state_w * clamped_b - state_z) * ra;
+                        let dot_rgb = d_r * v_o_x + d_g * v_o_y + d_b * v_o_z;
                         let new_remain_x = state_x - vis * clamped_r;
                         let new_remain_y = state_y - vis * clamped_g;
                         let new_remain_z = state_z - vis * clamped_b;
                         // Chain through the cutoff. Hard step (production):
                         // w' = 0 and w == 1 in-branch, so the factor is 1.
                         let v_alpha_eff = dot_rgb + v_o_w * ra;
-                        let v_alpha = if comptime![smooth_cutoff] {
-                            let dw_dalpha = alpha_cutoff_weight_deriv(alpha);
-                            v_alpha_eff * (w_cut + alpha * dw_dalpha)
-                        } else {
-                            v_alpha_eff
-                        };
+                        let mut dalpha_eff = 1.0f32;
+                        if comptime![smooth_cutoff] {
+                            dalpha_eff = w_cut + alpha * alpha_cutoff_weight_deriv(alpha);
+                        }
+                        let v_alpha = v_alpha_eff * dalpha_eff;
                         let v_sigma = -alpha * v_alpha;
                         let vxy_x = v_sigma * (conic.c00 * dx + conic.c01 * dy);
                         let vxy_y = v_sigma * (conic.c01 * dx + conic.c11 * dy);
@@ -366,6 +371,10 @@ fn accumulate_grads_for_batch(
                             grad.xy_x += vxy_x;
                             grad.xy_y += vxy_y;
                             grad.alpha += v_alpha * gaussian;
+                            // Speedy-Splat importance (∂I/∂g)², RGB only, with
+                            // α = color_a · g.
+                            let da_dg = splat.color_a * dalpha_eff;
+                            grad.importance += da_dg * da_dg * (d_r * d_r + d_g * d_g + d_b * d_b);
                             let img_size_x = u.img_w as f32;
                             let img_size_y = u.img_h as f32;
                             let len = f32::sqrt(

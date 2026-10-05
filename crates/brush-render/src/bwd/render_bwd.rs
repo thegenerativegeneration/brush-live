@@ -37,8 +37,8 @@ impl SplatBwdOps for CubeBackend {
         let num_visible = projected_splats.shape()[0];
         let client = projected_splats.client.clone();
 
-        // Sparse [num_visible, 10] indexed by compact_gid.
-        let v_combined = Self::float_zeros([num_visible, 10].into(), &device, FloatDType::F32);
+        // Sparse [num_visible, 11] indexed by compact_gid.
+        let v_combined = Self::float_zeros([num_visible, 11].into(), &device, FloatDType::F32);
 
         let tile_bounds = uvec2(
             img_size.x.div_ceil(crate::shaders::helpers::TILE_WIDTH),
@@ -133,6 +133,7 @@ impl SplatBwdOps for CubeBackend {
         let v_coeffs = create_tensor([rows, coeffs, 3], &device, DType::F32);
         let v_raw_opac = create_tensor([rows], &device, DType::F32);
         let v_refine_weight = create_tensor([rows], &device, DType::F32);
+        let v_importance = create_tensor([rows], &device, DType::F32);
 
         let uniforms = project_uniforms.to_launch_object();
         let cube_dim = CubeDim::new_1d(kernels::project_backwards::WG_SIZE);
@@ -152,6 +153,7 @@ impl SplatBwdOps for CubeBackend {
                 v_coeffs.clone().into_tensor_arg(),
                 v_raw_opac.clone().into_tensor_arg(),
                 v_refine_weight.clone().into_tensor_arg(),
+                v_importance.clone().into_tensor_arg(),
                 uniforms,
                 mip_splat,
                 has_min_scale,
@@ -165,6 +167,7 @@ impl SplatBwdOps for CubeBackend {
             v_coeffs,
             v_raw_opac,
             v_refine_weight,
+            v_importance,
         }
     }
 }

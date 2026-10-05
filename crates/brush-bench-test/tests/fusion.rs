@@ -84,9 +84,10 @@ fn is_select(op: &OperationIr) -> bool {
     matches!(op, OperationIr::BaseFloat(BaseOperationIr::Select(_)))
 }
 
-/// `transforms`, `sh_coeffs`, `raw_opacities`, the refine-weight holder, and
-/// the SH second moment, which is reduced compact and gathered the same way.
-const GRADIENT_EXPANSIONS: usize = 5;
+/// `transforms`, `sh_coeffs`, `raw_opacities`, the refine-weight and
+/// importance holders, and the SH second moment, which is reduced compact and
+/// gathered the same way.
+const GRADIENT_EXPANSIONS: usize = 6;
 
 #[tokio::test]
 async fn gradient_expansions_are_fused() {

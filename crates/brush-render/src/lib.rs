@@ -54,12 +54,13 @@ pub trait SplatOps: Backend {
     ///
     /// Full forward pipeline: cull, depth sort, readback, project, rasterize.
     ///
-    /// `refine_weight` and `coeffs_grad_sq` are zero-filled accumulators that
-    /// catch per-splat bookkeeping the backward produces: the refinement
-    /// weight gradient, and the mean square of each splat's SH gradient, which
+    /// `refine_weight`, `importance` and `coeffs_grad_sq` are zero-filled
+    /// accumulators that catch per-splat bookkeeping the backward produces:
+    /// the refinement weight gradient, the eviction importance
+    /// `Σ_px (∂I/∂g)²`, and the mean square of each splat's SH gradient, which
     /// the optimizer wants reduced and would otherwise square a full
     /// `[N, coeffs, 3]` tensor to get. Only the `Autodiff` impl writes them;
-    /// the concrete backends ignore both.
+    /// the concrete backends ignore all three.
     /// `min_scale` is the per-splat Mip-Splatting scale floor `[N]`, folded
     /// into scales and opacity inside the projection kernels (and their
     /// backward). With `has_min_scale` false it is a placeholder the kernels
@@ -79,6 +80,7 @@ pub trait SplatOps: Backend {
         has_min_scale: bool,
         log_scale_offset: f32,
         refine_weight: FloatTensor<Self>,
+        importance: FloatTensor<Self>,
         coeffs_grad_sq: FloatTensor<Self>,
         render_mode: SplatRenderMode,
         background: Vec3,

@@ -103,6 +103,7 @@ fn write_zero_row(
     v_coeffs: &mut Tensor<f32>,
     v_raw_opac: &mut Tensor<f32>,
     v_refine_weight: &mut Tensor<f32>,
+    v_importance: &mut Tensor<f32>,
     row: u32,
     #[comptime] sh_degree: u32,
 ) {
@@ -116,6 +117,7 @@ fn write_zero_row(
     }
     v_raw_opac[row as usize] = 0.0f32;
     v_refine_weight[row as usize] = 0.0f32;
+    v_importance[row as usize] = 0.0f32;
 }
 
 /// Outputs are compact with a zero row in front: row 0 is what culled splats
@@ -134,6 +136,7 @@ pub fn project_backwards_kernel(
     v_coeffs: &mut Tensor<f32>,
     v_raw_opac: &mut Tensor<f32>,
     v_refine_weight: &mut Tensor<f32>,
+    v_importance: &mut Tensor<f32>,
     u: ProjectUniforms,
     #[comptime] mip_splatting: bool,
     #[comptime] has_min_scale: bool,
@@ -150,6 +153,7 @@ pub fn project_backwards_kernel(
             v_coeffs,
             v_raw_opac,
             v_refine_weight,
+            v_importance,
             row,
             sh_degree,
         );
@@ -160,7 +164,7 @@ pub fn project_backwards_kernel(
 
     // Read upstream rasterize grads first. rasterize_bwd only writes for
     // splats that contributed to a pixel; the rest write their zero row.
-    let rg_base = (compact_gid * 10u32) as usize;
+    let rg_base = (compact_gid * 11u32) as usize;
     let v_mean2d_x = v_rasterize_grads[rg_base];
     let v_mean2d_y = v_rasterize_grads[rg_base + 1];
     let v_conics_x = v_rasterize_grads[rg_base + 2];
@@ -171,6 +175,7 @@ pub fn project_backwards_kernel(
     let v_color_b = v_rasterize_grads[rg_base + 7];
     let v_alpha_in = v_rasterize_grads[rg_base + 8];
     let v_refine_in = v_rasterize_grads[rg_base + 9];
+    let v_importance_in = v_rasterize_grads[rg_base + 10];
 
     let any_grad = v_mean2d_x != 0.0f32
         || v_mean2d_y != 0.0f32
@@ -181,7 +186,8 @@ pub fn project_backwards_kernel(
         || v_color_g != 0.0f32
         || v_color_b != 0.0f32
         || v_alpha_in != 0.0f32
-        || v_refine_in != 0.0f32;
+        || v_refine_in != 0.0f32
+        || v_importance_in != 0.0f32;
 
     if !any_grad {
         write_zero_row(
@@ -189,6 +195,7 @@ pub fn project_backwards_kernel(
             v_coeffs,
             v_raw_opac,
             v_refine_weight,
+            v_importance,
             row,
             sh_degree,
         );
@@ -240,6 +247,8 @@ pub fn project_backwards_kernel(
     // that sum up their refine weight to some massive value.
     let refine_clean = select(is_finite_f32(v_refine_in), v_refine_in, 0.0f32);
     v_refine_weight[row as usize] = clamp(refine_clean, 0.0f32, 1.0e32f32);
+    let importance_clean = select(is_finite_f32(v_importance_in), v_importance_in, 0.0f32);
+    v_importance[row as usize] = clamp(importance_clean, 0.0f32, 1.0e32f32);
 
     let conic_inv = cov.inverse();
     let v_inv = Sym2 {

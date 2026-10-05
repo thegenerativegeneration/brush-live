@@ -448,6 +448,7 @@ pub async fn render_splats(
         // throwaway scalars the concrete backends ignore.
         Tensor::<1>::zeros([1], &render_device).into_dispatch(),
         Tensor::<1>::zeros([1], &render_device).into_dispatch(),
+        Tensor::<1>::zeros([1], &render_device).into_dispatch(),
         render_mode,
         background,
         pass,
