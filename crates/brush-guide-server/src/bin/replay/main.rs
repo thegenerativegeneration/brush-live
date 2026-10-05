@@ -246,6 +246,7 @@ fn keyframe_header(
         depth_size: None,
         depth_confidence: false,
         num_points: 0,
+        mono_depth_size: None,
     };
     Ok((header, jpeg))
 }

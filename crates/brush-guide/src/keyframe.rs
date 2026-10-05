@@ -15,6 +15,8 @@ pub enum KeyframeError {
     InvalidIntrinsics,
     #[error("depth size must be 1..=1024 per side")]
     InvalidDepth,
+    #[error("mono depth size must be 1..=1024 per side")]
+    InvalidMonoDepth,
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
     #[error("jpeg decode failed: {0}")]
@@ -65,6 +67,9 @@ pub struct DecodedKeyframe {
     pub camera: Camera,
     pub image: image::RgbImage,
     pub depth: Option<DepthMap>,
+    /// Phone mono depth (metres, 0 = invalid), sensor orientation, covering
+    /// the whole image; its scale is only roughly metric (see `mono`).
+    pub mono: Option<DepthMap>,
     pub points: Vec<Vec3>,
     pub view: SceneView,
 }
@@ -115,6 +120,11 @@ pub async fn decode_keyframe(
     {
         return Err(KeyframeError::InvalidDepth);
     }
+    if let Some(size) = h.mono_depth_size
+        && !size.iter().all(|d| (1..=MAX_DEPTH_SIDE).contains(d))
+    {
+        return Err(KeyframeError::InvalidMonoDepth);
+    }
     let parts = split_keyframe_payload(h, payload)?;
     let image =
         image::load_from_memory_with_format(parts.jpeg, image::ImageFormat::Jpeg)?.into_rgb8();
@@ -143,12 +153,22 @@ pub async fn decode_keyframe(
             values,
             confidence: parts.confidence,
         });
+    let mono = h
+        .mono_depth_size
+        .zip(parts.mono)
+        .map(|([width, height], values)| DepthMap {
+            width,
+            height,
+            values,
+            confidence: None,
+        });
     let points = parts.points.into_iter().map(Vec3::from).collect();
     Ok(DecodedKeyframe {
         id: h.id,
         camera,
         image,
         depth,
+        mono,
         points,
         view: SceneView {
             image: load,
@@ -176,6 +196,7 @@ mod tests {
             depth_size: None,
             depth_confidence: false,
             num_points: 0,
+            mono_depth_size: None,
         }
     }
 
@@ -283,5 +304,70 @@ mod tests {
         assert!(dir.join("images/1.jpg").exists());
         assert_eq!(kf.view.image.load().await.unwrap().width(), 8);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn jpeg(width: u32, height: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(width, height, image::Rgb([200, 10, 10]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn decode_reads_the_mono_block_after_the_points() {
+        let dir = std::env::temp_dir().join(format!("brush-guide-kf-mono-{}", std::process::id()));
+        let jpeg = jpeg(8, 6);
+        let mut h = header(Mat4::IDENTITY, 8, 6);
+        h.jpeg_len = jpeg.len() as u32;
+        h.num_points = 1;
+        h.mono_depth_size = Some([2, 1]);
+        let mut payload = jpeg.clone();
+        for v in [0.5f32, 1.0, 2.0] {
+            payload.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [7.5f32, 0.0] {
+            payload.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+        }
+
+        let kf = decode_keyframe(&h, &payload, &dir).await.unwrap();
+        assert_eq!(kf.points, vec![Vec3::new(0.5, 1.0, 2.0)]);
+        let mono = kf.mono.expect("mono block decoded");
+        assert_eq!((mono.width, mono.height), (2, 1));
+        assert_eq!(mono.values, vec![7.5, 0.0]);
+        assert!(mono.confidence.is_none());
+        assert!(
+            decode_keyframe(&h, &payload[..payload.len() - 2], &dir)
+                .await
+                .is_err(),
+            "a short mono block is a malformed frame"
+        );
+
+        h.mono_depth_size = None;
+        let kf = decode_keyframe(&h, &payload[..payload.len() - 4], &dir)
+            .await
+            .unwrap();
+        assert!(kf.mono.is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bad_mono_sizes_are_rejected() {
+        let dir =
+            std::env::temp_dir().join(format!("brush-guide-kf-mono-size-{}", std::process::id()));
+        for size in [[0, 1], [322, 0], [1025, 238]] {
+            let mut h = header(Mat4::IDENTITY, 8, 6);
+            h.mono_depth_size = Some(size);
+            let err = decode_keyframe(&h, &[], &dir).await.err();
+            assert!(
+                matches!(err, Some(KeyframeError::InvalidMonoDepth)),
+                "{size:?}: {err:?}"
+            );
+        }
+        assert!(!dir.exists(), "nothing written for rejected keyframes");
     }
 }

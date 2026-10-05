@@ -79,6 +79,7 @@ pub fn keyframe(id: u64, pos: Vec3) -> (KeyframeHeader, Vec<u8>) {
         depth_size: None,
         depth_confidence: false,
         num_points: points.len() as u32,
+        mono_depth_size: None,
     };
     let mut payload = jpeg;
     for p in points {

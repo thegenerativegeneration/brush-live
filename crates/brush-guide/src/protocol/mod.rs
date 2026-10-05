@@ -42,6 +42,10 @@ pub struct KeyframeHeader {
     #[serde(default)]
     pub depth_confidence: bool,
     pub num_points: u32,
+    /// `[w, h]` of the mono-depth block after the feature points; `None`
+    /// (absent or `null`) without one.
+    #[serde(default)]
+    pub mono_depth_size: Option<[u32; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -126,29 +130,67 @@ pub struct KeyframePayload<'a> {
     pub depth: Option<Vec<f32>>,
     pub confidence: Option<Vec<u8>>,
     pub points: Vec<[f32; 3]>,
+    /// Mono depth in metres, row-major `mono_depth_size`, 0 = invalid.
+    pub mono: Option<Vec<f32>>,
 }
 
-/// (depth bytes, confidence bytes, total payload bytes) declared by the
-/// header, `None` on overflow.
-fn payload_sizes(h: &KeyframeHeader) -> Option<(usize, usize, usize)> {
-    let depth_len = match h.depth_size {
-        None => 0,
-        Some([w, d]) => (w as usize).checked_mul(d as usize)?.checked_mul(2)?,
-    };
-    let confidence_len = if h.depth_confidence {
-        match h.depth_size {
-            None => 0,
-            Some([w, d]) => (w as usize).checked_mul(d as usize)?,
-        }
-    } else {
-        0
-    };
-    let points_len = (h.num_points as usize).checked_mul(12)?;
+/// Byte lengths of a keyframe payload's blocks as declared by the header.
+struct PayloadSizes {
+    depth: usize,
+    confidence: usize,
+    points: usize,
+    mono: usize,
+    total: usize,
+}
+
+/// Pixels of an optional `[w, h]` grid, `None` on overflow.
+fn grid_pixels(size: Option<[u32; 2]>) -> Option<usize> {
+    match size {
+        None => Some(0),
+        Some([w, h]) => (w as usize).checked_mul(h as usize),
+    }
+}
+
+/// Block sizes declared by the header, `None` on overflow. Order on the
+/// wire: JPEG, depth, confidence, points, mono depth.
+fn payload_sizes(h: &KeyframeHeader) -> Option<PayloadSizes> {
+    let depth_pixels = grid_pixels(h.depth_size)?;
+    let depth = depth_pixels.checked_mul(2)?;
+    let confidence = if h.depth_confidence { depth_pixels } else { 0 };
+    let points = (h.num_points as usize).checked_mul(12)?;
+    let mono = grid_pixels(h.mono_depth_size)?.checked_mul(2)?;
     let total = (h.jpeg_len as usize)
-        .checked_add(depth_len)?
-        .checked_add(confidence_len)?
-        .checked_add(points_len)?;
-    Some((depth_len, confidence_len, total))
+        .checked_add(depth)?
+        .checked_add(confidence)?
+        .checked_add(points)?
+        .checked_add(mono)?;
+    Some(PayloadSizes {
+        depth,
+        confidence,
+        points,
+        mono,
+        total,
+    })
+}
+
+/// The declared block sizes, after checking that the payload has exactly
+/// their total length.
+fn checked_sizes(h: &KeyframeHeader, payload: &[u8]) -> Result<PayloadSizes, ProtocolError> {
+    let sizes = payload_sizes(h).ok_or(ProtocolError::SizeOverflow)?;
+    if payload.len() != sizes.total {
+        return Err(ProtocolError::PayloadSize {
+            expected: sizes.total,
+            actual: payload.len(),
+        });
+    }
+    Ok(sizes)
+}
+
+fn f16_values(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(2)
+        .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+        .collect()
 }
 
 pub fn split_keyframe_payload<'a>(
@@ -158,25 +200,11 @@ pub fn split_keyframe_payload<'a>(
     if h.depth_confidence && h.depth_size.is_none() {
         return Err(ProtocolError::ConfidenceWithoutDepth);
     }
-    let jpeg_len = h.jpeg_len as usize;
-    let (depth_len, confidence_len, expected) =
-        payload_sizes(h).ok_or(ProtocolError::SizeOverflow)?;
-    if payload.len() != expected {
-        return Err(ProtocolError::PayloadSize {
-            expected,
-            actual: payload.len(),
-        });
-    }
-    let (jpeg, rest) = payload.split_at(jpeg_len);
-    let (depth_bytes, rest) = rest.split_at(depth_len);
-    let (confidence_bytes, point_bytes) = rest.split_at(confidence_len);
-    let depth = h.depth_size.map(|_| {
-        depth_bytes
-            .chunks_exact(2)
-            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
-            .collect()
-    });
-    let confidence = h.depth_confidence.then(|| confidence_bytes.to_vec());
+    let sizes = checked_sizes(h, payload)?;
+    let (jpeg, rest) = payload.split_at(h.jpeg_len as usize);
+    let (depth_bytes, rest) = rest.split_at(sizes.depth);
+    let (confidence_bytes, rest) = rest.split_at(sizes.confidence);
+    let (point_bytes, mono_bytes) = rest.split_at(sizes.points);
     let points = point_bytes
         .chunks_exact(12)
         .map(|c| {
@@ -186,8 +214,21 @@ pub fn split_keyframe_payload<'a>(
         .collect();
     Ok(KeyframePayload {
         jpeg,
-        depth,
-        confidence,
+        depth: h.depth_size.map(|_| f16_values(depth_bytes)),
+        confidence: h.depth_confidence.then(|| confidence_bytes.to_vec()),
         points,
+        mono: h.mono_depth_size.map(|_| f16_values(mono_bytes)),
     })
+}
+
+/// The mono-depth block's size and raw float16 bytes (the payload's last
+/// block), `None` when the header declares none. Checks the payload length
+/// like `split_keyframe_payload`.
+pub fn mono_block<'a>(
+    h: &KeyframeHeader,
+    payload: &'a [u8],
+) -> Result<Option<([u32; 2], &'a [u8])>, ProtocolError> {
+    let sizes = checked_sizes(h, payload)?;
+    Ok(h.mono_depth_size
+        .map(|size| (size, &payload[payload.len() - sizes.mono..])))
 }

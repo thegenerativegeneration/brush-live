@@ -34,6 +34,7 @@ fn keyframe(id: u64, pos: Vec3) -> Vec<u8> {
         depth_size: None,
         depth_confidence: false,
         num_points: 0,
+        mono_depth_size: None,
     });
     encode_frame(&header, &jpeg)
 }

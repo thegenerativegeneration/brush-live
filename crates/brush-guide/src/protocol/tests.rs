@@ -17,6 +17,7 @@ fn kf_header() -> KeyframeHeader {
         depth_size: Some([2, 1]),
         depth_confidence: true,
         num_points: 1,
+        mono_depth_size: None,
     }
 }
 
@@ -90,6 +91,63 @@ fn keyframe_payload_split() {
     assert_eq!(p.confidence.unwrap(), vec![2, 0]);
     assert_eq!(p.points, vec![[0.1, 0.2, 0.3]]);
     assert!(split_keyframe_payload(&h, &payload[..payload.len() - 1]).is_err());
+}
+
+#[test]
+fn keyframe_payload_split_with_a_mono_block_after_the_points() {
+    let mut h = kf_header();
+    h.mono_depth_size = Some([3, 1]);
+    let mut payload = b"jpg".to_vec();
+    for v in [1.5f32, 2.0] {
+        payload.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+    }
+    payload.extend_from_slice(&[2, 0]);
+    for v in [0.1f32, 0.2, 0.3] {
+        payload.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [10.0f32, 0.0, 40.0] {
+        payload.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+    }
+    let p = split_keyframe_payload(&h, &payload).unwrap();
+    assert_eq!(p.depth.unwrap(), vec![1.5, 2.0]);
+    assert_eq!(p.confidence.unwrap(), vec![2, 0]);
+    assert_eq!(p.points, vec![[0.1, 0.2, 0.3]]);
+    assert_eq!(p.mono.unwrap(), vec![10.0, 0.0, 40.0]);
+    assert!(matches!(
+        split_keyframe_payload(&h, &payload[..payload.len() - 2]),
+        Err(ProtocolError::PayloadSize { .. })
+    ));
+    let mut longer = payload.clone();
+    longer.extend_from_slice(&[0, 0]);
+    assert!(split_keyframe_payload(&h, &longer).is_err());
+
+    let (size, block) = mono_block(&h, &payload).unwrap().expect("block declared");
+    assert_eq!(size, [3, 1]);
+    assert_eq!(block, &payload[payload.len() - 6..]);
+    assert!(mono_block(&h, &payload[..payload.len() - 1]).is_err());
+}
+
+#[test]
+fn header_without_the_mono_key_decodes_as_before() {
+    let json = r#"{"type":"keyframe","id":7,"timestamp":12.5,"pose":[1,0,0,0,0,1,0,0,0,0,1,0,0.5,1,-2,1],"fx":700,"fy":700,"cx":480,"cy":360,"width":960,"height":720,"jpeg_len":3,"depth_size":[2,1],"depth_confidence":true,"num_points":1}"#;
+    let h: ClientHeader = serde_json::from_str(json).unwrap();
+    assert_eq!(h, ClientHeader::Keyframe(kf_header()));
+    let ClientHeader::Keyframe(h) = h else {
+        unreachable!()
+    };
+    let payload = vec![0u8; 3 + 4 + 2 + 12];
+    assert!(mono_block(&h, &payload).unwrap().is_none());
+    assert!(split_keyframe_payload(&h, &payload).unwrap().mono.is_none());
+}
+
+#[test]
+fn oversized_mono_sizes_are_errors_not_panics() {
+    let mut h = kf_header();
+    h.mono_depth_size = Some([u32::MAX, u32::MAX]);
+    assert!(matches!(
+        split_keyframe_payload(&h, b"jpg"),
+        Err(ProtocolError::SizeOverflow)
+    ));
 }
 
 #[test]
@@ -339,7 +397,11 @@ fn write_golden_fixtures() {
         ),
         (
             "keyframe_header.json",
-            serde_json::to_vec_pretty(&ClientHeader::Keyframe(kf_header())).unwrap(),
+            serde_json::to_vec_pretty(&ClientHeader::Keyframe(KeyframeHeader {
+                mono_depth_size: Some([4, 3]),
+                ..kf_header()
+            }))
+            .unwrap(),
         ),
     ];
     for (name, bytes) in fixtures {
