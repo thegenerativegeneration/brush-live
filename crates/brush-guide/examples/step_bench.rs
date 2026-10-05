@@ -1,7 +1,8 @@
 //! Training-step cost on a recorded capture: ms per step for two splat counts
 //! and three image sizes, measured in alternating blocks so that background
 //! load on the machine spreads over all configurations, then a per-phase
-//! profile (which syncs the GPU at phase boundaries).
+//! profile (which syncs the GPU at phase boundaries). The forward probe
+//! assumes 4:3 images; splats use SH degree 1; measured blocks run no refine.
 //!
 //! Usage: `cargo run --release -p brush-guide --features brush-cube/metal
 //! --example step_bench [-- <dataset dir>]` from `server/brush`
@@ -33,7 +34,7 @@ const BLOCK: usize = 100;
 const ROUNDS: usize = 3;
 
 async fn sync(splats: &Splats) {
-    let _ = splats.means().slice(s![0..1, ..]).into_data_async().await;
+    let _ = splats.device().sync();
 }
 
 async fn steps(trainer: &mut SplatTrainer, loader: &mut SceneLoader, splats: Splats, n: usize) -> Splats {
@@ -164,7 +165,7 @@ async fn main() {
             p.loss_s * 1e3 / n,
             p.backward_s * 1e3 / n,
             p.optimizer_s * 1e3 / n,
-            p.noise_s * 1e3 / n
+            p.stats_noise_s * 1e3 / n
         );
         *splats = stepped;
     }

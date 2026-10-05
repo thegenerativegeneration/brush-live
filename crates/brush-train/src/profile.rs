@@ -12,14 +12,15 @@ pub struct StepProfile {
     pub steps: u32,
     /// Ground-truth upload and the forward render.
     pub forward_s: f64,
-    /// Image loss (L1 + SSIM), SH background and LPIPS if on.
+    /// Image loss (L1 + SSIM) and LPIPS if on.
     pub loss_s: f64,
-    /// Backward pass, as far as the refine gradient needs it.
+    /// Backward pass, as far as the refine gradient needs it, and the SH
+    /// background's Adam step.
     pub backward_s: f64,
     /// The rest of the backward and the Adam steps.
     pub optimizer_s: f64,
     /// Refine statistics and mean noise.
-    pub noise_s: f64,
+    pub stats_noise_s: f64,
 }
 
 impl StepProfile {
@@ -29,7 +30,7 @@ impl StepProfile {
         self.loss_s += phases[1];
         self.backward_s += phases[2];
         self.optimizer_s += phases[3];
-        self.noise_s += phases[4];
+        self.stats_noise_s += phases[4];
     }
 }
 
@@ -37,7 +38,12 @@ impl StepProfile {
 /// Syncing on one tensor would only run that tensor's dependencies, leaving
 /// e.g. optimizer moments to be charged to a later phase.
 pub(crate) fn device_sync(device: &Device) {
-    let _ = device.sync();
+    if let Err(e) = device.sync() {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            log::warn!("step profile: device sync failed ({e:?}); phase times are unreliable");
+        });
+    }
 }
 
 /// Seconds since `clock`, which then restarts.

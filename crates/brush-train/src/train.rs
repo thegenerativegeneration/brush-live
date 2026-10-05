@@ -686,7 +686,6 @@ impl SplatTrainer {
             // globe on, the RGBA image with the globe composited in).
             // `loss` is only reassigned by the LPIPS path below, which is
             // compiled out on wasm — so `mut` is unused there.
-            #[cfg_attr(target_family = "wasm", allow(unused_mut))]
             let mut loss = image_loss(pred_final.clone(), gt_packed.clone(), cfg);
             if let Some(penalty) = globe_alpha_penalty {
                 loss = loss + penalty;
@@ -1459,6 +1458,10 @@ mod append_tests {
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "train_evict_tests.rs"]
 mod evict_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "profile_tests.rs"]
+mod profile_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "sh_background_integration_tests.rs"]

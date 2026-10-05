@@ -174,8 +174,8 @@ impl LiveModel {
                     self.config.seed,
                 );
                 trainer.set_view_cams(self.view_cams.clone());
-                self.profiling = crate::timing::enabled();
-                trainer.set_profiling(self.profiling);
+                trainer.set_profiling(self.config.profile_steps);
+                self.profiling = self.config.profile_steps;
                 if self.config.evict {
                     trainer.enable_eviction(EvictConfig {
                         headroom: self.config.evict_headroom,
@@ -399,7 +399,7 @@ impl LiveModel {
             let ms = |s: f64| s * 1e3 / f64::from(p.steps);
             log::debug!(
                 target: crate::timing::TARGET,
-                "step profile over {} steps at {} splats: batch {:.2} ms, forward {:.2}, loss {:.2}, backward {:.2}, optimizer {:.2}, noise {:.2} ms",
+                "step profile over {} steps at {} splats: batch {:.2} ms, forward {:.2}, loss {:.2}, backward {:.2}, optimizer {:.2}, stats+noise {:.2} ms",
                 p.steps,
                 splats.num_splats(),
                 ms(std::mem::take(&mut self.batch_s)),
@@ -407,7 +407,7 @@ impl LiveModel {
                 ms(p.loss_s),
                 ms(p.backward_s),
                 ms(p.optimizer_s),
-                ms(p.noise_s)
+                ms(p.stats_noise_s)
             );
         }
         if self.iter.is_multiple_of(self.config.refine_every) {

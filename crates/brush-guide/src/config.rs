@@ -92,6 +92,9 @@ pub struct GuideConfig {
     pub holdout_every: u32,
     /// Seconds between held-out scorings; there is one more at finish.
     pub eval_interval_s: f32,
+    /// Time training-step phases (GPU synced at each boundary; slower steps)
+    /// and log them every 100 steps on `brush_guide::timing` at debug.
+    pub profile_steps: bool,
 }
 
 impl Default for GuideConfig {
@@ -136,6 +139,7 @@ impl Default for GuideConfig {
             max_train_steps: None,
             holdout_every: 0,
             eval_interval_s: 30.0,
+            profile_steps: false,
         }
     }
 }
