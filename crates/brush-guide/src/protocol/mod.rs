@@ -74,6 +74,18 @@ pub enum ServerHeader {
         num_splats: u32,
         train_iters_per_s: f32,
         last_score_ms: u32,
+        #[serde(default)]
+        train_iters: u64,
+        #[serde(default)]
+        train_ms: u64,
+        #[serde(default)]
+        ingest_ms: u64,
+        #[serde(default)]
+        preview_ms: u64,
+        #[serde(default)]
+        voxel_ms: u64,
+        #[serde(default)]
+        fisher_ms: u64,
     },
     Splat {
         ply_len: u64,

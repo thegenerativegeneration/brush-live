@@ -61,6 +61,7 @@ impl Receiver {
                 num_splats,
                 train_iters_per_s,
                 last_score_ms,
+                ..
             } => {
                 eprintln!(
                     "status: {num_keyframes} keyframes, {num_splats} splats, {train_iters_per_s:.1} it/s, score {last_score_ms} ms"

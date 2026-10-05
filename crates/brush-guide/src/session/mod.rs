@@ -11,6 +11,7 @@ use crate::config::GuideConfig;
 use crate::protocol::{CELL_BYTES, Cell, KeyframeHeader, ServerHeader, encode_cells, encode_frame};
 use brush_async::Actor;
 use burn::tensor::Device;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -38,14 +39,26 @@ impl ScoreSetMsg {
     }
 }
 
+/// Cumulative wall time of the session worker per activity since the session
+/// started, in ms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkerTimes {
+    pub train_ms: u64,
+    pub ingest_ms: u64,
+    pub preview_ms: u64,
+    pub voxel_ms: u64,
+    pub fisher_ms: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct StatusMsg {
     pub num_keyframes: u32,
     pub num_splats: u32,
     pub train_iters_per_s: f32,
     pub last_score_ms: u32,
-    /// Training iterations since the session started; not sent on the wire.
+    /// Training iterations since the session started.
     pub train_iters: u64,
+    pub times: WorkerTimes,
 }
 
 impl StatusMsg {
@@ -56,6 +69,12 @@ impl StatusMsg {
                 num_splats: self.num_splats,
                 train_iters_per_s: self.train_iters_per_s,
                 last_score_ms: self.last_score_ms,
+                train_iters: self.train_iters,
+                train_ms: self.times.train_ms,
+                ingest_ms: self.times.ingest_ms,
+                preview_ms: self.times.preview_ms,
+                voxel_ms: self.times.voxel_ms,
+                fisher_ms: self.times.fisher_ms,
             },
             &[],
         )

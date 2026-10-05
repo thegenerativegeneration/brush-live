@@ -197,6 +197,56 @@ fn oversized_payload_sizes_are_errors_not_panics() {
     assert!(split_keyframe_payload(&h, b"jpg").is_err());
 }
 
+#[test]
+fn status_header_round_trips_worker_times() {
+    let h = ServerHeader::Status {
+        num_keyframes: 3,
+        num_splats: 10,
+        train_iters_per_s: 5.0,
+        last_score_ms: 12,
+        train_iters: 1234,
+        train_ms: 5000,
+        ingest_ms: 300,
+        preview_ms: 200,
+        voxel_ms: 900,
+        fisher_ms: 700,
+    };
+    let frame = encode_frame(&h, &[]);
+    let (back, rest): (ServerHeader, _) = decode_frame(&frame).unwrap();
+    assert_eq!(back, h);
+    assert!(rest.is_empty());
+}
+
+#[test]
+fn status_header_without_worker_times_decodes() {
+    let json = br#"{"type":"status","num_keyframes":3,"num_splats":10,"train_iters_per_s":5.0,"last_score_ms":12}"#;
+    let mut frame = (json.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(json);
+    let (h, _): (ServerHeader, _) = decode_frame(&frame).unwrap();
+    match h {
+        ServerHeader::Status {
+            train_iters,
+            train_ms,
+            ingest_ms,
+            preview_ms,
+            voxel_ms,
+            fisher_ms,
+            ..
+        } => assert_eq!(
+            [
+                train_iters,
+                train_ms,
+                ingest_ms,
+                preview_ms,
+                voxel_ms,
+                fisher_ms
+            ],
+            [0; 6]
+        ),
+        other => panic!("not a status: {other:?}"),
+    }
+}
+
 /// `WRITE_FIXTURES=/abs/path cargo test -p brush-guide write_golden_fixtures`
 #[test]
 fn write_golden_fixtures() {
@@ -260,6 +310,12 @@ fn write_golden_fixtures() {
                     num_splats: 1000,
                     train_iters_per_s: 55.5,
                     last_score_ms: 1200,
+                    train_iters: 0,
+                    train_ms: 0,
+                    ingest_ms: 0,
+                    preview_ms: 0,
+                    voxel_ms: 0,
+                    fisher_ms: 0,
                 },
                 &[],
             ),

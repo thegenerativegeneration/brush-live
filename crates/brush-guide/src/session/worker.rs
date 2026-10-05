@@ -9,7 +9,7 @@ mod holdout;
 
 use super::preview::{PREVIEW_FLOATS, PreviewClock, PreviewSnapshot};
 use super::splat_read::{SplatRead, view_cones};
-use super::{Command, ScoreSetMsg, StatusMsg};
+use super::{Command, ScoreSetMsg, StatusMsg, WorkerTimes};
 use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
@@ -96,12 +96,15 @@ pub(super) async fn worker(
         w.live.train_step().await;
         last_step = t.elapsed();
         w.acc.train_s += last_step.as_secs_f64();
+        w.totals_s.train += last_step.as_secs_f64();
         w.acc.steps += 1;
         if w.step_cap_reached() {
             log::info!("max_train_steps reached: training stopped at step {}", w.live.iter());
         }
         if w.preview.due(Instant::now()) {
+            let t = Instant::now();
             w.publish_preview().await;
+            w.totals_s.preview += t.elapsed().as_secs_f64();
         }
         let now = w.clock.elapsed().as_secs_f64();
         if let Some(round) = w.scheduler.next(now, w.fisher_cost()) {
@@ -110,10 +113,18 @@ pub(super) async fn worker(
                 crate::timing::sync_splats(s).await;
             }
             w.acc.train_s += t.elapsed().as_secs_f64();
+            w.totals_s.train += t.elapsed().as_secs_f64();
             let now = w.clock.elapsed().as_secs_f64();
+            let t = Instant::now();
             match round {
-                Round::Voxel => w.voxel_round(now).await,
-                Round::Fisher(max_views) => w.fisher_pass(now, max_views).await,
+                Round::Voxel => {
+                    w.voxel_round(now).await;
+                    w.totals_s.voxel += t.elapsed().as_secs_f64();
+                }
+                Round::Fisher(max_views) => {
+                    w.fisher_pass(now, max_views).await;
+                    w.totals_s.fisher += t.elapsed().as_secs_f64();
+                }
             }
         }
         if w.holdout.due(w.clock.elapsed().as_secs_f64()) {
@@ -121,6 +132,29 @@ pub(super) async fn worker(
         }
         w.publish_status();
         brush_async::yield_now().await;
+    }
+}
+
+/// Seconds spent per activity; see [`WorkerTimes`].
+#[derive(Default)]
+struct ActivityTotals {
+    train: f64,
+    ingest: f64,
+    preview: f64,
+    voxel: f64,
+    fisher: f64,
+}
+
+impl ActivityTotals {
+    fn to_times(&self) -> WorkerTimes {
+        let ms = |s: f64| (s * 1e3) as u64;
+        WorkerTimes {
+            train_ms: ms(self.train),
+            ingest_ms: ms(self.ingest),
+            preview_ms: ms(self.preview),
+            voxel_ms: ms(self.voxel),
+            fisher_ms: ms(self.fisher),
+        }
     }
 }
 
@@ -136,6 +170,9 @@ struct Worker {
     throttle: IterThrottle,
     /// Fisher passes so far; rotates their view sample.
     fisher_passes: u64,
+    /// Wall time per activity since the session started; unlike `acc` it
+    /// survives voxel rounds.
+    totals_s: ActivityTotals,
     /// Cost of the last Fisher pass and the splat count it ran at.
     fisher_cost: Option<(FisherCost, u32)>,
     /// Version of the last score set.
@@ -195,6 +232,7 @@ impl Worker {
             scheduler,
             throttle,
             fisher_passes: 0,
+            totals_s: ActivityTotals::default(),
             fisher_cost: None,
             version: 0,
             last_score_ms: 0,
@@ -231,6 +269,7 @@ impl Worker {
                 crate::timing::sync_splats(s).await;
             }
             self.acc.kf_s += t.elapsed().as_secs_f64();
+            self.totals_s.ingest += t.elapsed().as_secs_f64();
             self.acc.kfs += 1;
         }
     }
@@ -356,6 +395,7 @@ impl Worker {
         self.scheduler = scheduler(config);
         self.throttle = IterThrottle::new(config.max_iters_per_s);
         self.fisher_passes = 0;
+        self.totals_s = ActivityTotals::default();
         self.fisher_cost = None;
         self.sizes.clear();
         self.finished = false;
@@ -494,6 +534,7 @@ impl Worker {
                 train_iters_per_s: rate as f32,
                 last_score_ms: self.last_score_ms,
                 train_iters: u64::from(self.live.iter()),
+                times: self.totals_s.to_times(),
             });
         } else {
             publish_counts(&self.channels.status, &self.live);
