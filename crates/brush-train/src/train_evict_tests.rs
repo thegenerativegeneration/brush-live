@@ -50,7 +50,7 @@ fn batch() -> SceneBatch {
 
 /// A trainer at a 60-splat budget with growth and force-splits off, so a
 /// refine changes the count only by pruning; one step taken.
-async fn trainer_at_budget(min_age: u32, external: bool) -> (SplatTrainer, Splats) {
+async fn trainer_at_budget(min_age: u32) -> (SplatTrainer, Splats) {
     let device: Device = brush_cube::test_helpers::test_device().await.into();
     let device = device.autodiff();
     let mut config = TrainConfig::parse_from(["test"]);
@@ -65,7 +65,6 @@ async fn trainer_at_budget(min_age: u32, external: bool) -> (SplatTrainer, Splat
         min_age,
         max_cell_fraction: 1.0,
         recent_refines: 2,
-        external_importance: external,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
     (trainer, s.valid())
@@ -90,8 +89,8 @@ fn importance() -> Vec<f32> {
 
 #[tokio::test]
 async fn eviction_removes_lowest_and_keeps_adam_rows_aligned() {
-    let (mut trainer, s) = trainer_at_budget(0, true).await;
-    trainer.set_importance(&importance());
+    let (mut trainer, s) = trainer_at_budget(0).await;
+    record_importance(&mut trainer, &importance());
     trainer.note_seed_shortfall(1);
 
     let optim = trainer.optim.as_ref().expect("optimizer after a step");
@@ -149,8 +148,8 @@ async fn eviction_removes_lowest_and_keeps_adam_rows_aligned() {
 /// No eviction: no demand, blocked demand without a new keyframe, and a keyframe whose seeds land elsewhere.
 #[tokio::test]
 async fn no_eviction_without_demand() {
-    let (mut trainer, s) = trainer_at_budget(0, true).await;
-    trainer.set_importance(&importance());
+    let (mut trainer, s) = trainer_at_budget(0).await;
+    record_importance(&mut trainer, &importance());
     let (s, stats) = trainer.refine(1, s).await;
     assert_eq!(stats.num_evicted, 0);
     assert_eq!(s.num_splats() as usize, N);
@@ -173,16 +172,10 @@ async fn no_eviction_without_demand() {
 }
 
 #[tokio::test]
-async fn young_and_unscored_splats_are_protected() {
+async fn young_splats_are_protected() {
     // Age 1 after this refine, below min_age 2.
-    let (mut trainer, s) = trainer_at_budget(2, true).await;
-    trainer.set_importance(&importance());
-    trainer.note_seed_shortfall(1);
-    let (_, stats) = trainer.refine(1, s).await;
-    assert_eq!(stats.num_evicted, 0);
-
-    // Never scored: importance stays +inf.
-    let (mut trainer, s) = trainer_at_budget(0, true).await;
+    let (mut trainer, s) = trainer_at_budget(2).await;
+    record_importance(&mut trainer, &importance());
     trainer.note_seed_shortfall(1);
     let (_, stats) = trainer.refine(1, s).await;
     assert_eq!(stats.num_evicted, 0);
@@ -190,9 +183,9 @@ async fn young_and_unscored_splats_are_protected() {
 
 #[tokio::test]
 async fn splats_in_the_protect_cone_are_kept() {
-    let (mut trainer, s) = trainer_at_budget(0, true).await;
+    let (mut trainer, s) = trainer_at_budget(0).await;
     // Ascending importance: without the cone, splats 0..6 would go.
-    trainer.set_importance(&(0..N).map(|i| i as f32).collect::<Vec<_>>());
+    record_importance(&mut trainer, &(0..N).map(|i| i as f32).collect::<Vec<_>>());
     // Splats sit at x = 0.01·i, z = 2. A cone from the origin along +z with
     // half angle atan(0.195 / 2) covers i < 20.
     trainer.set_protect_cone(Some(ProtectCone {
@@ -228,10 +221,9 @@ async fn eviction_then_split_fills_to_growth_limit() {
         min_age: 0,
         max_cell_fraction: 1.0,
         recent_refines: 2,
-        external_importance: true,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
-    trainer.set_importance(&importance());
+    record_importance(&mut trainer, &importance());
     // A keyframe seeded the splats' cell, so their split demand is new.
     trainer.note_keyframe_seeds(&rows(s.means()).await.concat());
 
@@ -263,43 +255,6 @@ async fn eviction_then_split_fills_to_growth_limit() {
     assert_eq!(s.num_splats(), 57);
 }
 
-#[tokio::test]
-async fn evicts_once_per_importance_set_and_nan_keeps_scores() {
-    let (mut trainer, s) = trainer_at_budget(0, true).await;
-    trainer.set_importance(&importance());
-    trainer.note_seed_shortfall(1);
-    let (s, stats) = trainer.refine(1, s).await;
-    assert_eq!(stats.num_evicted, 6);
-
-    // Still blocked, but no new scores since that eviction: wait.
-    let (s, _) = trainer.step(batch(), s.train()).await;
-    trainer.note_seed_shortfall(1);
-    let (s, stats) = trainer.refine(2, s.valid()).await;
-    assert_eq!(stats.num_evicted, 0);
-    assert_eq!(s.num_splats() as usize, N - 6);
-
-    // A set that observed nothing keeps the previous scores and re-arms.
-    trainer.set_importance(&[f32::NAN; N - 6]);
-    let life = trainer
-        .evict
-        .as_ref()
-        .and_then(|e| e.life.as_ref())
-        .expect("life");
-    let kept = rows(life.importance.clone().unsqueeze_dim::<2>(1)).await;
-    let imp = importance();
-    let expect: Vec<Vec<f32>> = (0..N)
-        .filter(|&i| imp[i] >= 6.0)
-        .map(|i| vec![imp[i]])
-        .collect();
-    assert_eq!(kept, expect);
-    let (s, _) = trainer.step(batch(), s.train()).await;
-    trainer.note_seed_shortfall(1);
-    let (s, stats) = trainer.refine(3, s.valid()).await;
-    // 54 is the target already: nothing to evict, even when blocked.
-    assert_eq!(stats.num_evicted, 0);
-    assert_eq!(s.num_splats() as usize, N - 6);
-}
-
 /// Like [`eviction_then_split_fills_to_growth_limit`]: every splat wants a
 /// force-split, the model is at its 60-splat budget and scored.
 async fn split_trainer_at_budget() -> (SplatTrainer, Splats) {
@@ -317,10 +272,9 @@ async fn split_trainer_at_budget() -> (SplatTrainer, Splats) {
         min_age: 0,
         max_cell_fraction: 1.0,
         recent_refines: 2,
-        external_importance: true,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
-    trainer.set_importance(&importance());
+    record_importance(&mut trainer, &importance());
     (trainer, s.valid())
 }
 
@@ -335,7 +289,7 @@ async fn evictions_stop_once_the_keyframe_window_passes() {
     for iter in 2..5 {
         let (stepped, _) = trainer.step(batch(), s.train()).await;
         let n = stepped.num_splats() as usize;
-        trainer.set_importance(&vec![1.0; n]);
+        record_importance(&mut trainer, &vec![1.0; n]);
         let (next, stats) = trainer.refine(iter, stepped.valid()).await;
         // Still in the window: 57 → 54 → 57. Then steady.
         let expect = if iter == 2 { 3 } else { 0 };
@@ -368,7 +322,7 @@ async fn life_importance(trainer: &SplatTrainer) -> Vec<f32> {
 
 #[tokio::test]
 async fn a_step_records_importance_for_visible_splats() {
-    let (trainer, _) = trainer_at_budget(0, false).await;
+    let (trainer, _) = trainer_at_budget(0).await;
     let rec = trainer.refine_record.as_ref().expect("record");
     let views = rows(rec.importance_views.clone().unsqueeze_dim::<2>(1)).await;
     let sum = rows(rec.importance_sum.clone().unsqueeze_dim::<2>(1)).await;
@@ -387,7 +341,7 @@ async fn a_step_records_importance_for_visible_splats() {
 
 #[tokio::test]
 async fn recorded_importance_drives_eviction_without_any_external_call() {
-    let (mut trainer, s) = trainer_at_budget(0, false).await;
+    let (mut trainer, s) = trainer_at_budget(0).await;
     record_importance(&mut trainer, &importance());
     trainer.note_seed_shortfall(1);
     let (s, stats) = trainer.refine(1, s).await;
@@ -400,7 +354,7 @@ async fn recorded_importance_drives_eviction_without_any_external_call() {
 
 #[tokio::test]
 async fn importance_is_the_mean_over_seeing_views_and_unseen_splats_keep_theirs() {
-    let (mut trainer, s) = trainer_at_budget(0, false).await;
+    let (mut trainer, s) = trainer_at_budget(0).await;
     {
         let rec = trainer.refine_record.as_mut().unwrap();
         let device = rec.vis_weight.device();
@@ -427,7 +381,7 @@ async fn importance_is_the_mean_over_seeing_views_and_unseen_splats_keep_theirs(
 
 #[tokio::test]
 async fn never_scored_splats_are_not_evicted() {
-    let (mut trainer, s) = trainer_at_budget(0, false).await;
+    let (mut trainer, s) = trainer_at_budget(0).await;
     record_importance(&mut trainer, &[f32::NAN; N]);
     trainer.note_seed_shortfall(1);
     let (_, stats) = trainer.refine(1, s).await;

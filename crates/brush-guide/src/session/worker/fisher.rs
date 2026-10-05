@@ -1,21 +1,11 @@
-//! The Fisher pass: render and backward over a sample of the views, giving
-//! each voxel its coverage and uncertainty and each splat its eviction
-//! importance.
-//!
-//! A pass is self-contained: its views are weighted by Horvitz–Thompson
-//! (`schedule::ViewSample`), so its sums estimate sums over every view at
-//! one model state, and the uncertainty byte ranks voxels within the pass
-//! (5th–95th percentile of `ln σ`). Passes are combined only through the
-//! per-voxel EMA of that byte. Summing or averaging raw Fisher across passes
-//! would mix model states: with no new views, a voxel's σ rises ×1.58 over
-//! about a dozen rounds as training lowers the information per unit opacity
-//! (Task 5 spike), so older passes would make a region look more certain
-//! than a fresh pass of the same views. Ranks within a pass are free of that
-//! drift.
+//! The offline Fisher pass: at finish, render and backward over every view
+//! at one model state, giving each voxel its coverage and uncertainty (the
+//! uncertainty byte ranks voxels within the pass, 5th–95th percentile of
+//! `ln σ`) and writing `importance.json` with the pass's per-splat Fisher
+//! importance next to the trainer's, for comparing the two. The live
+//! eviction importance comes from training alone (`brush_train::evict`).
 
 use super::{Worker, append_ingredient_round, append_raw_round};
-use crate::config::EvictionImportance;
-use crate::schedule::{FisherCost, ViewSample};
 use crate::scores::importance::importances;
 use crate::scores::metrics::gaussian_metrics;
 use crate::scores::pass::{PassOutput, PassView, score_pass};
@@ -26,54 +16,9 @@ use web_time::Instant;
 struct PassRun {
     out: PassOutput,
     read: SplatRead,
-    /// Per-splat eviction importance, computed when eviction is on.
-    importance: Option<Vec<f32>>,
-    /// Seconds in the render and backward.
-    t_pass: f64,
-    /// Voxels the pass scored.
-    scored: usize,
 }
 
 impl Worker {
-    /// One Fisher pass over at most `max_views` views; `start` is when it
-    /// started. Its bytes reach the phone with the next voxel round.
-    pub(super) async fn fisher_pass(&mut self, start: f64, max_views: usize) {
-        let num_views = self.live.views().len();
-        let sample = ViewSample::new(max_views);
-        let pass = self.fisher_passes;
-        self.fisher_passes += 1;
-        let views: Vec<PassView> = sample
-            .select(num_views, pass, self.config.seed)
-            .into_iter()
-            .map(|i| PassView {
-                camera: self.live.views()[i].camera,
-                img_size: self.sizes[i],
-                // Sums over the sample estimate sums over every view, so
-                // `CoverageParams::n_target` and σ refer to the whole capture.
-                weight: sample.weight(i, num_views),
-            })
-            .collect();
-        let num_pass_views = views.len();
-        let run = self.run_pass(views).await;
-
-        let num_splats = self.live.splats().map_or(0, |s| s.num_splats());
-        let duration = self.clock.elapsed().as_secs_f64() - start;
-        self.scheduler.fisher.record(start, duration);
-        self.fisher_cost = Some((
-            FisherCost {
-                per_view_s: run.t_pass / num_pass_views.max(1) as f64,
-                fixed_s: (duration - run.t_pass).max(0.0),
-            },
-            num_splats,
-        ));
-        log::info!(
-            "fisher pass {pass} at {start:.2} s: {num_pass_views} of {num_views} views (up to {max_views}), \
-             {:.0} ms, {} voxels, {num_splats} splats",
-            duration * 1e3,
-            run.scored,
-        );
-    }
-
     /// At finish: one Fisher pass over every view (weight 1), and
     /// `importance.json` with the pass's and the trainer's importance in
     /// splat order. The caller runs the voxel round that publishes it.
@@ -90,13 +35,9 @@ impl Worker {
             })
             .collect();
         let num_views = views.len();
-        // Before the pass: with `EvictionImportance::Fisher` the pass
-        // overwrites the trainer's importance with its own.
         let train = self.live.importance().await;
         let run = self.run_pass(views).await;
-        let fisher = run
-            .importance
-            .unwrap_or_else(|| importances(&run.out, &run.read.rots, &run.read.scales));
+        let fisher = importances(&run.out, &run.read.rots, &run.read.scales);
         let path = self.session_dir.join("importance.json");
         let json = serde_json::json!({
             "fisher": finite_or_null(&fisher),
@@ -112,8 +53,7 @@ impl Worker {
     }
 
     /// Render and backward over `views`: per-voxel coverage and uncertainty
-    /// into the voxel state, per-splat eviction importance (handed to the
-    /// trainer only with `EvictionImportance::Fisher`), and the raw dumps.
+    /// into the voxel state, and the raw dumps.
     async fn run_pass(&mut self, views: Vec<PassView>) -> PassRun {
         let config = &self.config;
         let splats = self.live.splats().expect("views imply splats").clone();
@@ -127,22 +67,10 @@ impl Worker {
         let read = SplatRead::new(&splats).await;
         let t_read = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        // Computed in both arms so they spend the same time; only the
-        // Fisher arm hands it to the trainer.
-        let importance = config
-            .evict
-            .then(|| importances(&out, &read.rots, &read.scales));
-        if let Some(importance) = &importance
-            && config.eviction_importance == EvictionImportance::Fisher
-        {
-            self.live.set_importance(importance);
-        }
-        let t_importance = t.elapsed().as_secs_f64();
-        let t = Instant::now();
         let gaussians = read.scores(&coverage, &fisher_pos);
         let t_prep = t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let scored = self.voxels.update_fisher(&gaussians);
+        self.voxels.update_fisher(&gaussians);
         let t_agg = t.elapsed().as_secs_f64();
         if self.config.dump_raw_uncertainty {
             let path = self.session_dir.join("raw_uncertainty.jsonl");
@@ -168,22 +96,15 @@ impl Worker {
         log::debug!(
             target: crate::timing::TARGET,
             "fisher: {} views, pass {:.0} ms, metrics {:.0} ms, splat readback {:.0} ms, \
-             importance {:.0} ms, gaussian prep {:.0} ms, voxel aggregate {:.0} ms",
+             gaussian prep {:.0} ms, voxel aggregate {:.0} ms",
             views.len(),
             t_pass * 1e3,
             t_metrics * 1e3,
             t_read * 1e3,
-            t_importance * 1e3,
             t_prep * 1e3,
             t_agg * 1e3
         );
-        PassRun {
-            out,
-            read,
-            importance,
-            t_pass,
-            scored,
-        }
+        PassRun { out, read }
     }
 }
 

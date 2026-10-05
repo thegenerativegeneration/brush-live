@@ -71,7 +71,7 @@ const PROD_SCALE: UncertaintyScale = UncertaintyScale {
 };
 
 #[test]
-fn cells_between_fisher_passes_keep_the_last_bytes_and_mark_new_voxels_uninformed() {
+fn cells_between_fisher_rounds_keep_the_last_bytes_and_mark_new_voxels_uninformed() {
     let cams = cameras();
     let mut agg = VoxelAggregator::new(0.1, 0.1, PROD_SCALE);
     let gs = fixture(5, 3000);

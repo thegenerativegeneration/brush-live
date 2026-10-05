@@ -1,7 +1,6 @@
-//! The session worker: trains on incoming keyframes and, when the
-//! scheduler says so, runs a voxel round (score set from the splat
-//! parameters) or a Fisher pass (coverage and uncertainty per voxel,
-//! eviction importance).
+//! The session worker: trains on incoming keyframes and, when its cadence
+//! says so, runs a voxel round (score set from the splat parameters). With
+//! `finish_fisher` a final Fisher pass adds coverage and uncertainty.
 
 mod drain;
 mod fisher;
@@ -14,7 +13,7 @@ use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
 use crate::live::LiveModel;
 use crate::protocol::{Cell, KeyframeHeader};
-use crate::schedule::{Cadence, FisherCost, IterThrottle, Round, RoundScheduler};
+use crate::schedule::{Cadence, IterThrottle};
 use crate::scores::voxel::{RawVoxel, VoxelAggregator};
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::Device;
@@ -115,20 +114,12 @@ pub(super) async fn worker(
             w.totals_s.preview += t.elapsed().as_secs_f64();
         }
         let now = w.clock.elapsed().as_secs_f64();
-        if let Some(round) = w.scheduler.next(now, w.fisher_cost()) {
+        if w.voxel_cadence.due(now) {
             w.wait_for_training();
             let now = w.clock.elapsed().as_secs_f64();
             let t = Instant::now();
-            match round {
-                Round::Voxel => {
-                    w.voxel_round(now).await;
-                    w.totals_s.voxel += t.elapsed().as_secs_f64();
-                }
-                Round::Fisher(max_views) => {
-                    w.fisher_pass(now, max_views).await;
-                    w.totals_s.fisher += t.elapsed().as_secs_f64();
-                }
-            }
+            w.voxel_round(now).await;
+            w.totals_s.voxel += t.elapsed().as_secs_f64();
         }
         if w.holdout.due(w.clock.elapsed().as_secs_f64()) {
             w.eval_holdout().await;
@@ -185,15 +176,11 @@ struct Worker {
     clock: Instant,
     live: LiveModel,
     voxels: VoxelAggregator,
-    scheduler: RoundScheduler,
+    voxel_cadence: Cadence,
     throttle: IterThrottle,
-    /// Fisher passes so far; rotates their view sample.
-    fisher_passes: u64,
     /// Wall time per activity since the session started; unlike `acc` it
     /// survives voxel rounds.
     totals_s: ActivityTotals,
-    /// Cost of the last Fisher pass and the splat count it ran at.
-    fisher_cost: Option<(FisherCost, u32)>,
     /// Version of the last score set.
     version: u64,
     last_score_ms: u32,
@@ -237,7 +224,7 @@ impl Worker {
             config.uncertainty_scale(),
         );
         voxels.record_raw(config.dump_raw_uncertainty);
-        let scheduler = scheduler(&config);
+        let voxel_cadence = voxel_cadence(&config);
         let throttle = IterThrottle::new(config.max_iters_per_s);
         let rate_window = (clock.elapsed().as_secs_f64(), live.iter());
         Self {
@@ -248,11 +235,9 @@ impl Worker {
             clock,
             live,
             voxels,
-            scheduler,
+            voxel_cadence,
             throttle,
-            fisher_passes: 0,
             totals_s: ActivityTotals::new(),
-            fisher_cost: None,
             version: 0,
             last_score_ms: 0,
             rate_window,
@@ -440,11 +425,9 @@ impl Worker {
         self.live = LiveModel::new(config.clone(), self.device.clone());
         self.holdout = Holdout::new(config.holdout_every, config.eval_interval_s);
         self.voxels.reset();
-        self.scheduler = scheduler(config);
+        self.voxel_cadence = voxel_cadence(config);
         self.throttle = IterThrottle::new(config.max_iters_per_s);
-        self.fisher_passes = 0;
         self.totals_s = ActivityTotals::new();
-        self.fisher_cost = None;
         self.sizes.clear();
         self.finished = false;
         self.evicted_at_round = 0;
@@ -521,7 +504,7 @@ impl Worker {
             self.last_score_ms,
             splats.num_splats()
         );
-        self.scheduler.voxel.record(start, end - start);
+        self.voxel_cadence.record(start, end - start);
         self.channels
             .scores
             .send_replace(Some(Arc::new(ScoreSetMsg {
@@ -559,17 +542,6 @@ impl Worker {
         cells
     }
 
-    /// The last Fisher pass's cost, scaled to the current splat count.
-    fn fisher_cost(&self) -> Option<FisherCost> {
-        let (c, n) = self.fisher_cost?;
-        let now = self.live.splats().map_or(n, Splats::num_splats);
-        let k = f64::from(now.max(1)) / f64::from(n.max(1));
-        Some(FisherCost {
-            per_view_s: c.per_view_s * k,
-            fixed_s: c.fixed_s * k,
-        })
-    }
-
     /// Publishes the training rate once a second, the counts otherwise.
     fn publish_status(&mut self) {
         let now = self.clock.elapsed().as_secs_f64();
@@ -590,13 +562,8 @@ impl Worker {
     }
 }
 
-fn scheduler(config: &GuideConfig) -> RoundScheduler {
-    RoundScheduler::new(
-        Cadence::new(config.score_budget, config.min_score_interval_s),
-        Cadence::new(config.fisher_budget, config.min_fisher_interval_s),
-        config.max_fisher_views,
-        config.min_fisher_views,
-    )
+fn voxel_cadence(config: &GuideConfig) -> Cadence {
+    Cadence::new(config.score_budget, config.min_score_interval_s)
 }
 
 fn publish_counts(status_tx: &watch::Sender<StatusMsg>, live: &LiveModel) {

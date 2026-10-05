@@ -2,10 +2,10 @@
 //! runs at a new size bucket (powers of two of the splat count), which costs
 //! seconds per bucket on a cold cache. Running the session's GPU work once
 //! per bucket on dummy splats fills the cache (in memory, and on disk under
-//! the server's working directory) before a phone connects.
+//! the server's working directory) before a phone connects. Only training
+//! is warmed; the optional finish-time Fisher pass tunes on first use.
 
 use crate::config::GuideConfig;
-use crate::scores::pass::{PassView, score_pass};
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};
 use brush_render::AlphaMode;
 use brush_render::camera::Camera;
@@ -119,8 +119,7 @@ pub fn warmup_sizes(max_splats: u32) -> Vec<u32> {
 }
 
 /// Runs, at each of `warmup_sizes(config.max_splats)`: two training steps
-/// and a refine, and a one-view Fisher pass (render and backward). `device`
-/// is the autodiff device. Returns the seconds it took.
+/// and a refine. `device` is the autodiff device. Returns the seconds it took.
 pub async fn warm_up(config: &GuideConfig, device: &Device) -> f64 {
     warm_up_gated(config, device, None).await
 }
@@ -146,13 +145,7 @@ async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&
         let t = Instant::now();
         let splats = dummy_splats(n, &camera, &mut rng, &device.clone().inner())
             .with_sh_degree(config.sh_degree);
-        let splats = train_steps(config, device, splats, &camera, image, &mut rng).await;
-        let view = PassView {
-            camera,
-            img_size: image,
-            weight: 1.0,
-        };
-        let _ = score_pass(&splats, &[view], &config.pass).await;
+        let _ = train_steps(config, device, splats, &camera, image, &mut rng).await;
         log::info!(
             "warm-up: {n} splats in {:.0} ms",
             t.elapsed().as_secs_f64() * 1e3

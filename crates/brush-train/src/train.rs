@@ -266,28 +266,6 @@ impl SplatTrainer {
         self.evict = Some(Eviction::new(config));
     }
 
-    /// Per-splat importance for eviction, in splat order; higher is kept
-    /// longer, NaN keeps the previous value. Ignored without eviction or
-    /// when the length does not match.
-    pub fn set_importance(&mut self, importance: &[f32]) {
-        let Some(e) = self.evict.as_mut() else {
-            return;
-        };
-        let Some(life) = e.life.as_mut() else {
-            return;
-        };
-        if importance.len() != life.len() {
-            log::warn!(
-                "importance for {} splats, model has {}; ignored",
-                importance.len(),
-                life.len()
-            );
-            return;
-        }
-        life.set_importance(importance);
-        e.fresh = true;
-    }
-
     /// Eviction importance per splat in splat order; `None` without eviction state.
     pub async fn importance(&self) -> Option<Vec<f32>> {
         let life = self.evict.as_ref()?.life.as_ref()?;
@@ -388,9 +366,6 @@ impl SplatTrainer {
                 ev.recent.backlog = 0;
             }
         }
-        if ev.config.external_importance && !ev.fresh {
-            return (dead, 0);
-        }
         let shortfall = std::mem::take(&mut ev.seed_shortfall);
         let backlog = ev.recent.backlog;
         let want = crate::evict::evict_count(
@@ -418,7 +393,6 @@ impl SplatTrainer {
         )
         .await;
         if count > 0 {
-            ev.fresh = false;
             ev.recent.backlog = 0;
         }
         log::info!(
@@ -906,7 +880,6 @@ impl SplatTrainer {
             .take()
             .expect("Can only refine if refine stats are initialized");
         if let Some(e) = self.evict.as_mut()
-            && !e.config.external_importance
             && let Some(life) = e.life.as_mut()
         {
             life.update_importance(

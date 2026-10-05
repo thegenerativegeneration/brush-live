@@ -1,4 +1,4 @@
-use crate::config::{EvictionImportance, GuideConfig};
+use crate::config::GuideConfig;
 use crate::keyframe::DecodedKeyframe;
 use crate::mono::{MonoSeed, ScaleFit, mono_seed_for};
 use crate::seed::{SeedInput, Seeds, seed_points};
@@ -135,14 +135,6 @@ impl LiveModel {
         self.num_evicted
     }
 
-    /// Per-splat eviction importance in current splat order (see
-    /// `scores::importance`). No-op without eviction.
-    pub fn set_importance(&mut self, importance: &[f32]) {
-        if let Some(t) = self.trainer.as_mut() {
-            t.set_importance(importance);
-        }
-    }
-
     /// The trainer's eviction importance in current splat order; `None`
     /// without eviction or before training starts.
     pub async fn importance(&self) -> Option<Vec<f32>> {
@@ -190,8 +182,6 @@ impl LiveModel {
                         min_age: self.config.evict_min_age,
                         max_cell_fraction: self.config.evict_max_cell_fraction,
                         recent_refines: self.config.evict_recent_refines,
-                        external_importance: self.config.eviction_importance
-                            == EvictionImportance::Fisher,
                     });
                 }
                 self.trainer = Some(trainer);
