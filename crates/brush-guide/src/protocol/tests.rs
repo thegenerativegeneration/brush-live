@@ -408,3 +408,30 @@ fn write_golden_fixtures() {
         std::fs::write(dir.join(name), bytes).unwrap();
     }
 }
+
+#[test]
+fn poses_frame_roundtrip_without_payload() {
+    let h = ClientHeader::Poses {
+        poses: vec![PoseUpdate {
+            id: 3,
+            pose: kf_header().pose,
+        }],
+    };
+    let frame = encode_frame(&h, &[]);
+    let (back, payload): (ClientHeader, &[u8]) = decode_frame(&frame).unwrap();
+    assert_eq!(back, h);
+    assert!(payload.is_empty());
+}
+
+/// The JSON the app writes (`ClientMessage.poses`: sorted keys, whole numbers without a fraction).
+#[test]
+fn poses_header_parses_the_apps_json() {
+    let json = r#"{"poses":[{"id":2,"pose":[1,0,0,0,0,1,0,0,0,0,1,0,0.5,0,-1,1]}],"type":"poses"}"#;
+    let h: ClientHeader = serde_json::from_str(json).unwrap();
+    let ClientHeader::Poses { poses } = h else {
+        panic!("{h:?}")
+    };
+    assert_eq!(poses.len(), 1);
+    assert_eq!(poses[0].id, 2);
+    assert_eq!(poses[0].pose[12..15], [0.5, 0.0, -1.0]);
+}

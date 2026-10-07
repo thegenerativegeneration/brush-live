@@ -74,8 +74,10 @@ pub struct DecodedKeyframe {
     pub view: SceneView,
 }
 
-pub fn arkit_to_camera(h: &KeyframeHeader) -> Result<Camera, KeyframeError> {
-    let c2w = Mat4::from_cols_array(&h.pose);
+/// Position and rotation of the Brush camera (+z forward, y down) for an ARKit camera-to-world pose (column-major,
+/// -z forward, y up), after checking that it is a finite rigid transform.
+pub fn arkit_pose(pose: &[f32; 16]) -> Result<(Vec3, glam::Quat), KeyframeError> {
+    let c2w = Mat4::from_cols_array(pose);
     if !c2w.is_finite() {
         return Err(KeyframeError::InvalidPose);
     }
@@ -87,14 +89,19 @@ pub fn arkit_to_camera(h: &KeyframeHeader) -> Result<Camera, KeyframeError> {
     if !orthonormal || (r.determinant() - 1.0).abs() > 1e-3 {
         return Err(KeyframeError::InvalidPose);
     }
-    if !(h.fx > 0.0 && h.fy > 0.0 && h.width > 0 && h.height > 0) {
-        return Err(KeyframeError::InvalidIntrinsics);
-    }
     // ARKit cameras look down -z with y up; Brush uses +z forward, y down.
     let mut m = c2w;
     m.y_axis *= -1.0;
     m.z_axis *= -1.0;
     let (_, rotation, translation) = m.to_scale_rotation_translation();
+    Ok((translation, rotation))
+}
+
+pub fn arkit_to_camera(h: &KeyframeHeader) -> Result<Camera, KeyframeError> {
+    let (translation, rotation) = arkit_pose(&h.pose)?;
+    if !(h.fx > 0.0 && h.fy > 0.0 && h.width > 0 && h.height > 0) {
+        return Err(KeyframeError::InvalidIntrinsics);
+    }
     let model = CameraModel::Pinhole;
     let fov_x = focal_to_fov(h.fx as f64, h.width, &model);
     let fov_y = focal_to_fov(h.fy as f64, h.height, &model);
@@ -227,6 +234,23 @@ mod tests {
         assert!((a.focal(glam::uvec2(960, 720)).x - 700.0).abs() < 1e-2);
         assert!((b.focal(glam::uvec2(720, 960)).x - 700.0).abs() < 1e-2);
         assert!((a.fov_x - b.fov_x).abs() > 1e-3);
+    }
+
+    /// The pose part of `arkit_to_camera`, on its own: same position and rotation, same rejection.
+    #[test]
+    fn arkit_pose_matches_the_keyframe_camera() {
+        let pose = Mat4::from_rotation_translation(
+            glam::Quat::from_rotation_y(0.3),
+            Vec3::new(1.0, 2.0, 3.0),
+        );
+        let cam = arkit_to_camera(&header(pose, 960, 720)).unwrap();
+        let (position, rotation) = arkit_pose(&pose.to_cols_array()).unwrap();
+        assert!((position - cam.position).length() < 1e-6);
+        assert!(rotation.dot(cam.rotation).abs() > 1.0 - 1e-6);
+        let mut nan = Mat4::IDENTITY.to_cols_array();
+        nan[12] = f32::NAN;
+        assert!(arkit_pose(&nan).is_err());
+        assert!(arkit_pose(&Mat4::from_scale(Vec3::splat(2.0)).to_cols_array()).is_err());
     }
 
     #[test]

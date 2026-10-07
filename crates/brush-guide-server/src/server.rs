@@ -255,6 +255,12 @@ async fn handle(stream: TcpStream, shared: Shared) -> anyhow::Result<()> {
                     Err(e) => session_failure(&format!("keyframe {id}"), &e),
                 }
             }
+            (Ok((ClientHeader::Poses { poses }, _)), Some(g)) => {
+                match g.session.update_poses(poses).await {
+                    Ok(_) => Next::Nothing,
+                    Err(e) => session_failure("poses", &e),
+                }
+            }
             (Ok((ClientHeader::Finish, _)), Some(g)) => {
                 let path = shared.root.join(&g.id).join("splat.ply");
                 match g.session.finish(&path).await {

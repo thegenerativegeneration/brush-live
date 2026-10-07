@@ -17,8 +17,11 @@ use burn::tensor::{Device, s};
 use clap::Parser;
 use glam::{UVec2, Vec3};
 use rand::{RngExt as _, SeedableRng};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ops::Range;
+
+mod poses;
+pub use poses::{PoseUpdateStats, ViewPose};
 
 /// `LoadDatasetConfig` is a clap `Args` group; this wrapper parses its CLI defaults.
 #[derive(Parser)]
@@ -46,7 +49,8 @@ pub struct LiveModel {
     views: Vec<SceneView>,
     /// Per view: (camera position, focal length in px) for the Mip 3D filter.
     view_cams: Vec<(Vec3, f32)>,
-    ids: HashSet<u64>,
+    /// View index by keyframe id.
+    index: HashMap<u64, usize>,
     last_id: Option<u64>,
     recent: Option<SceneLoader>,
     all: Option<SceneLoader>,
@@ -91,7 +95,7 @@ impl LiveModel {
             trainer: None,
             views: Vec::new(),
             view_cams: Vec::new(),
-            ids: HashSet::new(),
+            index: HashMap::new(),
             last_id: None,
             recent: None,
             all: None,
@@ -123,7 +127,7 @@ impl LiveModel {
 
     /// True if a keyframe with this id was already added.
     pub fn contains(&self, id: u64) -> bool {
-        self.ids.contains(&id)
+        self.index.contains_key(&id)
     }
 
     pub fn last_keyframe_id(&self) -> Option<u64> {
@@ -155,9 +159,10 @@ impl LiveModel {
     /// Adds a view and seeds splats where the current model is transparent.
     /// Returns false if a keyframe with this id was already added.
     pub async fn add_keyframe(&mut self, mut kf: DecodedKeyframe) -> bool {
-        if !self.ids.insert(kf.id) {
+        if self.index.contains_key(&kf.id) {
             return false;
         }
+        self.index.insert(kf.id, self.views.len());
         kf.depth = kf.depth.map(|d| d.masked(self.config.min_depth_confidence));
         let size = UVec2::new(kf.image.width(), kf.image.height());
         self.view_cams
@@ -210,6 +215,14 @@ impl LiveModel {
         self.last_id = Some(kf.id);
         self.rebuild_loaders();
         true
+    }
+
+    /// Builds both loaders from the current views now: their prefetched batches and cached images, which carry the
+    /// camera they were built with, are dropped.
+    fn rebuild_all_loaders(&mut self) {
+        self.all = None;
+        self.views_in_recent = 0;
+        self.rebuild_loaders();
     }
 
     fn rebuild_loaders(&mut self) {

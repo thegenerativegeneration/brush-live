@@ -2,8 +2,8 @@ use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
 use brush_guide::keyframe::decode_keyframe;
-use brush_guide::live::LiveModel;
-use glam::Vec3;
+use brush_guide::live::{LiveModel, PoseUpdateStats, ViewPose};
+use glam::{Mat4, Vec3};
 
 fn tmp(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("brush-guide-live-{name}-{}", std::process::id()))
@@ -74,5 +74,53 @@ async fn seeding_respects_max_splats() {
         let n = live.splats().unwrap().num_splats();
         assert!((1..=20).contains(&n), "keyframe {i}: {n} splats");
     }
+    std::fs::remove_dir_all(dir).ok();
+}
+
+fn arkit_pose_at(pos: Vec3) -> [f32; 16] {
+    Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y)
+        .inverse()
+        .to_cols_array()
+}
+
+/// A corrected pose replaces the view's camera, intrinsics kept; unknown and unchanged ids are counted, not applied;
+/// training goes on afterwards.
+#[tokio::test]
+async fn poses_for_unknown_ids_are_counted_not_applied() {
+    let device = test_scene::device().await.autodiff();
+    let dir = tmp("poses");
+    let mut live = LiveModel::new(GuideConfig::default(), device);
+    let positions = [
+        Vec3::new(0.0, 0.0, 2.0),
+        Vec3::new(1.0, 0.0, 2.0),
+        Vec3::new(-1.0, 0.0, 2.0),
+    ];
+    for (i, pos) in positions.iter().enumerate() {
+        let (h, p) = test_scene::keyframe(i as u64, *pos);
+        live.add_keyframe(decode_keyframe(&h, &p, &dir).await.unwrap())
+            .await;
+    }
+    let fov = live.views()[1].camera.fov_x;
+    let moved = Vec3::new(1.2, 0.1, 2.0);
+    let stats = live.update_poses(&[
+        ViewPose::from_arkit(1, &arkit_pose_at(moved)).unwrap(),
+        ViewPose::from_arkit(2, &arkit_pose_at(positions[2])).unwrap(),
+        ViewPose::from_arkit(99, &arkit_pose_at(moved)).unwrap(),
+    ]);
+    assert_eq!(
+        stats,
+        PoseUpdateStats {
+            moved: 1,
+            unchanged: 1,
+            unknown: 1
+        }
+    );
+    assert!((live.views()[1].camera.position - moved).length() < 1e-5);
+    assert_eq!(live.views()[1].camera.fov_x, fov);
+    assert!((live.views()[0].camera.position - positions[0]).length() < 1e-5);
+    for _ in 0..5 {
+        live.train_step().await;
+    }
+    assert_eq!(live.iter(), 5);
     std::fs::remove_dir_all(dir).ok();
 }

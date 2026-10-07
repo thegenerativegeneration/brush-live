@@ -1,9 +1,12 @@
 use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
-use brush_guide::protocol::{ServerHeader, decode_cells, decode_frame};
-use brush_guide::session::GuideSession;
-use glam::Vec3;
+use brush_guide::live::PoseUpdateStats;
+use brush_guide::protocol::{
+    ClientHeader, PoseUpdate, ServerHeader, decode_cells, decode_frame, encode_frame,
+};
+use brush_guide::session::{GuideSession, Pushed};
+use glam::{Mat4, Vec3};
 use std::time::Duration;
 
 /// Score sets decode, and a reset clears the session.
@@ -301,5 +304,96 @@ async fn finish_fisher_informs_the_final_score_set_and_dumps_importance() {
     assert!(fisher > 0, "importance arrays are not empty");
     assert_eq!(fisher, json["train"].as_array().unwrap().len());
     assert_eq!(fisher, session.status().borrow().num_splats as usize);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+fn arkit_pose_at(pos: Vec3) -> [f32; 16] {
+    Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y)
+        .inverse()
+        .to_cols_array()
+}
+
+/// `push_frame` routes keyframe and poses frames and answers anything else with the error frame's text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_frame_routes_keyframes_and_poses() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-push-frame-{}", std::process::id()));
+    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
+    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+    let frame = encode_frame(&ClientHeader::Keyframe(h), &p);
+    assert_eq!(session.push_frame(&frame).await, Ok(Pushed::Keyframe(0)));
+
+    let pose = arkit_pose_at(Vec3::new(0.2, 0.0, 2.0));
+    let poses = vec![PoseUpdate { id: 0, pose }, PoseUpdate { id: 7, pose }];
+    let frame = encode_frame(&ClientHeader::Poses { poses }, &[]);
+    assert_eq!(
+        session.push_frame(&frame).await,
+        Ok(Pushed::Poses(PoseUpdateStats {
+            moved: 1,
+            unchanged: 0,
+            unknown: 1
+        }))
+    );
+
+    let mut bad = pose;
+    bad[0] = 2.0;
+    let frame = encode_frame(
+        &ClientHeader::Poses {
+            poses: vec![PoseUpdate { id: 0, pose: bad }],
+        },
+        &[],
+    );
+    let err = session.push_frame(&frame).await.unwrap_err();
+    assert!(err.starts_with("poses: keyframe 0 pose: "), "{err}");
+    let finish = encode_frame(&ClientHeader::Finish, &[]);
+    assert_eq!(
+        session.push_frame(&finish).await,
+        Err("expected a keyframe or poses frame".to_owned())
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Poses sent while paused wait like keyframes and apply after the keyframe held before them, which they name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poses_while_paused_apply_after_held_keyframes() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-held-poses-{}", std::process::id()));
+    let session = GuideSession::start(GuideConfig::default(), device, dir.clone());
+    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+    session.push_keyframe(h, p).await.unwrap();
+    session.set_paused(true).await;
+
+    let s = session.clone();
+    let keyframe = tokio::spawn(async move {
+        let (h, p) = test_scene::keyframe(1, Vec3::new(1.0, 0.0, 2.0));
+        s.push_keyframe(h, p).await
+    });
+    // The keyframe command is queued before the poses command.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let s = session.clone();
+    let poses = tokio::spawn(async move {
+        s.update_poses(vec![PoseUpdate {
+            id: 1,
+            pose: arkit_pose_at(Vec3::new(1.3, 0.0, 2.0)),
+        }])
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !keyframe.is_finished() && !poses.is_finished(),
+        "both wait while paused"
+    );
+
+    session.set_paused(false).await;
+    keyframe.await.unwrap().unwrap();
+    let stats = poses.await.unwrap().unwrap();
+    assert_eq!(
+        stats,
+        PoseUpdateStats {
+            moved: 1,
+            unchanged: 0,
+            unknown: 0
+        }
+    );
     std::fs::remove_dir_all(dir).ok();
 }

@@ -17,7 +17,7 @@ pub(super) struct Holdout {
     received: u32,
     ids: HashSet<u64>,
     /// Images are loaded at eval time, so they do not sit in memory.
-    views: Vec<SceneView>,
+    views: Vec<(u64, SceneView)>,
     last_eval_s: Option<f64>,
 }
 
@@ -75,13 +75,27 @@ impl Holdout {
     ) {
         self.received += 1;
         self.ids.insert(id);
-        self.views.push(SceneView { camera, ..view });
+        self.views.push((id, SceneView { camera, ..view }));
         let mut ids: Vec<u64> = self.ids.iter().copied().collect();
         ids.sort_unstable();
         let json = serde_json::to_string(&ids).expect("ids serialize");
         if let Err(e) = std::fs::write(session_dir.join("holdout.json"), json) {
             log::warn!("could not write holdout.json: {e}");
         }
+    }
+
+    /// Moves held-out views to corrected poses; returns how many moved.
+    pub(super) fn update_poses(&mut self, poses: &[crate::live::ViewPose]) -> u32 {
+        let mut moved = 0;
+        for p in poses {
+            if let Some((_, view)) = self.views.iter_mut().find(|(id, _)| *id == p.id)
+                && !p.matches(&view.camera)
+            {
+                view.camera = p.applied_to(&view.camera);
+                moved += 1;
+            }
+        }
+        moved
     }
 
     pub(super) fn due(&self, now_s: f64) -> bool {
@@ -101,7 +115,7 @@ impl Holdout {
         let start = Instant::now();
         let device = splats.device();
         let (mut psnr, mut ssim, mut n) = (0.0f32, 0.0f32, 0usize);
-        for view in &self.views {
+        for (_, view) in &self.views {
             match score_view(splats, view, &device).await {
                 Ok((p, s)) => {
                     psnr += p;
@@ -219,11 +233,39 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut h = Holdout::new(2, 30.0);
         assert!(!h.due(100.0), "no views yet");
-        h.views.push(view(&dir, 0));
+        h.views.push((0, view(&dir, 0)));
         assert!(h.due(0.0));
         h.last_eval_s = Some(10.0);
         assert!(!h.due(39.0));
         assert!(h.due(40.0));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn corrected_poses_move_held_out_views() {
+        let dir = std::env::temp_dir().join(format!("holdout-poses-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let camera = Camera::new(
+            glam::Vec3::ZERO,
+            glam::Quat::IDENTITY,
+            1.0,
+            1.0,
+            glam::vec2(0.5, 0.5),
+            brush_render::kernels::camera_model::CameraModel::Pinhole,
+        );
+        let mut h = Holdout::new(2, 30.0);
+        h.add_held(4, camera, view(&dir, 4), &dir);
+        let p = crate::live::ViewPose {
+            id: 4,
+            position: glam::Vec3::new(0.3, 0.0, 0.0),
+            rotation: glam::Quat::IDENTITY,
+        };
+        assert_eq!(
+            h.update_poses(&[p, crate::live::ViewPose { id: 5, ..p }]),
+            1
+        );
+        assert_eq!(h.views[0].1.camera.position, glam::Vec3::new(0.3, 0.0, 0.0));
+        assert_eq!(h.update_poses(&[p]), 0);
         std::fs::remove_dir_all(dir).ok();
     }
 

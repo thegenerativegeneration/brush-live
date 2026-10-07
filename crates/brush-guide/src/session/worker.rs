@@ -5,6 +5,7 @@
 mod drain;
 mod fisher;
 mod holdout;
+mod poses;
 
 use super::preview::{PREVIEW_FLOATS, PreviewClock, PreviewSnapshot};
 use super::splat_read::{SplatRead, view_cones};
@@ -20,10 +21,11 @@ use burn::tensor::Device;
 use drain::{Drain, try_take};
 use glam::UVec2;
 use holdout::Holdout;
+use poses::Held;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 use web_time::Instant;
 
 pub(super) struct Channels {
@@ -192,8 +194,8 @@ struct Worker {
     finished: bool,
     /// Set by `Command::Pause(true)`: no GPU work until resumed.
     paused: bool,
-    /// Keyframes received while paused, added in order on resume.
-    held: Vec<(KeyframeHeader, Vec<u8>, oneshot::Sender<Result<(), String>>)>,
+    /// Commands received while paused, run in order on resume.
+    held: Vec<Held>,
     /// `live.num_evicted()` at the end of the previous round.
     evicted_at_round: u64,
     /// Time spent between rounds, for the debug timing log.
@@ -284,18 +286,20 @@ impl Worker {
     async fn handle(&mut self, cmd: Command) {
         match cmd {
             Command::Keyframe(h, payload, reply) if self.paused => {
-                self.held.push((h, payload, reply));
+                self.held.push(Held::Keyframe(h, payload, reply));
+            }
+            Command::Poses(poses, reply) if self.paused => {
+                self.held.push(Held::Poses(poses, reply));
             }
             Command::Pause(paused, reply) => {
                 self.paused = paused;
                 if !paused {
-                    for (h, payload, held_reply) in std::mem::take(&mut self.held) {
-                        let result = self.add_keyframe(&h, &payload).await;
-                        publish_counts(&self.channels.status, &self.live);
-                        let _ = held_reply.send(result);
-                    }
+                    self.run_held().await;
                 }
                 let _ = reply.send(());
+            }
+            Command::Poses(poses, reply) => {
+                let _ = reply.send(Ok(self.update_poses(&poses).await));
             }
             Command::Keyframe(h, payload, reply) => {
                 let result = self.add_keyframe(&h, &payload).await;
@@ -420,8 +424,8 @@ impl Worker {
 
     /// Clears everything but the score set version, which keeps counting.
     fn reset(&mut self) {
-        for (_, _, held_reply) in self.held.drain(..) {
-            let _ = held_reply.send(Err("session reset".to_owned()));
+        for held in self.held.drain(..) {
+            held.reset();
         }
         let config = &self.config;
         self.live = LiveModel::new(config.clone(), self.device.clone());

@@ -8,7 +8,11 @@ mod worker;
 pub use frames::forward_frames;
 
 use crate::config::GuideConfig;
-use crate::protocol::{CELL_BYTES, Cell, KeyframeHeader, ServerHeader, encode_cells, encode_frame};
+use crate::live::{PoseUpdateStats, ViewPose};
+use crate::protocol::{
+    CELL_BYTES, Cell, ClientHeader, KeyframeHeader, PoseUpdate, ServerHeader, decode_frame,
+    encode_cells, encode_frame,
+};
 use brush_async::Actor;
 use burn::tensor::Device;
 use serde::{Deserialize, Serialize};
@@ -98,8 +102,22 @@ pub enum SessionError {
     Io(#[from] std::io::Error),
 }
 
+/// A client frame [`GuideSession::push_frame`] accepted.
+#[derive(Debug, PartialEq)]
+pub enum Pushed {
+    /// The keyframe was added, or was a resend: the host acknowledges it.
+    Keyframe(u64),
+    /// The poses were applied: nothing is sent back.
+    Poses(PoseUpdateStats),
+}
+
 enum Command {
     Keyframe(KeyframeHeader, Vec<u8>, oneshot::Sender<Result<(), String>>),
+    /// Corrected camera poses, applied after the keyframes queued before them; held like keyframes while paused.
+    Poses(
+        Vec<ViewPose>,
+        oneshot::Sender<Result<PoseUpdateStats, String>>,
+    ),
     /// Export the splats; `true` also pauses training until the next new keyframe.
     Export(bool, oneshot::Sender<Result<Vec<u8>, String>>),
     /// Clear the session; later preview snapshots carry the generation.
@@ -174,6 +192,51 @@ impl GuideSession {
         rx.await
             .map_err(|_closed| SessionError::Stopped)?
             .map_err(SessionError::Rejected)
+    }
+
+    /// Moves added views to corrected poses (ARKit camera-to-world per keyframe id, as in the keyframe header) after
+    /// every keyframe pushed before; waits while paused, like `push_keyframe`. An invalid pose rejects the whole
+    /// update before it reaches the worker.
+    pub async fn update_poses(
+        &self,
+        poses: Vec<PoseUpdate>,
+    ) -> Result<PoseUpdateStats, SessionError> {
+        let poses = poses
+            .iter()
+            .map(|p| {
+                ViewPose::from_arkit(p.id, &p.pose)
+                    .map_err(|e| SessionError::Rejected(format!("keyframe {} pose: {e}", p.id)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::Poses(poses, tx))
+            .await
+            .map_err(|_closed| SessionError::Stopped)?;
+        rx.await
+            .map_err(|_closed| SessionError::Stopped)?
+            .map_err(SessionError::Rejected)
+    }
+
+    /// Adds one `keyframe` frame or applies one `poses` frame, in the order pushed. The error is the text of the
+    /// `error` frame to send: `keyframe <id>: …`, `poses: …`, or the decode error.
+    pub async fn push_frame(&self, frame: &[u8]) -> Result<Pushed, String> {
+        match decode_frame::<ClientHeader>(frame) {
+            Ok((ClientHeader::Keyframe(h), payload)) => {
+                let id = h.id;
+                self.push_keyframe(h, payload.to_vec())
+                    .await
+                    .map(|()| Pushed::Keyframe(id))
+                    .map_err(|e| format!("keyframe {id}: {e}"))
+            }
+            Ok((ClientHeader::Poses { poses }, _)) => self
+                .update_poses(poses)
+                .await
+                .map(Pushed::Poses)
+                .map_err(|e| format!("poses: {e}")),
+            Ok(_) => Err("expected a keyframe or poses frame".to_owned()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     /// True while the worker's command channel is open. A panicked worker

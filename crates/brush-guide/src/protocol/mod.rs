@@ -48,6 +48,14 @@ pub struct KeyframeHeader {
     pub mono_depth_size: Option<[u32; 2]>,
 }
 
+/// One keyframe's corrected camera pose (after a map correction on the phone).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PoseUpdate {
+    pub id: u64,
+    /// Camera-to-world, ARKit world frame, column-major (as `KeyframeHeader::pose`).
+    pub pose: [f32; 16],
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientHeader {
@@ -57,6 +65,10 @@ pub enum ClientHeader {
         has_lidar: bool,
     },
     Keyframe(KeyframeHeader),
+    /// Corrected poses of keyframes already sent; no payload.
+    Poses {
+        poses: Vec<PoseUpdate>,
+    },
     Finish,
 }
 

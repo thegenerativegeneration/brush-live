@@ -1,10 +1,10 @@
-//! C interface to one live guidance session for the iOS app. Keyframe wire
-//! frames go in (`bge_push`); the frames the server would send come out
+//! C interface to one live guidance session for the iOS app. Keyframe and poses
+//! wire frames go in (`bge_push`); the frames the server would send come out
 //! through the `out` callback (docs/protocol.md).
 
 use brush_guide::config::GuideConfig;
-use brush_guide::protocol::{ClientHeader, ServerHeader, decode_frame, encode_frame};
-use brush_guide::session::{GuideSession, forward_frames};
+use brush_guide::protocol::{ServerHeader, encode_frame};
+use brush_guide::session::{GuideSession, Pushed, forward_frames};
 use brush_guide::warmup::Warmup;
 use burn::cubecl::config::autotune::AutotuneLevel;
 use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
@@ -243,9 +243,8 @@ pub unsafe extern "C" fn bge_new(
     }))
 }
 
-/// Adds one keyframe frame; blocks until it is added (emits `Ack`) or
-/// rejected (emits `Error` "keyframe <id>: …"). Waits while paused.
-/// Returns 0 on success, 1 otherwise.
+/// Adds one keyframe frame (emits `Ack`) or applies one poses frame (emits nothing); blocks until done. A rejected
+/// frame emits `Error` "keyframe <id>: …" or "poses: …". Waits while paused. Returns 0 on success, 1 otherwise.
 ///
 /// # Safety
 /// `e` comes from `bge_new`; `frame` points to `len` readable bytes.
@@ -253,25 +252,14 @@ pub unsafe extern "C" fn bge_new(
 pub unsafe extern "C" fn bge_push(e: *mut BgeEngine, frame: *const u8, len: usize) -> i32 {
     let e = unsafe { &*e };
     let bytes = unsafe { std::slice::from_raw_parts(frame, len) };
-    let (header, payload) = match decode_frame::<ClientHeader>(bytes) {
-        Ok((ClientHeader::Keyframe(h), p)) => (h, p),
-        Ok(_) => {
-            e.out.error("expected a keyframe frame");
-            return 1;
-        }
-        Err(err) => {
-            e.out.error(err.to_string());
-            return 1;
-        }
-    };
-    let id = header.id;
-    match e.runtime.block_on(e.session.push_keyframe(header, payload.to_vec())) {
-        Ok(()) => {
+    match e.runtime.block_on(e.session.push_frame(bytes)) {
+        Ok(Pushed::Keyframe(id)) => {
             e.out.send(&encode_frame(&ServerHeader::Ack { keyframe_id: id }, &[]));
             0
         }
-        Err(err) => {
-            e.out.error(format!("keyframe {id}: {err}"));
+        Ok(Pushed::Poses(_)) => 0,
+        Err(message) => {
+            e.out.error(message);
             1
         }
     }

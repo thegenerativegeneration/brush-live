@@ -18,7 +18,8 @@ typedef void (*BgeOut)(void *ctx, const uint8_t *frame, size_t len);
 // config_json: GuideConfig overrides (may be ""). Returns NULL on failure after
 // passing one error frame to out.
 BgeEngine *bge_new(const char *config_json, const char *session_dir, BgeOut out, void *ctx);
-// Blocks until the keyframe is added (ack emitted) or rejected (error emitted); waits while paused.
+// Adds a keyframe frame (ack emitted) or applies a poses frame (nothing emitted); blocks until done or rejected
+// (error emitted: "keyframe <id>: …" or "poses: …"); waits while paused.
 int32_t bge_push(BgeEngine *engine, const uint8_t *frame, size_t len);
 // Writes the splat PLY and emits a splat frame.
 int32_t bge_finish(BgeEngine *engine, const char *ply_path);

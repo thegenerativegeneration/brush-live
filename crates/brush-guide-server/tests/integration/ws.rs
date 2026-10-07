@@ -1,6 +1,6 @@
 use brush_guide::config::GuideConfig;
 use brush_guide::protocol::{
-    ClientHeader, KeyframeHeader, ServerHeader, decode_frame, encode_frame,
+    ClientHeader, KeyframeHeader, PoseUpdate, ServerHeader, decode_frame, encode_frame,
 };
 use futures_util::{SinkExt, StreamExt};
 use glam::{Mat4, Vec3};
@@ -190,5 +190,64 @@ async fn end_to_end() {
             }
         }
     }
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A poses frame is applied without a reply; an invalid one gets an error and the connection stays usable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn poses_are_applied_silently_and_bad_ones_rejected() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let root = std::env::temp_dir().join(format!("brush-guide-ws-poses-{}", std::process::id()));
+    tokio::spawn(brush_guide_server::server::serve(
+        listener,
+        GuideConfig::default(),
+        device,
+        root.clone(),
+    ));
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+        .await
+        .unwrap();
+    ws.send(hello("p1")).await.unwrap();
+    ws.send(Message::binary(keyframe(0, Vec3::new(0.0, 0.0, 2.0))))
+        .await
+        .unwrap();
+    let pose = Mat4::look_at_rh(Vec3::new(0.3, 0.0, 2.0), Vec3::ZERO, Vec3::Y)
+        .inverse()
+        .to_cols_array();
+    // Not rigid (a scaled axis). A NaN cannot be sent: JSON writes it as null, a decode error.
+    let mut bad = pose;
+    bad[0] *= 2.0;
+    for poses in [
+        vec![PoseUpdate { id: 0, pose }],
+        vec![PoseUpdate { id: 0, pose: bad }],
+    ] {
+        ws.send(Message::binary(encode_frame(
+            &ClientHeader::Poses { poses },
+            &[],
+        )))
+        .await
+        .unwrap();
+    }
+    ws.send(Message::binary(keyframe(1, Vec3::new(1.0, 0.0, 2.0))))
+        .await
+        .unwrap();
+    let mut errors = Vec::new();
+    let mut acks = Vec::new();
+    while acks.len() < 2 {
+        match next_header(&mut ws).await {
+            ServerHeader::Ack { keyframe_id } => acks.push(keyframe_id),
+            ServerHeader::Error { message } => errors.push(message),
+            _ => {}
+        }
+    }
+    assert_eq!(acks, vec![0, 1]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("poses: keyframe 0 pose: "),
+        "{errors:?}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
