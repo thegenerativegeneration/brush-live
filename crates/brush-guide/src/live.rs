@@ -218,11 +218,12 @@ impl LiveModel {
     }
 
     /// Builds both loaders from the current views now: their prefetched batches and cached images, which carry the
-    /// camera they were built with, are dropped.
+    /// camera they were built with, are dropped. The seeds take the step count in, so the new loaders do not replay
+    /// the shuffle order the old ones started with.
     fn rebuild_all_loaders(&mut self) {
-        self.all = None;
-        self.views_in_recent = 0;
-        self.rebuild_loaders();
+        let salt = u64::from(self.iter) << 32;
+        self.build_recent_loader(salt);
+        self.build_all_loader(salt);
     }
 
     fn rebuild_loaders(&mut self) {
@@ -230,23 +231,38 @@ impl LiveModel {
         if n <= RECENT_LOADER_REBUILD_EVERY
             || n >= self.views_in_recent + RECENT_LOADER_REBUILD_EVERY
         {
-            let start = n.saturating_sub(self.config.recent_window);
-            self.recent_len = n - start;
-            let recent = Scene::new(self.views[start..].to_vec());
-            self.recent = Some(SceneLoader::new(
-                &recent,
-                self.config.seed + n as u64,
-                &self.load_config,
-            ));
-            self.views_in_recent = n;
+            self.build_recent_loader(0);
         }
         if self.all.is_none()
             || self.views.len() >= self.views_in_all + self.config.all_loader_rebuild_every
         {
-            let all = Scene::new(self.views.clone());
-            self.all = Some(SceneLoader::new(&all, self.config.seed, &self.load_config));
-            self.views_in_all = self.views.len();
+            self.build_all_loader(0);
         }
+    }
+
+    /// The recent-window loader over the newest views; `salt` 0 gives the usual seed.
+    fn build_recent_loader(&mut self, salt: u64) {
+        let n = self.views.len();
+        let start = n.saturating_sub(self.config.recent_window);
+        self.recent_len = n - start;
+        let recent = Scene::new(self.views[start..].to_vec());
+        self.recent = Some(SceneLoader::new(
+            &recent,
+            (self.config.seed + n as u64) ^ salt,
+            &self.load_config,
+        ));
+        self.views_in_recent = n;
+    }
+
+    /// The loader over all views; `salt` 0 gives the usual seed.
+    fn build_all_loader(&mut self, salt: u64) {
+        let all = Scene::new(self.views.clone());
+        self.all = Some(SceneLoader::new(
+            &all,
+            self.config.seed ^ salt,
+            &self.load_config,
+        ));
+        self.views_in_all = self.views.len();
     }
 
     /// Keeps a seeded random subset of `seeds` that fits under `max_splats`

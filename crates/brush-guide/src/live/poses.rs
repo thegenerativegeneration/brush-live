@@ -62,6 +62,7 @@ impl LiveModel {
     pub fn update_poses(&mut self, poses: &[ViewPose]) -> PoseUpdateStats {
         let mut stats = PoseUpdateStats::default();
         // Per moved view: its slot and the world transform that takes the old camera onto the new one.
+        // Only the newest-view check reads it here; the anchored-splat move (plan Task 8) consumes the transforms.
         let mut moves: Vec<(u32, Affine3A)> = Vec::new();
         for p in poses {
             let Some(&i) = self.index.get(&p.id) else {
@@ -102,6 +103,8 @@ mod tests {
     use crate::protocol::KeyframeHeader;
     use glam::Mat4;
 
+    /// `tests/integration/test_scene::arkit_pose_at`: integration-test helpers are not visible to unit tests, and
+    /// these need `LiveModel`'s private loaders.
     fn pose_at(pos: Vec3) -> [f32; 16] {
         Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y)
             .inverse()

@@ -6,7 +6,7 @@ use brush_guide::protocol::{
     ClientHeader, PoseUpdate, ServerHeader, decode_cells, decode_frame, encode_frame,
 };
 use brush_guide::session::{GuideSession, Pushed};
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 use std::time::Duration;
 
 /// Score sets decode, and a reset clears the session.
@@ -307,12 +307,6 @@ async fn finish_fisher_informs_the_final_score_set_and_dumps_importance() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-fn arkit_pose_at(pos: Vec3) -> [f32; 16] {
-    Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y)
-        .inverse()
-        .to_cols_array()
-}
-
 /// `push_frame` routes keyframe and poses frames and answers anything else with the error frame's text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn push_frame_routes_keyframes_and_poses() {
@@ -323,7 +317,7 @@ async fn push_frame_routes_keyframes_and_poses() {
     let frame = encode_frame(&ClientHeader::Keyframe(h), &p);
     assert_eq!(session.push_frame(&frame).await, Ok(Pushed::Keyframe(0)));
 
-    let pose = arkit_pose_at(Vec3::new(0.2, 0.0, 2.0));
+    let pose = test_scene::arkit_pose_at(Vec3::new(0.2, 0.0, 2.0));
     let poses = vec![PoseUpdate { id: 0, pose }, PoseUpdate { id: 7, pose }];
     let frame = encode_frame(&ClientHeader::Poses { poses }, &[]);
     assert_eq!(
@@ -374,7 +368,7 @@ async fn poses_while_paused_apply_after_held_keyframes() {
     let poses = tokio::spawn(async move {
         s.update_poses(vec![PoseUpdate {
             id: 1,
-            pose: arkit_pose_at(Vec3::new(1.3, 0.0, 2.0)),
+            pose: test_scene::arkit_pose_at(Vec3::new(1.3, 0.0, 2.0)),
         }])
         .await
     });

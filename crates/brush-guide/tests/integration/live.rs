@@ -3,7 +3,7 @@ use crate::test_scene;
 use brush_guide::config::GuideConfig;
 use brush_guide::keyframe::decode_keyframe;
 use brush_guide::live::{LiveModel, PoseUpdateStats, ViewPose};
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 
 fn tmp(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("brush-guide-live-{name}-{}", std::process::id()))
@@ -77,12 +77,6 @@ async fn seeding_respects_max_splats() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-fn arkit_pose_at(pos: Vec3) -> [f32; 16] {
-    Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y)
-        .inverse()
-        .to_cols_array()
-}
-
 /// A corrected pose replaces the view's camera, intrinsics kept; unknown and unchanged ids are counted, not applied;
 /// training goes on afterwards.
 #[tokio::test]
@@ -103,9 +97,9 @@ async fn poses_for_unknown_ids_are_counted_not_applied() {
     let fov = live.views()[1].camera.fov_x;
     let moved = Vec3::new(1.2, 0.1, 2.0);
     let stats = live.update_poses(&[
-        ViewPose::from_arkit(1, &arkit_pose_at(moved)).unwrap(),
-        ViewPose::from_arkit(2, &arkit_pose_at(positions[2])).unwrap(),
-        ViewPose::from_arkit(99, &arkit_pose_at(moved)).unwrap(),
+        ViewPose::from_arkit(1, &test_scene::arkit_pose_at(moved)).unwrap(),
+        ViewPose::from_arkit(2, &test_scene::arkit_pose_at(positions[2])).unwrap(),
+        ViewPose::from_arkit(99, &test_scene::arkit_pose_at(moved)).unwrap(),
     ]);
     assert_eq!(
         stats,

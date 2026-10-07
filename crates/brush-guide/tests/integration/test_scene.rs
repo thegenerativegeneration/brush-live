@@ -46,6 +46,13 @@ pub fn camera_at(pos: Vec3, look_at: Vec3) -> Camera {
     )
 }
 
+/// ARKit camera-to-world pose (column-major, as `KeyframeHeader::pose`) at `pos` looking at the origin, y up.
+pub fn arkit_pose_at(pos: Vec3) -> [f32; 16] {
+    Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y)
+        .inverse()
+        .to_cols_array()
+}
+
 /// ARKit-style keyframe looking at the origin from `pos`, textured image, a few feature points.
 pub fn keyframe(id: u64, pos: Vec3) -> (KeyframeHeader, Vec<u8>) {
     let (w, h) = (64u32, 48u32);
@@ -59,7 +66,6 @@ pub fn keyframe(id: u64, pos: Vec3) -> (KeyframeHeader, Vec<u8>) {
             image::ImageFormat::Jpeg,
         )
         .unwrap();
-    let pose = Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y).inverse();
     let points = [
         Vec3::new(0.0, 0.0, 0.0),
         Vec3::new(0.2, 0.1, 0.0),
@@ -68,7 +74,7 @@ pub fn keyframe(id: u64, pos: Vec3) -> (KeyframeHeader, Vec<u8>) {
     let header = KeyframeHeader {
         id,
         timestamp: id as f64,
-        pose: pose.to_cols_array(),
+        pose: arkit_pose_at(pos),
         fx: 50.0,
         fy: 50.0,
         cx: 32.0,
