@@ -1,6 +1,7 @@
 //! Replays a capture export to a guidance server as keyframes and shows
 //! what the server sends back in rerun.
 
+mod correct;
 mod dataset;
 mod dump;
 mod receive;
@@ -71,6 +72,14 @@ struct Args {
     /// the model to `<root>/<session_id>/splat.ply`.
     #[arg(long)]
     finish_after: Option<f32>,
+    /// Send each keyframe with the pose the phone sent during capture (`transforms_live.json`) instead of the
+    /// refined one in `transforms.json`.
+    #[arg(long)]
+    live_poses: bool,
+    /// After this many keyframes, send one `poses` frame with the refined poses (`transforms.json`) of every
+    /// keyframe sent so far, as the phone's engine gets them after a loop closure.
+    #[arg(long, requires = "live_poses")]
+    correct_after: Option<usize>,
 }
 
 #[tokio::main]
@@ -155,9 +164,20 @@ where
     let mut path_points = Vec::new();
     let mut warned_missing_conf = false;
     let mut mono_frames = 0usize;
+    let live = args
+        .live_poses
+        .then(|| correct::live_poses(&args.dataset, t))
+        .transpose()?;
     let frames = t.frames.iter().cycle().take(t.frames.len() * args.loops);
     for (i, f) in frames.enumerate() {
         let (header, jpeg) = keyframe_header(args, t, f, i)?;
+        let header = match &live {
+            Some(poses) => KeyframeHeader {
+                pose: poses[i % poses.len()],
+                ..header
+            },
+            None => header,
+        };
         let depth = load_depth(&args.dataset, f, args.depth)?;
         if let Some((_, confidence, _)) = &depth {
             if args.depth == DepthMode::High && confidence.is_none() && !warned_missing_conf {
@@ -207,6 +227,11 @@ where
             &payload,
         )))
         .await?;
+        if args.correct_after == Some(i + 1) {
+            sink.send(Message::binary(correct::correction_frame(t, i + 1)))
+                .await?;
+            println!("poses sent for {} keyframes", i + 1);
+        }
 
         let c2w = Mat4::from_cols_array_2d(&f.transform_matrix).transpose();
         path_points.push(c2w.w_axis.truncate().to_array());

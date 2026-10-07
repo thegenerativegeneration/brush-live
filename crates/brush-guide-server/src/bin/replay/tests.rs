@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
-use super::dataset::{DepthMode, Frame, load_depth, load_mono};
-use brush_guide::protocol::{ClientHeader, KeyframeHeader, encode_frame};
+use super::correct::{correction_frame, live_poses, pose};
+use super::dataset::{DepthMode, Frame, Transforms, load_depth, load_mono};
+use brush_guide::protocol::{ClientHeader, KeyframeHeader, decode_frame, encode_frame};
 
 struct TempDir(PathBuf);
 
@@ -205,4 +206,63 @@ fn keyframe_payload_puts_the_mono_block_last_and_leaves_frames_without_it_unchan
     let with = super::keyframe_payload(b"jpg".to_vec(), None, &points, Some(&[9, 8]));
     assert_eq!(&with[..plain.len()], &plain[..]);
     assert_eq!(&with[plain.len()..], &[9, 8]);
+}
+
+fn transforms(frames: Vec<Frame>) -> Transforms {
+    Transforms {
+        fl_x: Some(500.0),
+        fl_y: None,
+        cx: None,
+        cy: None,
+        w: Some(640),
+        h: Some(480),
+        ply_file_path: None,
+        frames,
+    }
+}
+
+fn frame_at(file: &str, x: f32) -> Frame {
+    Frame {
+        file_path: file.into(),
+        transform_matrix: [
+            [1.0, 0.0, 0.0, x],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        ..frame_with_depth(None)
+    }
+}
+
+/// The correction names every keyframe sent so far, ids cycling over the frames, with the refined poses.
+#[test]
+fn correction_frame_carries_refined_poses_of_sent_keyframes() {
+    let t = transforms(vec![
+        frame_at("images/0.jpg", 0.5),
+        frame_at("images/1.jpg", 1.5),
+    ]);
+    let frame = correction_frame(&t, 3);
+    let (header, payload) = decode_frame::<ClientHeader>(&frame).unwrap();
+    assert!(payload.is_empty());
+    let ClientHeader::Poses { poses } = header else {
+        panic!("{header:?}")
+    };
+    assert_eq!(
+        poses.iter().map(|p| p.id).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert_eq!(poses[2].pose, pose(&t.frames[0].transform_matrix));
+    assert_eq!(poses[1].pose[12], 1.5);
+}
+
+/// Live poses come from transforms_live.json by position; a file listing other images is an error.
+#[test]
+fn live_poses_must_list_the_same_frames() {
+    let dir = TempDir::new("live");
+    let t = transforms(vec![frame_at("images/0.jpg", 0.5)]);
+    let live = r#"{"fl_x":500,"frames":[{"file_path":"images/0.jpg","transform_matrix":[[1,0,0,0.2],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}]}"#;
+    std::fs::write(dir.0.join("transforms_live.json"), live).unwrap();
+    assert_eq!(live_poses(&dir.0, &t).unwrap()[0][12], 0.2);
+    let other = transforms(vec![frame_at("images/9.jpg", 0.5)]);
+    assert!(live_poses(&dir.0, &other).is_err());
 }

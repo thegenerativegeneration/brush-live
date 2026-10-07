@@ -57,12 +57,12 @@ pub struct PoseUpdateStats {
 
 impl LiveModel {
     /// Moves views to corrected poses: the view's camera, its Mip-filter camera and, for the newest view, the
-    /// protected cone; then rebuilds both loaders so no batch with an old camera is drawn again. The score set
-    /// needs nothing: each round reads the splats and the current views.
+    /// protected cone, and moves the splats each moved view seeded by that view's correction (when
+    /// `move_anchored_splats` is on); then rebuilds both loaders so no batch with an old camera is drawn again. The
+    /// score set needs nothing: each round reads the splats and the current views.
     pub fn update_poses(&mut self, poses: &[ViewPose]) -> PoseUpdateStats {
         let mut stats = PoseUpdateStats::default();
         // Per moved view: its slot and the world transform that takes the old camera onto the new one.
-        // Only the newest-view check reads it here; the anchored-splat move (plan Task 8) consumes the transforms.
         let mut moves: Vec<(u32, Affine3A)> = Vec::new();
         for p in poses {
             let Some(&i) = self.index.get(&p.id) else {
@@ -88,6 +88,9 @@ impl LiveModel {
             t.set_view_cams(self.view_cams.clone());
             if moves.iter().any(|(i, _)| *i as usize == newest) {
                 t.set_protect_cone(Some(view_cone(&self.views[newest].camera)));
+            }
+            if let Some(splats) = self.splats.take() {
+                self.splats = Some(t.move_by_origin(splats, &moves));
             }
         }
         self.rebuild_all_loaders();

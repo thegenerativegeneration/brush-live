@@ -104,6 +104,9 @@ pub struct GuideConfig {
     /// Accepted per-keyframe mono scale, inclusive; a fit outside is rejected
     /// and the keyframe seeds without mono depth.
     pub mono_scale_range: (f32, f32),
+    /// On a pose update, move each splat with the view whose seeds created it (`brush_train`'s origin tags). Off:
+    /// only the views' cameras change and training alone has to move the drifted splats.
+    pub move_anchored_splats: bool,
 }
 
 impl Default for GuideConfig {
@@ -151,6 +154,7 @@ impl Default for GuideConfig {
             mono_seeding: true,
             mono_min_depth_with_lidar_m: 4.5,
             mono_scale_range: (0.3, 3.0),
+            move_anchored_splats: true,
         }
     }
 }
@@ -231,5 +235,19 @@ mod mono_tests {
                 .expect("parses");
         assert!(!cfg.mono_seeding);
         assert_eq!(cfg.mono_scale_range, (0.5, 2.0));
+    }
+}
+
+#[cfg(test)]
+mod anchored_splat_tests {
+    use super::GuideConfig;
+
+    #[test]
+    fn moving_anchored_splats_is_on_by_default_and_can_be_turned_off() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert!(cfg.move_anchored_splats);
+        let cfg: GuideConfig =
+            serde_json::from_str(r#"{"move_anchored_splats": false}"#).expect("parses");
+        assert!(!cfg.move_anchored_splats);
     }
 }

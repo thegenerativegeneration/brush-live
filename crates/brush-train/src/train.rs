@@ -30,9 +30,9 @@ use burn::{
     },
 };
 
+use crate::profile::{StepProfile, device_sync, lap};
 use hashbrown::HashSet;
 use rand::SeedableRng;
-use crate::profile::{StepProfile, device_sync, lap};
 use tracing::{Instrument, trace_span};
 
 pub const BOUND_PERCENTILE: f32 = 0.8;
@@ -97,6 +97,8 @@ pub struct SplatTrainer {
     view_cams: Vec<(glam::Vec3, f32)>,
     /// Keeps the splat count within `max_splats` by evicting; `None` caps growth as Brush does.
     evict: Option<Eviction>,
+    /// Per-splat seeding view, when tracked (`track_origins`); `None` costs nothing.
+    origin: Option<crate::origin::SplatOrigin>,
     /// Per-phase step timing, when on (`set_profiling`).
     profile: Option<StepProfile>,
     #[cfg(not(target_family = "wasm"))]
@@ -231,6 +233,7 @@ impl SplatTrainer {
             rng: rand::rngs::StdRng::seed_from_u64(seed),
             view_cams: Vec::new(),
             evict: None,
+            origin: None,
             sh_background,
             sh_pixel_centres: None,
             profile: None,
@@ -292,6 +295,40 @@ impl SplatTrainer {
     pub fn note_keyframe_seeds(&mut self, seed_means: &[f32]) {
         if let Some(e) = self.evict.as_mut() {
             e.recent.note_keyframe(seed_means);
+        }
+    }
+
+    /// Starts tagging splats with the training view whose seeds created them: `splats` (all current ones) came
+    /// from view `slot`. Without this call nothing is tagged and `move_by_origin` moves nothing.
+    pub fn track_origins(&mut self, splats: &Splats, slot: u32) {
+        let device = splats.device().inner();
+        self.origin = Some(crate::origin::SplatOrigin::new(
+            splats.num_splats() as usize,
+            slot,
+            &device,
+        ));
+    }
+
+    /// Moves each splat seeded by a view in `moves` (view slot, world transform from its old to its corrected
+    /// camera) with that view. `splats` on the inner device, as between steps.
+    pub fn move_by_origin(&self, splats: Splats, moves: &[(u32, glam::Affine3A)]) -> Splats {
+        match &self.origin {
+            Some(origin) => origin.move_splats(splats, moves),
+            None => splats,
+        }
+    }
+
+    /// Panics when the origin tags and `splats` differ in count; in debug and test builds only, after each
+    /// operation that changes the count. `move_by_origin` checks it in every build.
+    fn check_origin_rows(&self, splats: &Splats) {
+        if cfg!(any(debug_assertions, test))
+            && let Some(origin) = &self.origin
+        {
+            assert_eq!(
+                origin.len(),
+                splats.num_splats() as usize,
+                "origin tags out of step with the splats"
+            );
         }
     }
 
@@ -410,6 +447,15 @@ impl SplatTrainer {
     /// Otherwise the (absent) floor is a no-op as before. `new`'s own floor,
     /// if any, is always baked into its raw params before concatenation.
     pub fn append_splats(&mut self, splats: Splats, new: Splats) -> Splats {
+        self.append_tagged(splats, new, None)
+    }
+
+    /// [`Self::append_splats`] for the seeds of training view `slot`, so a correction of that view moves them.
+    pub fn append_splats_from(&mut self, splats: Splats, new: Splats, slot: u32) -> Splats {
+        self.append_tagged(splats, new, Some(slot))
+    }
+
+    fn append_tagged(&mut self, splats: Splats, new: Splats, slot: Option<u32>) -> Splats {
         let n = new.num_splats() as usize;
         if n == 0 {
             return splats;
@@ -467,6 +513,10 @@ impl SplatTrainer {
         if let Some(life) = self.evict.as_mut().and_then(|e| e.life.as_mut()) {
             life.pad(n);
         }
+        if let Some(origin) = self.origin.as_mut() {
+            origin.pad(n, slot);
+        }
+        self.check_origin_rows(&splats);
         splats
     }
 
@@ -611,9 +661,9 @@ impl SplatTrainer {
             // way). It under-composites transparent GT for a
             // synthetic/matted dataset with real alpha and the globe on —
             // out of scope here; see `docs/superpowers/notes/sh-globe.md`.
-            let composite_bg = (has_alpha && background != glam::Vec3::ZERO
-                && self.sh_background.is_none())
-            .then_some(background);
+            let composite_bg =
+                (has_alpha && background != glam::Vec3::ZERO && self.sh_background.is_none())
+                    .then_some(background);
             let cfg = ImageLossConfig {
                 l1_weight: l1_w,
                 ssim_weight: ssim_w,
@@ -655,14 +705,11 @@ impl SplatTrainer {
                     // already matches the photo, opacity there is a floater.
                     let gt_grid =
                         block_mean(brush_loss::unpack_gt_rgb(gt_packed.clone(), None), grid);
-                    let mask: Tensor<2> = Tensor::from_inner(background_match_mask(
-                        gt_grid,
-                        bg_grid.clone().inner(),
-                    ));
+                    let mask: Tensor<2> =
+                        Tensor::from_inner(background_match_mask(gt_grid, bg_grid.clone().inner()));
                     let alpha_grid = block_mean(alpha.clone(), grid).reshape([grid_h, grid_w]);
                     let covered = alpha_grid * mask.clone();
-                    globe_alpha_penalty =
-                        Some(covered.sum() / mask.sum().clamp_min(1.0) * weight);
+                    globe_alpha_penalty = Some(covered.sum() / mask.sum().clamp_min(1.0) * weight);
                 }
                 let composited = rgb + (1.0f32 - alpha.clone()) * bg_image;
                 Tensor::cat(vec![composited, alpha], 2)
@@ -944,8 +991,9 @@ impl SplatTrainer {
             .add_evictions(iter, &splats, &refiner, prune_mask)
             .await;
         let life = self.evict.as_mut().and_then(|e| e.life.as_mut());
+        let origin = self.origin.as_mut();
         let (mut splats, refiner, pruned_count) =
-            prune_points(splats, &mut optim, refiner, life, prune_mask).await;
+            prune_points(splats, &mut optim, refiner, life, origin, prune_mask).await;
         let num_dead = pruned_count.saturating_sub(num_evicted);
         let mut split_inds = HashSet::new();
         // After an eviction, the freed room goes to newly observed cells only.
@@ -1054,7 +1102,10 @@ impl SplatTrainer {
                     }
                 }
                 // Sampling is without replacement, so it needs that many candidates.
-                let candidates = weights.iter().filter(|w| w.is_finite() && **w > 0.0).count();
+                let candidates = weights
+                    .iter()
+                    .filter(|w| w.is_finite() && **w > 0.0)
+                    .count();
                 let grow_count = grow_count.min(candidates as u32);
                 if grow_count > 0 {
                     let growth_inds = multinomial_sample(&mut self.rng, &weights, grow_count);
@@ -1090,6 +1141,7 @@ impl SplatTrainer {
         }
 
         let splat_count = splats.num_splats();
+        self.check_origin_rows(&splats);
 
         (
             splats,
@@ -1225,6 +1277,9 @@ impl SplatTrainer {
                     Tensor::cat(vec![x, zeros], 0)
                 },
             );
+            if let Some(origin) = self.origin.as_mut() {
+                origin.split(opt_inds.clone());
+            }
             if let Some(life) = self.evict.as_mut().and_then(|e| e.life.as_mut()) {
                 life.split(opt_inds);
             }
@@ -1274,6 +1329,7 @@ async fn prune_points(
     optim: &mut SplatOptim,
     mut refiner: RefineRecord,
     life: Option<&mut SplatLife>,
+    origin: Option<&mut crate::origin::SplatOrigin>,
     prune: Tensor<1, Bool>,
 ) -> (Splats, RefineRecord, u32) {
     assert_eq!(
@@ -1311,6 +1367,9 @@ async fn prune_points(
         );
         if let Some(life) = life {
             life.keep(inner_valid_inds.clone());
+        }
+        if let Some(origin) = origin {
+            origin.keep(inner_valid_inds.clone());
         }
         refiner = refiner.keep(inner_valid_inds);
     }

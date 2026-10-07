@@ -223,6 +223,7 @@ async fn eviction_then_split_fills_to_growth_limit() {
         recent_refines: 2,
     });
     let (s, _) = trainer.step(batch(), base.train()).await;
+    trainer.track_origins(&s.valid(), 0);
     record_importance(&mut trainer, &importance());
     // A keyframe seeded the splats' cell, so their split demand is new.
     trainer.note_keyframe_seeds(&rows(s.means()).await.concat());
@@ -250,6 +251,19 @@ async fn eviction_then_split_fills_to_growth_limit() {
         assert!(imp[row][0] >= 6.0 && imp[..54].contains(&imp[row]));
     }
     assert!(age[..54].iter().all(|a| a[0] == 1.0));
+
+    // Every surviving splat and every split child carries view 0's tag: a move of view 0 reaches all 57.
+    let before = rows(s.means()).await;
+    let shift = glam::Affine3A::from_translation(glam::Vec3::new(0.0, 0.25, 0.0));
+    let s = trainer.move_by_origin(s, &[(0, shift)]);
+    let after = rows(s.means()).await;
+    assert_eq!(after.len(), 57);
+    for (a, b) in after.iter().zip(&before) {
+        assert!(
+            (a[1] - b[1] - 0.25).abs() < 1e-5 && a[0] == b[0] && a[2] == b[2],
+            "{a:?} vs {b:?}"
+        );
+    }
 
     let (s, _) = trainer.step(batch(), s.train()).await;
     assert_eq!(s.num_splats(), 57);

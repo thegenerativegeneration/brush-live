@@ -163,6 +163,7 @@ impl LiveModel {
             return false;
         }
         self.index.insert(kf.id, self.views.len());
+        let slot = self.views.len() as u32;
         kf.depth = kf.depth.map(|d| d.masked(self.config.min_depth_confidence));
         let size = UVec2::new(kf.image.width(), kf.image.height());
         self.view_cams
@@ -179,6 +180,9 @@ impl LiveModel {
                     self.config.seed,
                 );
                 trainer.set_view_cams(self.view_cams.clone());
+                if self.config.move_anchored_splats {
+                    trainer.track_origins(&init, slot);
+                }
                 trainer.set_profiling(self.config.profile_steps);
                 self.profiling = self.config.profile_steps;
                 if self.config.evict {
@@ -201,7 +205,7 @@ impl LiveModel {
                 // Set before appending so the new splats' Mip floor sees this view.
                 trainer.set_view_cams(self.view_cams.clone());
                 match new {
-                    Some(new) => trainer.append_splats(current, new),
+                    Some(new) => trainer.append_splats_from(current, new, slot),
                     None => current,
                 }
             }

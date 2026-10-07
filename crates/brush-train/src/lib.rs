@@ -11,6 +11,7 @@ pub mod train;
 
 mod adam_scaled;
 mod multinomial;
+mod origin;
 mod quat_vec;
 mod stats;
 
