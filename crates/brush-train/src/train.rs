@@ -30,9 +30,9 @@ use burn::{
     },
 };
 
-use crate::profile::{StepProfile, device_sync, lap};
 use hashbrown::HashSet;
 use rand::SeedableRng;
+use crate::profile::{StepProfile, device_sync, lap};
 use tracing::{Instrument, trace_span};
 
 pub const BOUND_PERCENTILE: f32 = 0.8;
@@ -316,6 +316,12 @@ impl SplatTrainer {
             Some(origin) => origin.move_splats(splats, moves),
             None => splats,
         }
+    }
+
+    /// Per splat, the view slot whose seeds created it (`None`: no origin); `None` while origins are not tracked.
+    /// Reads the tags back from the device.
+    pub async fn origin_slots(&self) -> Option<Vec<Option<u32>>> {
+        Some(self.origin.as_ref()?.slots().await)
     }
 
     /// Panics when the origin tags and `splats` differ in count; in debug and test builds only, after each
@@ -661,9 +667,9 @@ impl SplatTrainer {
             // way). It under-composites transparent GT for a
             // synthetic/matted dataset with real alpha and the globe on —
             // out of scope here; see `docs/superpowers/notes/sh-globe.md`.
-            let composite_bg =
-                (has_alpha && background != glam::Vec3::ZERO && self.sh_background.is_none())
-                    .then_some(background);
+            let composite_bg = (has_alpha && background != glam::Vec3::ZERO
+                && self.sh_background.is_none())
+            .then_some(background);
             let cfg = ImageLossConfig {
                 l1_weight: l1_w,
                 ssim_weight: ssim_w,
@@ -705,11 +711,14 @@ impl SplatTrainer {
                     // already matches the photo, opacity there is a floater.
                     let gt_grid =
                         block_mean(brush_loss::unpack_gt_rgb(gt_packed.clone(), None), grid);
-                    let mask: Tensor<2> =
-                        Tensor::from_inner(background_match_mask(gt_grid, bg_grid.clone().inner()));
+                    let mask: Tensor<2> = Tensor::from_inner(background_match_mask(
+                        gt_grid,
+                        bg_grid.clone().inner(),
+                    ));
                     let alpha_grid = block_mean(alpha.clone(), grid).reshape([grid_h, grid_w]);
                     let covered = alpha_grid * mask.clone();
-                    globe_alpha_penalty = Some(covered.sum() / mask.sum().clamp_min(1.0) * weight);
+                    globe_alpha_penalty =
+                        Some(covered.sum() / mask.sum().clamp_min(1.0) * weight);
                 }
                 let composited = rgb + (1.0f32 - alpha.clone()) * bg_image;
                 Tensor::cat(vec![composited, alpha], 2)
@@ -1102,10 +1111,7 @@ impl SplatTrainer {
                     }
                 }
                 // Sampling is without replacement, so it needs that many candidates.
-                let candidates = weights
-                    .iter()
-                    .filter(|w| w.is_finite() && **w > 0.0)
-                    .count();
+                let candidates = weights.iter().filter(|w| w.is_finite() && **w > 0.0).count();
                 let grow_count = grow_count.min(candidates as u32);
                 if grow_count > 0 {
                     let growth_inds = multinomial_sample(&mut self.rng, &weights, grow_count);

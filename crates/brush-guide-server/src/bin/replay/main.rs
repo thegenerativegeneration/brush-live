@@ -91,7 +91,14 @@ async fn main() -> anyhow::Result<()> {
         println!("transforms.json has no frames (empty segment); skipping");
         return Ok(());
     }
-    let points = feature_points(&args.dataset, &t);
+    // Live-pose replays send what the phone sent: live poses and the export's feature points, which stay on the live
+    // poses (see `correct`).
+    let (live_poses, points) = if args.live_poses {
+        let live = correct::live_capture(&args.dataset, &t)?;
+        (Some(live.poses), live.points)
+    } else {
+        (None, feature_points(&args.dataset, &t))
+    };
     let rec = match &args.save {
         _ if args.no_viz => rerun::RecordingStream::disabled(),
         Some(path) => rerun::RecordingStreamBuilder::new("capture-guidance-replay").save(path)?,
@@ -134,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let receiver = tokio::spawn(receiver.run(source));
 
-    send_keyframes(&args, &t, &points, &mut sink, &rec).await?;
+    send_keyframes(&args, &t, live_poses.as_deref(), &points, &mut sink, &rec).await?;
     if let Some(after) = args.finish_after {
         tokio::time::sleep_until(started + Duration::from_secs_f32(after)).await;
         sink.send(Message::binary(encode_frame(&ClientHeader::Finish, &[])))
@@ -149,10 +156,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Sends every frame of the export `args.loops` times at `args.rate` and logs
-/// the camera path.
+/// the camera path. With `live_poses`, each keyframe carries its frame's live pose instead of the refined one.
 async fn send_keyframes<S>(
     args: &Args,
     t: &Transforms,
+    live_poses: Option<&[[f32; 16]]>,
     points: &[Vec3],
     sink: &mut S,
     rec: &rerun::RecordingStream,
@@ -164,14 +172,10 @@ where
     let mut path_points = Vec::new();
     let mut warned_missing_conf = false;
     let mut mono_frames = 0usize;
-    let live = args
-        .live_poses
-        .then(|| correct::live_poses(&args.dataset, t))
-        .transpose()?;
     let frames = t.frames.iter().cycle().take(t.frames.len() * args.loops);
     for (i, f) in frames.enumerate() {
         let (header, jpeg) = keyframe_header(args, t, f, i)?;
-        let header = match &live {
+        let header = match live_poses {
             Some(poses) => KeyframeHeader {
                 pose: poses[i % poses.len()],
                 ..header
@@ -194,15 +198,7 @@ where
             ..header
         };
 
-        // Emulate ARKit feature points: dataset points visible in this frame.
-        let camera = brush_guide::keyframe::arkit_to_camera(&header)?;
-        let size = UVec2::new(header.width, header.height);
-        let visible: Vec<Vec3> = points
-            .iter()
-            .filter(|p| project(&camera, size, **p).is_some())
-            .take(args.points_per_frame)
-            .copied()
-            .collect();
+        let visible = visible_points(&header, points, args.points_per_frame)?;
         let mono = match args.mono {
             MonoMode::Off => None,
             MonoMode::On => load_mono(&args.dataset, f).unwrap_or_else(|e| {
@@ -245,6 +241,22 @@ where
         println!("{mono_frames} keyframes carried the phone's mono depth");
     }
     Ok(())
+}
+
+/// Emulates ARKit feature points: up to `max` of `points` that the keyframe's camera (its header pose) sees.
+fn visible_points(
+    header: &KeyframeHeader,
+    points: &[Vec3],
+    max: usize,
+) -> anyhow::Result<Vec<Vec3>> {
+    let camera = brush_guide::keyframe::arkit_to_camera(header)?;
+    let size = UVec2::new(header.width, header.height);
+    Ok(points
+        .iter()
+        .filter(|p| project(&camera, size, **p).is_some())
+        .take(max)
+        .copied()
+        .collect())
 }
 
 /// Frame `i`'s image as JPEG, scaled to `args.long_side`, and its header

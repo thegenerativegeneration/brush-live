@@ -32,6 +32,22 @@ impl SplatOrigin {
         self.rows.dims()[0]
     }
 
+    /// Each splat's seeding view slot, `None` without one; reads the tags back from the device.
+    pub(crate) async fn slots(&self) -> Vec<Option<u32>> {
+        let tags = self
+            .rows
+            .clone()
+            .into_data_async()
+            .await
+            .expect("origin tags readback")
+            .convert::<i32>()
+            .try_into_vec::<i32>()
+            .expect("int origin tags");
+        tags.into_iter()
+            .map(|t| (t > 0).then(|| t as u32 - 1))
+            .collect()
+    }
+
     /// `n` appended splats seeded by view `slot` (`None`: no origin).
     pub(crate) fn pad(&mut self, n: usize, slot: Option<u32>) {
         let new = Self::filled(n, slot, &self.rows.device());
@@ -77,6 +93,8 @@ impl SplatOrigin {
         let dt = per_splat.slice(s![.., 4..7]);
         splats.transforms = splats.transforms.map(|t| {
             let means = quaternion_vec_multiply(dq.clone(), t.clone().slice(s![.., 0..3])) + dt;
+            // q_Δ is a unit quaternion, so the product keeps |q|; stored rotations are unnormalised anyway (the
+            // render kernels normalise them).
             let rots = quat_mul(dq, t.clone().slice(s![.., 3..7]));
             Tensor::cat(vec![means, rots, t.slice(s![.., 7..10])], 1)
         });
@@ -130,10 +148,10 @@ mod tests {
             .expect("floats")
     }
 
-    fn three_splats(device: &Device) -> Splats {
+    fn three_splats(rotations: Vec<f32>, device: &Device) -> Splats {
         Splats::from_raw(
             vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 2.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0].repeat(3),
+            rotations,
             vec![-3.0; 9],
             vec![0.5; 9],
             vec![inverse_sigmoid(0.5); 3],
@@ -164,7 +182,11 @@ mod tests {
     #[tokio::test]
     async fn only_splats_of_moved_views_move() {
         let device: Device = brush_cube::test_helpers::test_device().await.into();
-        let splats = three_splats(&device);
+        // The moved splat starts tilted about x, so composing the turn in front differs from composing it behind.
+        let tilt = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let mut rotations = [1.0, 0.0, 0.0, 0.0].repeat(3);
+        rotations[4..8].copy_from_slice(&[tilt.w, tilt.x, tilt.y, tilt.z]);
+        let splats = three_splats(rotations, &device);
         let mut o = SplatOrigin::new(1, 0, &device);
         o.pad(1, Some(2));
         o.pad(1, None);
@@ -187,7 +209,11 @@ mod tests {
         assert!((means[7] - 2.0).abs() < 1e-5, "no origin stays: {means:?}");
         let rots = floats(moved.rotations()).await;
         let q1 = Quat::from_xyzw(rots[5], rots[6], rots[7], rots[4]);
-        assert!(q1.dot(turn).abs() > 1.0 - 1e-5, "{q1}");
+        assert!(
+            (turn * tilt).dot(tilt * turn).abs() < 0.9,
+            "the test needs non-commuting rotations"
+        );
+        assert!(q1.dot(turn * tilt).abs() > 1.0 - 1e-5, "{q1}");
         assert_eq!(&rots[0..4], &[1.0, 0.0, 0.0, 0.0]);
     }
 
@@ -195,7 +221,7 @@ mod tests {
     #[tokio::test]
     async fn splats_of_a_newer_unmoved_view_stay() {
         let device: Device = brush_cube::test_helpers::test_device().await.into();
-        let splats = three_splats(&device);
+        let splats = three_splats([1.0, 0.0, 0.0, 0.0].repeat(3), &device);
         let mut o = SplatOrigin::new(1, 0, &device);
         o.pad(2, Some(5));
         let shift = glam::Affine3A::from_translation(Vec3::new(0.0, 0.0, 0.25));

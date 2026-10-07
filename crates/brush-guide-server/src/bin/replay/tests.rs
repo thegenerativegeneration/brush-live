@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::correct::{correction_frame, live_poses, pose};
+use super::correct::{correction_frame, live_capture, pose};
 use super::dataset::{DepthMode, Frame, Transforms, load_depth, load_mono};
 use brush_guide::protocol::{ClientHeader, KeyframeHeader, decode_frame, encode_frame};
 
@@ -262,7 +262,56 @@ fn live_poses_must_list_the_same_frames() {
     let t = transforms(vec![frame_at("images/0.jpg", 0.5)]);
     let live = r#"{"fl_x":500,"frames":[{"file_path":"images/0.jpg","transform_matrix":[[1,0,0,0.2],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}]}"#;
     std::fs::write(dir.0.join("transforms_live.json"), live).unwrap();
-    assert_eq!(live_poses(&dir.0, &t).unwrap()[0][12], 0.2);
+    assert_eq!(live_capture(&dir.0, &t).unwrap().poses[0][12], 0.2);
     let other = transforms(vec![frame_at("images/9.jpg", 0.5)]);
-    assert!(live_poses(&dir.0, &other).is_err());
+    assert!(live_capture(&dir.0, &other).is_err());
+}
+
+/// A drifted frame of a refined export: its live pose sits 0.3 m right of the refined one, and points.ply (on the
+/// live poses) holds the surface point 2 m ahead of the live camera. The replay sends the point unchanged, and the
+/// keyframe's camera sees it at the image centre 2 m deep, where that frame's depth seeds the same surface: feature
+/// points, depth and pose agree. The refined camera would see it 75 px off.
+#[test]
+fn live_capture_keeps_feature_points_on_the_live_poses() {
+    let dir = TempDir::new("live-points");
+    let t = transforms(vec![frame_at("images/0.jpg", 0.0)]);
+    let live = r#"{"fl_x":500,"ply_file_path":"points.ply","frames":[{"file_path":"images/0.jpg","transform_matrix":[[1,0,0,0.3],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}]}"#;
+    std::fs::write(dir.0.join("transforms_live.json"), live).unwrap();
+    let ply = "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0.3 0 -2\n";
+    std::fs::write(dir.0.join("points.ply"), ply).unwrap();
+    let surface = glam::Vec3::new(0.3, 0.0, -2.0);
+
+    let capture = live_capture(&dir.0, &t).unwrap();
+    assert_eq!(capture.points, vec![surface]);
+    let header = |pose: [f32; 16]| KeyframeHeader {
+        pose,
+        fx: 500.0,
+        fy: 500.0,
+        cx: 320.0,
+        cy: 240.0,
+        width: 640,
+        height: 480,
+        ..wire_header(None)
+    };
+    let live_header = header(capture.poses[0]);
+    assert_eq!(
+        super::visible_points(&live_header, &capture.points, 10).unwrap(),
+        vec![surface]
+    );
+    let size = glam::UVec2::new(live_header.width, live_header.height);
+    let centre = glam::Vec2::new(live_header.cx, live_header.cy);
+    let seen = |h: &KeyframeHeader| {
+        let camera = brush_guide::keyframe::arkit_to_camera(h).unwrap();
+        brush_guide::seed::project(&camera, size, surface).unwrap()
+    };
+    let (px, depth) = seen(&live_header);
+    assert!(
+        (px - centre).length() < 1e-3 && (depth - 2.0).abs() < 1e-5,
+        "{px} at {depth} m"
+    );
+    let (px, _) = seen(&header(pose(&t.frames[0].transform_matrix)));
+    assert!(
+        (px - centre).length() > 70.0,
+        "the refined camera sees it at {px}"
+    );
 }

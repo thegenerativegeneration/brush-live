@@ -56,6 +56,12 @@ pub struct PoseUpdateStats {
 }
 
 impl LiveModel {
+    /// Per splat, the view (index into `views`) whose seeds created it, `None` for none; `None` when origins are
+    /// not tracked (`move_anchored_splats` off) or before the first keyframe.
+    pub async fn splat_origins(&self) -> Option<Vec<Option<u32>>> {
+        self.trainer.as_ref()?.origin_slots().await
+    }
+
     /// Moves views to corrected poses: the view's camera, its Mip-filter camera and, for the newest view, the
     /// protected cone, and moves the splats each moved view seeded by that view's correction (when
     /// `move_anchored_splats` is on); then rebuilds both loaders so no batch with an old camera is drawn again. The
