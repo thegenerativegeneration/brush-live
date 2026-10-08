@@ -535,6 +535,121 @@ mod tests {
         assert!(matches!(fit, ScaleFit::Rejected { scale, .. } if scale == 25.0));
     }
 
+    fn cam_at(position: Vec3, rotation: glam::Quat) -> Camera {
+        let fov = 90f64.to_radians();
+        Camera::new(position, rotation, fov, fov, glam::vec2(0.5, 0.5), CameraModel::Pinhole)
+    }
+
+    /// LiDAR map at 40×30 whose pixel values are the mono value at the same image fraction times `factor`.
+    fn lidar_from(mono: &DepthMap, factor: f32, confidence: Option<u8>) -> DepthMap {
+        let values = (0..1200)
+            .map(|i| {
+                let (x, y) = (i % 40, i / 40);
+                mono.sample_uv((x as f32 + 0.5) / 40.0, (y as f32 + 0.5) / 30.0).unwrap_or(1.0) * factor
+            })
+            .collect();
+        DepthMap { width: 40, height: 30, values, confidence: confidence.map(|c| vec![c; 1200]) }
+    }
+
+    fn constant_mono(value: f32) -> DepthMap {
+        DepthMap { width: 8, height: 6, values: vec![value; 48], confidence: None }
+    }
+
+    /// Mono map whose columns carry `columns`, repeated down 6 rows.
+    fn column_mono(columns: [f32; 8]) -> DepthMap {
+        DepthMap { width: 8, height: 6, values: (0..48).map(|i| columns[i % 8]).collect(), confidence: None }
+    }
+
+    /// Image-fraction samples at the centre of each of the eight mono columns, on the middle row.
+    fn column_uvs() -> Vec<[f32; 2]> {
+        (0..8).map(|c| [(c as f32 + 0.5) / 8.0, 0.5]).collect()
+    }
+
+    /// Feature points straight ahead of an identity camera whose depth over the (constant) mono value is `ratio`.
+    fn feature_points(mono_value: f32, ratio: f32) -> Vec<Vec3> {
+        (0..24).map(|i| Vec3::new((i % 5) as f32 * 0.01, (i / 5) as f32 * 0.01, mono_value * ratio)).collect()
+    }
+
+    struct Golden<'a> {
+        mono: &'a DepthMap,
+        lidar: Option<&'a DepthMap>,
+        camera: &'a Camera,
+        points: &'a [Vec3],
+        uvs: &'a [[f32; 2]],
+    }
+
+    fn golden_case(g: &Golden, config: &GuideConfig) -> serde_json::Value {
+        let (seed, fit) = mono_seed_for(Some(g.mono), g.lidar, g.camera, size(), g.points, config);
+        let depth_at: Vec<Option<f32>> =
+            g.uvs.iter().map(|uv| seed.as_ref().and_then(|s| s.depth_at(Vec2::new(uv[0], uv[1])))).collect();
+        let (kind, source, scale, samples) = match fit {
+            ScaleFit::Fitted { source, scale, samples } => ("fitted", source, scale, samples),
+            ScaleFit::Rejected { source, scale, samples } => ("rejected", source, scale, samples),
+            ScaleFit::Absent => unreachable!("mono is present and seeding is on"),
+        };
+        let source = match source {
+            ScaleSource::Lidar => "lidar",
+            ScaleSource::Features => "features",
+            ScaleSource::Metric => "metric",
+        };
+        // The phone's camera looks down -z with y up: its camera-to-world has the engine's y and z axes negated.
+        let rotation = glam::Mat3::from_quat(g.camera.rotation);
+        let columns = [rotation.x_axis, -rotation.y_axis, -rotation.z_axis, g.camera.position];
+        let camera_to_world: Vec<f32> =
+            columns.iter().flat_map(|c| [c.x, c.y, c.z, if *c == g.camera.position { 1.0 } else { 0.0 }]).collect();
+        serde_json::json!({
+            "mono": { "width": g.mono.width, "height": g.mono.height, "values": g.mono.values },
+            "lidar": g.lidar.map(|l| serde_json::json!({
+                "width": l.width, "height": l.height, "values": l.values, "confidence": l.confidence
+            })),
+            "camera_to_world_phone_column_major": camera_to_world,
+            "points_world": g.points.iter().map(|p| [p.x, p.y, p.z]).collect::<Vec<_>>(),
+            "fit": { "kind": kind, "source": source, "scale": scale, "samples": samples },
+            "min_depth_m": seed.as_ref().map(|s| s.min_depth_m),
+            "uvs": g.uvs,
+            "depth_at": depth_at,
+        })
+    }
+
+    /// Deterministic cases at the fit's and the seeding gate's boundaries.
+    fn edge_cases(config: &GuideConfig) -> Vec<serde_json::Value> {
+        let camera = cam();
+        let min_depth = config.mono_min_depth_with_lidar_m;
+        let (low, high) = config.mono_scale_range;
+        let mut cases = Vec::new();
+        let mut push = |mono: &DepthMap, lidar: Option<&DepthMap>, points: &[Vec3], uvs: &[[f32; 2]]| {
+            cases.push(golden_case(&Golden { mono, lidar, camera: &camera, points, uvs }, config));
+        };
+        // Feature fits just outside the range, and a LiDAR fit exactly on each bound (inclusive).
+        let flat = constant_mono(2.0);
+        push(&flat, None, &feature_points(2.0, low * 0.9997), &column_uvs());
+        push(&flat, None, &feature_points(2.0, high * 1.0001), &column_uvs());
+        push(&flat, None, &feature_points(2.0, low * 1.0003), &column_uvs());
+        let one = constant_mono(1.0);
+        push(&one, Some(&lidar_from(&one, low, Some(2))), &[], &column_uvs());
+        push(&one, Some(&lidar_from(&one, high, Some(2))), &[], &column_uvs());
+        // Scale 2 over large values: 60 and 52 pass the 100 m cap on the wrong side, 50 sits on it.
+        let large = column_mono([60.0, 52.0, 50.0, 49.9, 40.0, 2.0, 1.0, 0.1]);
+        push(&large, Some(&lidar_from(&large, 2.0, Some(2))), &[], &column_uvs());
+        // Scale 1 with depths around the LiDAR keyframe's minimum depth.
+        let near = column_mono([
+            min_depth * 0.9,
+            min_depth * 0.999,
+            min_depth,
+            min_depth * 1.001,
+            min_depth * 1.1,
+            0.0,
+            f32::MIN_POSITIVE,
+            min_depth * 2.0,
+        ]);
+        push(&near, Some(&lidar_from(&near, 1.0, Some(2))), &[], &column_uvs());
+        // The same depths without a LiDAR map have no minimum depth: the features fit scale 1.
+        push(&near, None, &feature_points(min_depth * 2.0, 1.0), &column_uvs());
+        // A LiDAR map without confidence counts every pixel.
+        push(&near, Some(&lidar_from(&near, 1.5, None)), &[], &column_uvs());
+        cases
+    }
+
     /// Writes the golden cases of the phone's Swift port (`MonoScaleFit`) to the path in `SWIFT_FIXTURE_OUT`
     /// (`tools/fixtures/mono_scale_fit.json` of the app repo). Run with
     /// `SWIFT_FIXTURE_OUT=… tools/cargo-host.sh test --crate brush-guide -- write_swift_fixture --ignored`.
@@ -547,16 +662,15 @@ mod tests {
             (state >> 8) as f32 / 16_777_216.0
         };
         let config = GuideConfig::default();
-        let camera = cam();
-        let focal = camera.focal(size());
-        let center = camera.center(size());
+        let focal = cam().focal(size());
+        let center = cam().center(size());
         let mut cases = Vec::new();
         for case in 0..36usize {
             let (mw, mh) = [(16u32, 12u32), (10, 5), (32, 24)][case % 3];
             let mono_values: Vec<f32> = (0..mw * mh)
                 .map(|_| if rnd() < 0.1 { 0.0 } else { 0.5 + 3.0 * rnd() })
                 .collect();
-            let mono = DepthMap { width: mw, height: mh, values: mono_values.clone(), confidence: None };
+            let mono = DepthMap { width: mw, height: mh, values: mono_values, confidence: None };
             let ratio = 0.2 + 3.2 * rnd();
             let lidar_share = [1.0f32, 0.5, 0.1, 0.0][case % 4];
             // 40×30 LiDAR (1200 pixels): with `lidar_share` 1 and confidence 2 on 80 % of them, well over the 200
@@ -573,47 +687,37 @@ mod tests {
                     (0..1200).map(|_| if rnd() < 0.8 { 2 } else { (rnd() * 2.0) as u8 }).collect();
                 DepthMap { width: 40, height: 30, values, confidence: Some(confidence) }
             });
-            let n_points = [0usize, 10, 25, 40][(case / 4) % 4];
+            // Every third camera is the identity; the others are rotated and translated.
+            let camera = if case % 3 == 0 {
+                cam()
+            } else {
+                let axis = Vec3::new(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).normalize();
+                let rotation = glam::Quat::from_axis_angle(axis, 6.0 * rnd() - 3.0);
+                cam_at(Vec3::new(10.0 * rnd() - 5.0, 10.0 * rnd() - 5.0, 10.0 * rnd() - 5.0), rotation)
+            };
+            // Points in front of the camera, a fifth of them behind it, placed in world space.
+            let n_points = [0usize, 10, 40, 60][(case / 4) % 4];
             let points: Vec<Vec3> = (0..n_points)
                 .map(|_| {
-                    let z = 1.0 + 7.0 * rnd();
-                    Vec3::new((rnd() - 0.5) * 1.6 * z, (rnd() - 0.5) * 1.6 * z, z)
+                    let z = if rnd() < 0.2 { -1.0 - 3.0 * rnd() } else { 1.0 + 7.0 * rnd() };
+                    let local = Vec3::new((rnd() - 0.5) * 1.6 * z, (rnd() - 0.5) * 1.6 * z, z);
+                    camera.local_to_world().transform_point3(local)
                 })
                 .collect();
-            let (seed, fit) = mono_seed_for(Some(&mono), lidar.as_ref(), &camera, size(), &points, &config);
-            let uvs: Vec<[f32; 2]> = (0..6).map(|_| [rnd(), rnd()]).collect();
-            let depth_at: Vec<Option<f32>> =
-                uvs.iter().map(|uv| seed.as_ref().and_then(|s| s.depth_at(Vec2::new(uv[0], uv[1])))).collect();
-            let (kind, source, scale, samples) = match fit {
-                ScaleFit::Fitted { source, scale, samples } => ("fitted", source, scale, samples),
-                ScaleFit::Rejected { source, scale, samples } => ("rejected", source, scale, samples),
-                ScaleFit::Absent => unreachable!("mono is present and seeding is on"),
-            };
-            let source = match source {
-                ScaleSource::Lidar => "lidar",
-                ScaleSource::Features => "features",
-                ScaleSource::Metric => "metric",
-            };
-            cases.push(serde_json::json!({
-                "mono": { "width": mw, "height": mh, "values": mono_values },
-                "lidar": lidar.as_ref().map(|l| serde_json::json!({
-                    "width": l.width, "height": l.height, "values": l.values, "confidence": l.confidence
-                })),
-                "points_camera_y_down_z_forward": points.iter().map(|p| [p.x, p.y, p.z]).collect::<Vec<_>>(),
-                "fit": { "kind": kind, "source": source, "scale": scale, "samples": samples },
-                "min_depth_m": seed.as_ref().map(|s| s.min_depth_m),
-                "uvs": uvs,
-                "depth_at": depth_at,
-            }));
+            let uvs: Vec<[f32; 2]> = (0..12).map(|_| [rnd(), rnd()]).collect();
+            let g = Golden { mono: &mono, lidar: lidar.as_ref(), camera: &camera, points: &points, uvs: &uvs };
+            cases.push(golden_case(&g, &config));
         }
+        cases.extend(edge_cases(&config));
         let fixture = serde_json::json!({
             "image": { "width": size().x, "height": size().y, "fx": focal.x, "fy": focal.y, "cx": center.x, "cy": center.y },
             "min_confidence": config.min_depth_confidence,
             "range": [config.mono_scale_range.0, config.mono_scale_range.1],
             "min_depth_with_lidar_m": config.mono_min_depth_with_lidar_m,
+            "case_count": cases.len(),
             "cases": cases,
         });
         let path = std::env::var("SWIFT_FIXTURE_OUT").expect("set SWIFT_FIXTURE_OUT to the fixture's path");
-        std::fs::write(path, serde_json::to_string_pretty(&fixture).unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_string(&fixture).unwrap()).unwrap();
     }
 }
