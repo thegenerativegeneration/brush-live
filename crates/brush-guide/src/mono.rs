@@ -534,4 +534,86 @@ mod tests {
         assert!(seed.is_none());
         assert!(matches!(fit, ScaleFit::Rejected { scale, .. } if scale == 25.0));
     }
+
+    /// Writes the golden cases of the phone's Swift port (`MonoScaleFit`) to the path in `SWIFT_FIXTURE_OUT`
+    /// (`tools/fixtures/mono_scale_fit.json` of the app repo). Run with
+    /// `SWIFT_FIXTURE_OUT=… tools/cargo-host.sh test --crate brush-guide -- write_swift_fixture --ignored`.
+    #[test]
+    #[ignore]
+    fn write_swift_fixture() {
+        let mut state = 0x2545_f491u32;
+        let mut rnd = move || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / 16_777_216.0
+        };
+        let config = GuideConfig::default();
+        let camera = cam();
+        let focal = camera.focal(size());
+        let center = camera.center(size());
+        let mut cases = Vec::new();
+        for case in 0..36usize {
+            let (mw, mh) = [(16u32, 12u32), (10, 5), (32, 24)][case % 3];
+            let mono_values: Vec<f32> = (0..mw * mh)
+                .map(|_| if rnd() < 0.1 { 0.0 } else { 0.5 + 3.0 * rnd() })
+                .collect();
+            let mono = DepthMap { width: mw, height: mh, values: mono_values.clone(), confidence: None };
+            let ratio = 0.2 + 3.2 * rnd();
+            let lidar_share = [1.0f32, 0.5, 0.1, 0.0][case % 4];
+            // 40×30 LiDAR (1200 pixels): with `lidar_share` 1 and confidence 2 on 80 % of them, well over the 200
+            // samples a LiDAR fit needs; the smaller shares fall back to features or the metric scale.
+            let lidar = (case % 6 != 5).then(|| {
+                let values: Vec<f32> = (0..1200)
+                    .map(|i| {
+                        let (x, y) = (i % 40, i / 40);
+                        let m = mono.sample_uv((x as f32 + 0.5) / 40.0, (y as f32 + 0.5) / 30.0).unwrap_or(1.0);
+                        if rnd() < lidar_share { m * ratio * (0.9 + 0.2 * rnd()) } else { 0.0 }
+                    })
+                    .collect();
+                let confidence: Vec<u8> =
+                    (0..1200).map(|_| if rnd() < 0.8 { 2 } else { (rnd() * 2.0) as u8 }).collect();
+                DepthMap { width: 40, height: 30, values, confidence: Some(confidence) }
+            });
+            let n_points = [0usize, 10, 25, 40][(case / 4) % 4];
+            let points: Vec<Vec3> = (0..n_points)
+                .map(|_| {
+                    let z = 1.0 + 7.0 * rnd();
+                    Vec3::new((rnd() - 0.5) * 1.6 * z, (rnd() - 0.5) * 1.6 * z, z)
+                })
+                .collect();
+            let (seed, fit) = mono_seed_for(Some(&mono), lidar.as_ref(), &camera, size(), &points, &config);
+            let uvs: Vec<[f32; 2]> = (0..6).map(|_| [rnd(), rnd()]).collect();
+            let depth_at: Vec<Option<f32>> =
+                uvs.iter().map(|uv| seed.as_ref().and_then(|s| s.depth_at(Vec2::new(uv[0], uv[1])))).collect();
+            let (kind, source, scale, samples) = match fit {
+                ScaleFit::Fitted { source, scale, samples } => ("fitted", source, scale, samples),
+                ScaleFit::Rejected { source, scale, samples } => ("rejected", source, scale, samples),
+                ScaleFit::Absent => unreachable!("mono is present and seeding is on"),
+            };
+            let source = match source {
+                ScaleSource::Lidar => "lidar",
+                ScaleSource::Features => "features",
+                ScaleSource::Metric => "metric",
+            };
+            cases.push(serde_json::json!({
+                "mono": { "width": mw, "height": mh, "values": mono_values },
+                "lidar": lidar.as_ref().map(|l| serde_json::json!({
+                    "width": l.width, "height": l.height, "values": l.values, "confidence": l.confidence
+                })),
+                "points_camera_y_down_z_forward": points.iter().map(|p| [p.x, p.y, p.z]).collect::<Vec<_>>(),
+                "fit": { "kind": kind, "source": source, "scale": scale, "samples": samples },
+                "min_depth_m": seed.as_ref().map(|s| s.min_depth_m),
+                "uvs": uvs,
+                "depth_at": depth_at,
+            }));
+        }
+        let fixture = serde_json::json!({
+            "image": { "width": size().x, "height": size().y, "fx": focal.x, "fy": focal.y, "cx": center.x, "cy": center.y },
+            "min_confidence": config.min_depth_confidence,
+            "range": [config.mono_scale_range.0, config.mono_scale_range.1],
+            "min_depth_with_lidar_m": config.mono_min_depth_with_lidar_m,
+            "cases": cases,
+        });
+        let path = std::env::var("SWIFT_FIXTURE_OUT").expect("set SWIFT_FIXTURE_OUT to the fixture's path");
+        std::fs::write(path, serde_json::to_string_pretty(&fixture).unwrap()).unwrap();
+    }
 }
