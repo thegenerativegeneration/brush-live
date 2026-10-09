@@ -82,10 +82,12 @@ impl Receiver {
                 num_splats,
                 train_iters_per_s,
                 last_score_ms,
+                adam_clamped,
+                sh_pruned,
                 ..
             } => {
                 eprintln!(
-                    "status: {num_keyframes} keyframes, {num_splats} splats, {train_iters_per_s:.1} it/s, score {last_score_ms} ms"
+                    "status: {num_keyframes} keyframes, {num_splats} splats, {train_iters_per_s:.1} it/s, score {last_score_ms} ms, adam clamped {adam_clamped}, sh pruned {sh_pruned}"
                 );
                 log_status(&self.rec, num_splats, train_iters_per_s, last_score_ms);
             }

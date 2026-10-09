@@ -106,6 +106,12 @@ pub enum ServerHeader {
         uptime_ms: u64,
         #[serde(default)]
         throttle_ms: u64,
+        /// Optimizer elements whose step was clamped since the session started (inconsistent optimizer state).
+        #[serde(default)]
+        adam_clamped: u64,
+        /// Splats pruned for a diverged colour since the session started.
+        #[serde(default)]
+        sh_pruned: u64,
     },
     Splat {
         ply_len: u64,

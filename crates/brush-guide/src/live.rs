@@ -139,6 +139,16 @@ impl LiveModel {
         self.num_evicted
     }
 
+    /// Optimizer elements whose step was clamped since the model started, counted up to the last refine.
+    pub fn adam_clamped(&self) -> u64 {
+        self.trainer.as_ref().map_or(0, SplatTrainer::adam_clamped)
+    }
+
+    /// Splats refine pruned for a diverged colour since the model started.
+    pub fn sh_pruned(&self) -> u64 {
+        self.trainer.as_ref().map_or(0, SplatTrainer::sh_pruned)
+    }
+
     /// The trainer's eviction importance in current splat order; `None`
     /// without eviction or before training starts.
     pub async fn importance(&self) -> Option<Vec<f32>> {

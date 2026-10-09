@@ -67,6 +67,10 @@ pub struct StatusMsg {
     /// Training iterations since the session started.
     pub train_iters: u64,
     pub times: WorkerTimes,
+    /// Optimizer elements whose step was clamped since the session started, counted up to the last refine.
+    pub adam_clamped: u64,
+    /// Splats refine pruned for a diverged colour since the session started.
+    pub sh_pruned: u64,
 }
 
 impl StatusMsg {
@@ -85,6 +89,8 @@ impl StatusMsg {
                 fisher_ms: self.times.fisher_ms,
                 uptime_ms: self.times.uptime_ms,
                 throttle_ms: self.times.throttle_ms,
+                adam_clamped: self.adam_clamped,
+                sh_pruned: self.sh_pruned,
             },
             &[],
         )

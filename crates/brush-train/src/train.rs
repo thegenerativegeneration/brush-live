@@ -39,6 +39,11 @@ pub const BOUND_PERCENTILE: f32 = 0.8;
 
 const MIN_OPACITY: f32 = 1.0 / 255.0;
 
+/// Refine prunes splats whose DC colour coefficient exceeds this in any channel. Colours in [0, 1] need
+/// |sh0| ≤ 0.5 / C0 ≈ 1.8; beyond 20 the colour has diverged (corrupted optimizer state) and the splat, saturated
+/// black or white, would only block the view and the seeding behind it.
+const MAX_SH0: f32 = 20.0;
+
 /// Fraction of training after which the Mip-Splatting 3D-filter floor stops
 /// being recomputed and is held frozen (still applied), so splats settle
 /// against a fixed target instead of chasing a moving floor.
@@ -111,6 +116,10 @@ pub struct SplatTrainer {
     /// `sh_background::pixel_centres`); directions are rebuilt from it on the
     /// GPU each step, so nothing per view is cached.
     sh_pixel_centres: Option<(glam::UVec2, Tensor<2>)>,
+    /// Optimizer elements whose step hit `adam_scaled::MAX_NORMALIZED_STEP`, read back at each refine.
+    adam_clamped: u64,
+    /// Splats refine pruned for a diverged colour (|sh0| > [`MAX_SH0`]).
+    sh_pruned: u64,
 }
 
 /// `(l1, ssim)` kernel weights for `step` (1-based). The RGB loss is
@@ -236,6 +245,8 @@ impl SplatTrainer {
             origin: None,
             sh_background,
             sh_pixel_centres: None,
+            adam_clamped: 0,
+            sh_pruned: 0,
             profile: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
@@ -251,6 +262,17 @@ impl SplatTrainer {
     /// The phase times since the last call; `None` when profiling is off.
     pub fn take_profile(&mut self) -> Option<StepProfile> {
         self.profile.as_mut().map(std::mem::take)
+    }
+
+    /// Optimizer elements whose step was clamped since training started, counted up to the last refine; nonzero
+    /// means the optimizer state was inconsistent (see `adam_scaled::MAX_NORMALIZED_STEP`).
+    pub fn adam_clamped(&self) -> u64 {
+        self.adam_clamped
+    }
+
+    /// Splats refine pruned for a diverged colour since training started.
+    pub fn sh_pruned(&self) -> u64 {
+        self.sh_pruned
     }
 
     /// Percentile bounding box of the splats, refreshed on each refine.
@@ -952,6 +974,21 @@ impl SplatTrainer {
             .optim
             .take()
             .expect("Can only refine after optimizer is initialized");
+        let clamped = [
+            optim.transforms.take_clamped(),
+            optim.sh_coeffs.take_clamped(),
+            optim.opacities.take_clamped(),
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(|a, b| a + b);
+        if let Some(clamped) = clamped {
+            let n = clamped
+                .into_scalar_async::<i64>()
+                .await
+                .expect("Failed to count clamped optimizer steps");
+            self.adam_clamped += n.max(0) as u64;
+        }
         let alpha_mask = splats.opacities().lower_elem(MIN_OPACITY);
         let scales = splats.scales();
 
@@ -983,6 +1020,25 @@ impl SplatTrainer {
         let sh_bad = row_non_finite(&splats.sh_coeffs.val().flatten(1, 2));
         let opac_bad = row_non_finite(&splats.raw_opacities.val().unsqueeze_dim(1));
         let non_finite_mask = transforms_bad.bool_or(sh_bad).bool_or(opac_bad);
+        let n = splats.num_splats() as usize;
+        let sh_diverged = splats
+            .sh_coeffs
+            .val()
+            .slice(s![.., 0..1, ..])
+            .reshape([n, 3])
+            .abs()
+            .greater_elem(MAX_SH0)
+            .any_dim(1)
+            .squeeze_dim(1)
+            .bool_and(non_finite_mask.clone().bool_not());
+        let num_pruned_sh = sh_diverged
+            .clone()
+            .int()
+            .sum()
+            .into_scalar_async::<i32>()
+            .await
+            .expect("Failed to count diverged colours") as u32;
+        self.sh_pruned += u64::from(num_pruned_sh);
         let num_pruned_non_finite = non_finite_mask
             .clone()
             .int()
@@ -994,7 +1050,8 @@ impl SplatTrainer {
         let prune_mask = alpha_mask
             .bool_or(scale_big)
             .bool_or(bound_mask)
-            .bool_or(non_finite_mask);
+            .bool_or(non_finite_mask)
+            .bool_or(sh_diverged);
 
         let (prune_mask, num_evicted) = self
             .add_evictions(iter, &splats, &refiner, prune_mask)
@@ -1526,6 +1583,10 @@ mod append_tests {
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "train_evict_tests.rs"]
 mod evict_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "train_divergence_tests.rs"]
+mod divergence_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "profile_tests.rs"]

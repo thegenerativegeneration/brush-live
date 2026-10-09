@@ -1,4 +1,11 @@
-use burn::tensor::{ElementConversion, Tensor};
+use burn::tensor::{ElementConversion, Int, Tensor};
+
+/// Largest |m̂ / (√v̂ + ε)| one step may take, before the learning rate. Consistent moments stay below
+/// `(1 - β1) / √(1 - β2) · √k ≈ 3.2 · √k` for a second moment reduced over `k` elements (about 11 for the 12 SH
+/// coefficients of degree 1; healthy replays measure at most 12.5 without bias correction). A larger value means the
+/// moments are inconsistent, e.g. an aborted GPU command buffer left `v` unwritten (zero): dividing by ε = 1e-15
+/// would then move the parameter by ~1e12 · m̂ per step.
+pub(crate) const MAX_NORMALIZED_STEP: f32 = 32.0;
 
 /// Adam with per-parameter second-moment reduction (via [`AdamState::reduce_moment_2`])
 /// and per-component learning-rate scaling (via [`AdamState::scaling`]).
@@ -38,6 +45,9 @@ pub(crate) struct AdamState<const D: usize> {
     /// caller when initializing state for parameters where per-element variance
     /// is not needed.
     pub reduce_moment_2: bool,
+    /// Elements whose step hit [`MAX_NORMALIZED_STEP`] since the last [`Self::take_clamped`], summed on the device so
+    /// counting needs no readback per step.
+    pub clamped: Option<Tensor<1, Int>>,
 }
 
 impl<const D: usize> AdamState<D> {
@@ -46,7 +56,13 @@ impl<const D: usize> AdamState<D> {
             momentum: None,
             scaling,
             reduce_moment_2,
+            clamped: None,
         }
+    }
+
+    /// The clamped-element count since the last call (a `[1]` tensor), `None` if no step ran since.
+    pub fn take_clamped(&mut self) -> Option<Tensor<1, Int>> {
+        self.clamped.take()
     }
 
     /// Apply `map_fn` to both momentum tensors (no-op before the first step).
@@ -77,6 +93,9 @@ impl AdamScaled {
     /// produce it more cheaply than squaring `grad`. It must equal what
     /// `mean_trailing_dims(grad * grad)` would give, and is only read when
     /// [`AdamState::reduce_moment_2`] is set.
+    ///
+    /// The normalized step `m̂ / (√v̂ + ε)` is clamped to ±[`MAX_NORMALIZED_STEP`] and the clamped elements are
+    /// counted in [`AdamState::clamped`].
     pub fn step<const D: usize>(
         &self,
         lr: f64,
@@ -92,6 +111,17 @@ impl AdamScaled {
             state.reduce_moment_2,
         );
         state.momentum = Some(momentum);
+        let over = grad
+            .clone()
+            .abs()
+            .greater_elem(MAX_NORMALIZED_STEP)
+            .int()
+            .sum();
+        state.clamped = Some(match state.clamped.take() {
+            Some(count) => count + over,
+            None => over,
+        });
+        let grad = grad.clamp(-MAX_NORMALIZED_STEP, MAX_NORMALIZED_STEP);
 
         let delta = if let Some(scale) = &state.scaling {
             grad * (scale.clone() * lr).unsqueeze()
@@ -169,4 +199,38 @@ fn mean_trailing_dims<const D: usize>(t: Tensor<D>) -> Tensor<D> {
     // burn's fusion block.
     let dims: Vec<usize> = (1..D).collect();
     t.sum_dims(&dims) / trailing_count as f32
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+    use burn::tensor::Device;
+
+    /// A first moment with a zero second moment (an output an aborted GPU command buffer left unwritten) and no
+    /// gradient: the step stays within `MAX_NORMALIZED_STEP · lr` instead of dividing by the epsilon.
+    #[tokio::test]
+    async fn zero_second_moment_step_is_bounded() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let adam = AdamScaled::new(1e-15);
+        let mut state = AdamState::<2>::new(None, true);
+        state.momentum = Some(MomentumState {
+            moment_1: Tensor::full([4, 3], 1e-3, &device),
+            moment_2: Tensor::zeros([4, 1], &device),
+            time: 100,
+        });
+        let lr = 2e-3;
+        let param = Tensor::<2>::zeros([4, 3], &device);
+        let grad = Tensor::<2>::zeros([4, 3], &device);
+        let stepped = adam.step(lr, param, &grad, None, &mut state);
+        let moved = stepped
+            .abs()
+            .max()
+            .into_data_async()
+            .await
+            .expect("readback")
+            .try_into_vec::<f32>()
+            .expect("f32")[0];
+        let bound = MAX_NORMALIZED_STEP * lr as f32;
+        assert!(moved <= bound * 1.001, "moved {moved}, bound {bound}");
+    }
 }

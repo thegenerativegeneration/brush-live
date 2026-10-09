@@ -561,6 +561,8 @@ impl Worker {
                 last_score_ms: self.last_score_ms,
                 train_iters: u64::from(self.live.iter()),
                 times: self.totals_s.to_times(),
+                adam_clamped: self.live.adam_clamped(),
+                sh_pruned: self.live.sh_pruned(),
             });
         } else {
             publish_counts(&self.channels.status, &self.live);
