@@ -194,12 +194,14 @@ fn history_cases() -> Vec<serde_json::Value> {
                     "lidar" => ScaleSource::Lidar,
                     "features" => ScaleSource::Features,
                     "recent" => ScaleSource::Recent,
-                    _ => ScaleSource::Metric,
+                    "metric" | "none" => ScaleSource::Metric,
+                    other => unreachable!("unknown source {other:?} in the history sequences"),
                 };
                 let fit = match kind {
                     "fitted" => ScaleFit::Fitted { source: source_enum, scale, samples: 1 },
                     "rejected" => ScaleFit::Rejected { source: source_enum, scale, samples: 1 },
-                    _ => ScaleFit::Absent,
+                    "absent" => ScaleFit::Absent,
+                    other => unreachable!("unknown kind {other:?} in the history sequences"),
                 };
                 history.note(&fit);
                 fits.push(serde_json::json!({ "kind": kind, "source": source, "scale": scale }));
