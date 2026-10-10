@@ -46,10 +46,11 @@ struct Golden<'a> {
     camera: &'a Camera,
     points: &'a [Vec3],
     uvs: &'a [[f32; 2]],
+    recent: Option<f32>,
 }
 
 fn golden_case(g: &Golden, config: &GuideConfig) -> serde_json::Value {
-    let (seed, fit) = mono_seed_for(Some(g.mono), g.lidar, g.camera, size(), g.points, config);
+    let (seed, fit) = mono_seed_for(Some(g.mono), g.lidar, g.camera, size(), g.points, config, g.recent);
     let depth_at: Vec<Option<f32>> =
         g.uvs.iter().map(|uv| seed.as_ref().and_then(|s| s.depth_at(Vec2::new(uv[0], uv[1])))).collect();
     let (kind, source, scale, samples) = match fit {
@@ -61,13 +62,14 @@ fn golden_case(g: &Golden, config: &GuideConfig) -> serde_json::Value {
         ScaleSource::Lidar => "lidar",
         ScaleSource::Features => "features",
         ScaleSource::Metric => "metric",
+        ScaleSource::Recent => "recent",
     };
     // The phone's camera looks down -z with y up: its camera-to-world has the engine's y and z axes negated.
     let rotation = glam::Mat3::from_quat(g.camera.rotation);
     let columns = [rotation.x_axis, -rotation.y_axis, -rotation.z_axis, g.camera.position];
     let camera_to_world: Vec<f32> =
         columns.iter().flat_map(|c| [c.x, c.y, c.z, if *c == g.camera.position { 1.0 } else { 0.0 }]).collect();
-    serde_json::json!({
+    let mut case = serde_json::json!({
         "mono": { "width": g.mono.width, "height": g.mono.height, "values": g.mono.values },
         "lidar": g.lidar.map(|l| serde_json::json!({
             "width": l.width, "height": l.height, "values": l.values, "confidence": l.confidence
@@ -78,7 +80,12 @@ fn golden_case(g: &Golden, config: &GuideConfig) -> serde_json::Value {
         "min_depth_m": seed.as_ref().map(|s| s.min_depth_m),
         "uvs": g.uvs,
         "depth_at": depth_at,
-    })
+    });
+    // Only the recent-scale cases carry the key, so the older cases keep their bytes.
+    if let Some(recent) = g.recent {
+        case["recent"] = serde_json::json!(recent);
+    }
+    case
 }
 
 /// Deterministic cases at the fit's and the seeding gate's boundaries.
@@ -88,7 +95,7 @@ fn edge_cases(config: &GuideConfig) -> Vec<serde_json::Value> {
     let (low, high) = config.mono_scale_range;
     let mut cases = Vec::new();
     let mut push = |mono: &DepthMap, lidar: Option<&DepthMap>, points: &[Vec3], uvs: &[[f32; 2]]| {
-        cases.push(golden_case(&Golden { mono, lidar, camera: &camera, points, uvs }, config));
+        cases.push(golden_case(&Golden { mono, lidar, camera: &camera, points, uvs, recent: None }, config));
     };
     // Feature fits just outside the range, and a LiDAR fit exactly on each bound (inclusive).
     let flat = constant_mono(2.0);
@@ -118,6 +125,89 @@ fn edge_cases(config: &GuideConfig) -> Vec<serde_json::Value> {
     // A LiDAR map without confidence counts every pixel.
     push(&near, Some(&lidar_from(&near, 1.5, None)), &[], &column_uvs());
     cases
+}
+
+/// Cases where `recent` is set: too few samples use it, enough samples ignore it.
+fn recent_cases(config: &GuideConfig) -> Vec<serde_json::Value> {
+    let camera = cam();
+    let flat = constant_mono(2.0);
+    let one = constant_mono(1.0);
+    let few_lidar = {
+        let mut lidar = lidar_from(&flat, 1.5, Some(2));
+        lidar.values.iter_mut().skip(100).for_each(|v| *v = 0.0);
+        lidar
+    };
+    let uvs = column_uvs();
+    let mut cases = Vec::new();
+    let mut push = |mono: &DepthMap, lidar: Option<&DepthMap>, points: &[Vec3], recent: f32| {
+        let g = Golden { mono, lidar, camera: &camera, points, uvs: &uvs, recent: Some(recent) };
+        cases.push(golden_case(&g, config));
+    };
+    // Too few samples: none at all, 19 feature points, 100 LiDAR pixels.
+    push(&flat, None, &[], 0.7);
+    push(&flat, None, &feature_points(2.0, 1.5)[..19], 0.7);
+    push(&flat, Some(&few_lidar), &[], 0.7);
+    // A recent scale outside the range is used as given.
+    push(&flat, None, &[], 5.0);
+    // Enough features or LiDAR pixels: the fit ignores it.
+    push(&flat, None, &feature_points(2.0, 1.5), 0.7);
+    push(&one, Some(&lidar_from(&one, 1.5, Some(2))), &[], 0.7);
+    // A feature fit outside the range is rejected, not replaced by the recent scale.
+    push(&flat, None, &feature_points(2.0, config.mono_scale_range.1 * 1.0001), 0.7);
+    // Recent scale with large mono values: the seeding cap applies to the scaled depth.
+    let large = column_mono([60.0, 52.0, 50.0, 49.9, 40.0, 2.0, 1.0, 0.1]);
+    push(&large, None, &[], 2.0);
+    cases
+}
+
+/// A fit as the history sees it: kind, source, scale.
+type HistoryFit = (&'static str, &'static str, f32);
+
+/// Sequences of fits fed to the scale history, with its median after each.
+fn history_cases() -> Vec<serde_json::Value> {
+    let fitted = |source, scale| ("fitted", source, scale);
+    let ramp: Vec<HistoryFit> = (1..=25).map(|i| fitted("features", i as f32 * 0.1)).collect();
+    let sequences: Vec<Vec<HistoryFit>> = vec![
+        vec![
+            fitted("metric", 1.0),
+            fitted("recent", 0.5),
+            ("rejected", "lidar", 9.0),
+            ("absent", "none", 0.0),
+            fitted("lidar", 0.8),
+            fitted("recent", 0.1),
+            fitted("metric", 1.0),
+            fitted("features", 1.2),
+            ("rejected", "features", 0.01),
+            fitted("lidar", 0.4),
+        ],
+        ramp,
+        vec![fitted("lidar", 3.0), fitted("features", 1.0), fitted("lidar", 2.0), fitted("features", 2.0)],
+    ];
+    sequences
+        .into_iter()
+        .map(|seq| {
+            let mut history = ScaleHistory::default();
+            let mut fits = Vec::new();
+            let mut medians = Vec::new();
+            for &(kind, source, scale) in &seq {
+                let source_enum = match source {
+                    "lidar" => ScaleSource::Lidar,
+                    "features" => ScaleSource::Features,
+                    "recent" => ScaleSource::Recent,
+                    _ => ScaleSource::Metric,
+                };
+                let fit = match kind {
+                    "fitted" => ScaleFit::Fitted { source: source_enum, scale, samples: 1 },
+                    "rejected" => ScaleFit::Rejected { source: source_enum, scale, samples: 1 },
+                    _ => ScaleFit::Absent,
+                };
+                history.note(&fit);
+                fits.push(serde_json::json!({ "kind": kind, "source": source, "scale": scale }));
+                medians.push(history.median());
+            }
+            serde_json::json!({ "fits": fits, "medians": medians })
+        })
+        .collect()
 }
 
 /// Writes the golden cases of the phone's Swift port (`MonoScaleFit`) to the path in `SWIFT_FIXTURE_OUT`
@@ -175,7 +265,7 @@ fn write_swift_fixture() {
             })
             .collect();
         let uvs: Vec<[f32; 2]> = (0..12).map(|_| [rnd(), rnd()]).collect();
-        let g = Golden { mono: &mono, lidar: lidar.as_ref(), camera: &camera, points: &points, uvs: &uvs };
+        let g = Golden { mono: &mono, lidar: lidar.as_ref(), camera: &camera, points: &points, uvs: &uvs, recent: None };
         cases.push(golden_case(&g, &config));
     }
     cases.extend(edge_cases(&config));
@@ -186,6 +276,9 @@ fn write_swift_fixture() {
         "min_depth_with_lidar_m": config.mono_min_depth_with_lidar_m,
         "case_count": cases.len(),
         "cases": cases,
+        "recent_cases": recent_cases(&config),
+        "history_len": ScaleHistory::LEN,
+        "history_cases": history_cases(),
     });
     let path = std::env::var("SWIFT_FIXTURE_OUT").expect("set SWIFT_FIXTURE_OUT to the fixture's path");
     std::fs::write(path, serde_json::to_string(&fixture).unwrap()).unwrap();

@@ -1,6 +1,6 @@
 use crate::config::GuideConfig;
 use crate::keyframe::DecodedKeyframe;
-use crate::mono::{MonoSeed, ScaleFit, mono_seed_for};
+use crate::mono::{MonoSeed, ScaleFit, ScaleHistory, mono_seed_for};
 use crate::seed::{SeedInput, Seeds, seed_points, stride_for};
 use brush_dataset::config::LoadDatasetConfig;
 use brush_dataset::scene::{Scene, SceneBatch, SceneView, view_to_packed_data};
@@ -52,6 +52,9 @@ pub struct LiveModel {
     /// View index by keyframe id.
     index: HashMap<u64, usize>,
     last_id: Option<u64>,
+    /// Scales of the last LiDAR / feature mono fits over the whole capture,
+    /// for keyframes with too few samples of their own.
+    scale_history: ScaleHistory,
     recent: Option<SceneLoader>,
     all: Option<SceneLoader>,
     /// Views in the recent loader; those after `views_in_recent` are in no
@@ -97,6 +100,7 @@ impl LiveModel {
             view_cams: Vec::new(),
             index: HashMap::new(),
             last_id: None,
+            scale_history: ScaleHistory::default(),
             recent: None,
             all: None,
             recent_len: 0,
@@ -305,19 +309,24 @@ impl LiveModel {
         }
     }
 
+    /// The keyframe's mono seeding input; records its fit in the scale
+    /// history, so call it exactly once per keyframe.
     fn mono_input<'a>(
-        &self,
+        &mut self,
         kf: &'a DecodedKeyframe,
         size: UVec2,
     ) -> (Option<MonoSeed<'a>>, ScaleFit) {
-        mono_seed_for(
+        let (seed, fit) = mono_seed_for(
             kf.mono.as_ref(),
             kf.depth.as_ref(),
             &kf.camera,
             size,
             &kf.points,
             &self.config,
-        )
+            self.scale_history.median(),
+        );
+        self.scale_history.note(&fit);
+        (seed, fit)
     }
 
     /// Seed grid spacing for a keyframe decoded at `size`.
