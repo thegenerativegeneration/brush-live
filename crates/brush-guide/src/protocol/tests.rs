@@ -443,3 +443,12 @@ fn poses_header_parses_the_apps_json() {
     assert_eq!(poses[0].id, 2);
     assert_eq!(poses[0].pose[12..15], [0.5, 0.0, -1.0]);
 }
+
+#[test]
+fn wire_frame_number_takes_bin_files_only() {
+    use std::path::Path;
+    assert_eq!(super::wire_frame_number(Path::new("wire/42.bin")), Some(42));
+    assert_eq!(super::wire_frame_number(Path::new("wire/42.stable")), None);
+    assert_eq!(super::wire_frame_number(Path::new("wire/42.farmono")), None);
+    assert_eq!(super::wire_frame_number(Path::new("wire/x.bin")), None);
+}

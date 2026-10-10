@@ -9,6 +9,15 @@ pub use cells::{
     oct_decode, oct_encode,
 };
 
+/// The keyframe number of a segment's wire frame file `wire/<n>.bin`; None for any other file (`<n>.stable`,
+/// `<n>.farmono` sidecars).
+pub fn wire_frame_number(path: &std::path::Path) -> Option<u64> {
+    if path.extension()? != "bin" {
+        return None;
+    }
+    path.file_stem()?.to_str()?.parse().ok()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
     #[error("frame too short")]

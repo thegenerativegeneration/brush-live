@@ -86,7 +86,7 @@ fn load_frames(wire_dir: &Path, width: u32) -> anyhow::Result<Vec<Frame>> {
         .with_context(|| format!("reading {}", wire_dir.display()))?
         .filter_map(|e| {
             let path = e.ok()?.path();
-            let n = path.file_stem()?.to_str()?.parse().ok()?;
+            let n = brush_guide::protocol::wire_frame_number(&path)?;
             Some((n, path))
         })
         .collect();
