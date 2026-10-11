@@ -23,6 +23,9 @@ use std::ops::Range;
 mod poses;
 pub use poses::{PoseUpdateStats, ViewPose};
 
+#[cfg(test)]
+mod scale_history_tests;
+
 /// `LoadDatasetConfig` is a clap `Args` group; this wrapper parses its CLI defaults.
 #[derive(Parser)]
 struct LoadArgs {
@@ -52,8 +55,8 @@ pub struct LiveModel {
     /// View index by keyframe id.
     index: HashMap<u64, usize>,
     last_id: Option<u64>,
-    /// Scales of the last LiDAR / feature mono fits over the whole capture,
-    /// for keyframes with too few samples of their own.
+    /// Scales of the last LiDAR / feature mono fits, for keyframes with too
+    /// few samples of their own; `reset` keeps it.
     scale_history: ScaleHistory,
     recent: Option<SceneLoader>,
     all: Option<SceneLoader>,
@@ -113,6 +116,21 @@ impl LiveModel {
             profiling: false,
             rng,
         }
+    }
+
+    /// Starts over from no keyframes with the same config and device, but
+    /// keeps the mono scale history: a scale relates the network's depth to
+    /// camera depth and does not depend on the segment's world.
+    pub fn reset(&mut self) {
+        let history = std::mem::take(&mut self.scale_history);
+        *self = Self::new(self.config.clone(), self.device.clone());
+        self.scale_history = history;
+    }
+
+    /// The scale a keyframe with too few samples of its own would use
+    /// (`ScaleSource::Recent`), `None` before the first LiDAR or feature fit.
+    pub fn scale_median(&self) -> Option<f32> {
+        self.scale_history.median()
     }
 
     pub fn splats(&self) -> Option<&Splats> {

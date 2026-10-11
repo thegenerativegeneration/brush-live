@@ -83,8 +83,9 @@ impl fmt::Display for ScaleFit {
 
 /// The scales of the last `LEN` LiDAR or feature fits, for keyframes whose
 /// own samples are too few. A scale relates the network's depth to camera
-/// depth and does not depend on the segment's world, so one history lives
-/// for the whole capture.
+/// depth and does not depend on the segment's world, so `LiveModel::reset`
+/// keeps its history: one history per engine, and the phone makes one
+/// engine per capture.
 #[derive(Clone, Debug, Default)]
 pub struct ScaleHistory {
     scales: VecDeque<f32>,

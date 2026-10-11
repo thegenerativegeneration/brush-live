@@ -422,13 +422,14 @@ impl Worker {
         result
     }
 
-    /// Clears everything but the score set version, which keeps counting.
+    /// Clears everything but the score set version, which keeps counting,
+    /// and the mono scale history (`LiveModel::reset`).
     fn reset(&mut self) {
         for held in self.held.drain(..) {
             held.reset();
         }
         let config = &self.config;
-        self.live = LiveModel::new(config.clone(), self.device.clone());
+        self.live.reset();
         self.holdout = Holdout::new(config.holdout_every, config.eval_interval_s);
         self.voxels.reset();
         self.voxel_cadence = voxel_cadence(config);
