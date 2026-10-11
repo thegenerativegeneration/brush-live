@@ -27,7 +27,7 @@ rerun = { workspace = true }
 
 [dev-dependencies]
 brush-async = { path = "../brush-async" }
-brush-cube = { path = "../brush-cube" }
+brush-cube = { path = "../brush-cube", features = ["autotune"] }
 
 # `inspect` is how the fusion test reads back what burn fused.
 burn-fusion = { workspace = true, features = ["test-util"] }

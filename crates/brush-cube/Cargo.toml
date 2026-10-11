@@ -33,3 +33,7 @@ workspace = true
 #
 # Use it on real hardware: `cargo test --features brush-cube/metal`.
 metal = ["burn-wgpu/metal"]
+
+# Benchmark kernel variants on first use and keep the fastest. Host apps only: on iOS the results cannot be stored,
+# so every launch would pay for the benchmarks.
+autotune = ["burn-wgpu/autotune", "burn-cubecl/autotune"]
