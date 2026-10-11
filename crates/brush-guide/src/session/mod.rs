@@ -1,6 +1,6 @@
 mod frames;
 mod preview;
-mod splat_read;
+pub(crate) mod splat_read;
 #[cfg(test)]
 mod tests;
 mod worker;

@@ -16,7 +16,7 @@ pub(super) async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
 }
 
 /// Splat parameters read back once per round, flat per splat.
-pub(super) struct SplatRead {
+pub(crate) struct SplatRead {
     pub(super) means: Vec<f32>,
     pub(super) opac: Vec<f32>,
     pub(super) rots: Vec<f32>,
@@ -24,7 +24,7 @@ pub(super) struct SplatRead {
 }
 
 impl SplatRead {
-    pub(super) async fn new(splats: &Splats) -> Self {
+    pub(crate) async fn new(splats: &Splats) -> Self {
         Self {
             means: read_f32(splats.means()).await,
             opac: read_f32(splats.opacities()).await,

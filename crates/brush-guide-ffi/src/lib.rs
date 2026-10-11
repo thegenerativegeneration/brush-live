@@ -344,9 +344,10 @@ pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
 
 /// Runs the session warm-up to completion. `config_json` is read as in
 /// `bge_new`. Returns 0 on success, 1 on a config error, no GPU adapter or a
-/// panic in the warm-up. The tuning is kept in memory by the process-wide
-/// device, so later sessions reuse it. While any engine is paused, the
-/// warm-up waits between splat counts.
+/// panic in the warm-up. It compiles the kernels of every warm-up size (and
+/// tunes them where autotune is enabled) on the process-wide device, so later
+/// sessions reuse them. While any engine is paused, the warm-up waits between
+/// splat counts.
 ///
 /// # Safety
 /// `config_json` is NUL-terminated UTF-8.
@@ -371,6 +372,19 @@ pub unsafe extern "C" fn bge_warm_up(config_json: *const c_char) -> i32 {
     drop(warmup);
     runtime.shutdown_background();
     i32::from(!done)
+}
+
+/// Writes the warm-up's progress: sizes done and sizes in total of the warm-up running now (0, 0 before any).
+///
+/// # Safety
+/// `done` and `total` are valid for writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bge_warm_up_progress(done: *mut u32, total: *mut u32) {
+    let (d, t) = brush_guide::warmup::progress();
+    unsafe {
+        *done = d;
+        *total = t;
+    }
 }
 
 /// Stops the session and frees the engine; `out` is not called afterwards.

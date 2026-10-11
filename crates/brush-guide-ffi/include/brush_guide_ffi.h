@@ -30,10 +30,10 @@ void bge_reset(BgeEngine *engine, uint64_t generation);
 // running on another thread pauses too, between sizes, until every paused engine is resumed or freed.
 void bge_pause(BgeEngine *engine);
 void bge_resume(BgeEngine *engine);
-// Runs the session warm-up (GPU autotuning at the configured splat budget and keyframe size) and
-// returns when it is done: 0 on success, 1 on a config error, no GPU or a failed warm-up. Takes the
-// same config JSON as bge_new (including gpu_autotune_level / gpu_autotune_samples) and uses the same
-// process-wide GPU device, so a later bge_new reuses the tuning. Blocking: call it from a background
+// Runs the session warm-up (compiles the kernels of every warm-up size up to the configured splat budget
+// and keyframe size, and tunes them where autotune is enabled) and returns when it is done: 0 on success,
+// 1 on a config error, no GPU or a failed warm-up. Takes the same config JSON as bge_new and uses the same
+// process-wide GPU device, so a later bge_new reuses the kernels. Blocking: call it from a background
 // thread, not from inside out. May run while a capture's bge_new / bge_push are running; the device
 // setup is shared and guarded.
 int32_t bge_warm_up(const char *config_json);
@@ -60,3 +60,5 @@ void bge_preview_release(const void *handle);
 // Stops the engine; out is not called after it returns. No other bge_* call may
 // be in progress on any thread.
 void bge_free(BgeEngine *engine);
+// Sizes done and sizes in total of the warm-up running now (0 and 0 before any); poll it while bge_warm_up runs.
+void bge_warm_up_progress(uint32_t *done, uint32_t *total);

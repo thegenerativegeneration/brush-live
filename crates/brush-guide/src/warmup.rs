@@ -1,9 +1,11 @@
-//! GPU warm-up at server start. cubecl autotunes a kernel the first time it
-//! runs at a new size bucket (powers of two of the splat count), which costs
-//! seconds per bucket on a cold cache. Running the session's GPU work once
-//! per bucket on dummy splats fills the cache (in memory, and on disk under
-//! the server's working directory) before a phone connects. Only training
-//! is warmed; the optional finish-time Fisher pass tunes on first use.
+//! GPU warm-up at server start. Kernels compile the first time they run at a
+//! new size bucket (powers of two of the splat count, from 128, so small seed
+//! sets find theirs compiled). Running the session's GPU work once per
+//! bucket on dummy splats compiles them before a phone connects. Where
+//! autotune is enabled (host builds), the same run also tunes them and fills
+//! the cache in memory and on disk under the server's working directory.
+//! Only training and the voxel round's readback are warmed; the optional
+//! finish-time Fisher pass runs on first use.
 
 use crate::config::GuideConfig;
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};
@@ -18,6 +20,7 @@ use burn::tensor::Device;
 use clap::Parser as _;
 use glam::{UVec2, Vec3};
 use rand::{RngExt as _, SeedableRng};
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::watch;
 use web_time::Instant;
 
@@ -99,15 +102,38 @@ impl Warmup {
     }
 }
 
-/// Smallest splat count warmed; sessions start from a few thousand seeds.
-const MIN_SPLATS: u32 = 1 << 12;
+/// Smallest splat count warmed; a capture can start from a few hundred seeds.
+const MIN_SPLATS: u32 = 1 << 7;
+
+static PROGRESS_DONE: AtomicU32 = AtomicU32::new(0);
+static PROGRESS_TOTAL: AtomicU32 = AtomicU32::new(0);
+
+/// Sizes done and sizes in total of the warm-up running now (or the last one).
+pub fn progress() -> (u32, u32) {
+    (
+        PROGRESS_DONE.load(Ordering::Relaxed),
+        PROGRESS_TOTAL.load(Ordering::Relaxed),
+    )
+}
+
+fn reset_progress(total: u32) {
+    PROGRESS_DONE.store(0, Ordering::Relaxed);
+    PROGRESS_TOTAL.store(total, Ordering::Relaxed);
+}
+
+fn step_progress() {
+    let total = PROGRESS_TOTAL.load(Ordering::Relaxed);
+    let _ = PROGRESS_DONE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| {
+        (d < total).then_some(d + 1)
+    });
+}
 
 /// Keyframe size warmed: landscape 4:3 at `long_side`, as ARKit images are.
 pub fn warmup_image(long_side: u32) -> UVec2 {
     UVec2::new(long_side, long_side * 3 / 4)
 }
 
-/// Splat counts to warm: one per autotune bucket from `MIN_SPLATS` up to
+/// Splat counts to warm: one per size bucket from `MIN_SPLATS` up to
 /// the bucket holding `max_splats`, the last one at `max_splats` itself.
 pub fn warmup_sizes(max_splats: u32) -> Vec<u32> {
     let max_splats = max_splats.max(MIN_SPLATS);
@@ -138,14 +164,19 @@ async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&
         CameraModel::Pinhole,
     );
     let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
-    for n in warmup_sizes(config.max_splats) {
+    let sizes = warmup_sizes(config.max_splats);
+    reset_progress(sizes.len() as u32);
+    for n in sizes {
         if let Some(gate) = gate.as_deref_mut() {
             gate.pass().await;
         }
         let t = Instant::now();
         let splats = dummy_splats(n, &camera, &mut rng, &device.clone().inner())
             .with_sh_degree(config.sh_degree);
-        let _ = train_steps(config, device, splats, &camera, image, &mut rng).await;
+        let trained = train_steps(config, device, splats, &camera, image, &mut rng).await;
+        // The voxel round reads the splat parameters back each round.
+        let _ = crate::session::splat_read::SplatRead::new(&trained).await;
+        step_progress();
         log::info!(
             "warm-up: {n} splats in {:.0} ms",
             t.elapsed().as_secs_f64() * 1e3
@@ -241,14 +272,24 @@ mod tests {
     }
 
     #[test]
-    fn sizes_cover_each_bucket_up_to_the_budget() {
+    fn sizes_start_small_and_end_at_the_budget() {
         assert_eq!(
-            warmup_sizes(750_000),
-            vec![
-                4096, 8192, 16384, 32768, 65536, 131_072, 262_144, 524_288, 750_000
-            ]
+            warmup_sizes(25_000),
+            vec![128, 256, 512, 1024, 2048, 4096, 8192, 16384, 25_000]
         );
-        assert_eq!(warmup_sizes(1 << 14), vec![4096, 8192, 16384]);
-        assert_eq!(warmup_sizes(100), vec![4096]);
+        assert_eq!(*warmup_sizes(50_000).last().unwrap(), 50_000);
+        assert_eq!(warmup_sizes(1 << 14).last(), Some(&16384));
+        assert_eq!(warmup_sizes(100), vec![128]);
+    }
+
+    #[test]
+    fn progress_counts_sizes_and_never_passes_the_total() {
+        reset_progress(3);
+        assert_eq!(progress(), (0, 3));
+        step_progress();
+        step_progress();
+        step_progress();
+        step_progress();
+        assert_eq!(progress(), (3, 3));
     }
 }
