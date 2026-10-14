@@ -58,18 +58,12 @@ async fn keyframes_initialise_grow_and_train() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// `position_scale_cap_m` reaches the trainer: the last step's position scale stays within the cap and scales
-/// the mean LR.
+/// The last step's mean LR is the base LR times its position scale, the bounds' median size.
 #[tokio::test]
-async fn position_scale_cap_bounds_the_last_steps_scale() {
+async fn last_step_lr_is_scaled_by_the_bounds_median_size() {
     let device = test_scene::device().await.autodiff();
-    let dir = tmp("pscap");
-    let cap = 0.05;
-    let config = GuideConfig {
-        position_scale_cap_m: cap,
-        ..GuideConfig::default()
-    };
-    let mut live = LiveModel::new(config, device);
+    let dir = tmp("steplr");
+    let mut live = LiveModel::new(GuideConfig::default(), device);
     assert_eq!(live.last_step_lr(), (0.0, 0.0));
     let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
     live.add_keyframe(decode_keyframe(&h, &p, &dir).await.unwrap())
@@ -77,8 +71,32 @@ async fn position_scale_cap_bounds_the_last_steps_scale() {
     live.train_step().await;
     let (lr, scale) = live.last_step_lr();
     let base = brush_train::config::TrainConfig::default().lr_mean;
-    assert!(scale > 0.0 && scale <= cap, "position scale {scale}");
+    assert!(scale > 0.0, "position scale {scale}");
     assert!((lr - base * f64::from(scale)).abs() < base * 1e-6, "lr_mean {lr}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// `train_radius_m` reaches the trainer: a step with the radius on reports its masked count, off reports none.
+#[tokio::test]
+async fn train_radius_reaches_the_trainer() {
+    let device = test_scene::device().await.autodiff();
+    let dir = tmp("radius");
+    for (radius, want_some) in [(0.0, false), (0.01, true)] {
+        let config = GuideConfig {
+            train_radius_m: radius,
+            ..GuideConfig::default()
+        };
+        let mut live = LiveModel::new(config, device.clone());
+        let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+        live.add_keyframe(decode_keyframe(&h, &p, &dir).await.unwrap())
+            .await;
+        live.train_step().await;
+        let masked = live.masked_by_radius().await;
+        assert_eq!(masked.is_some(), want_some, "radius {radius}: {masked:?}");
+        if let Some(n) = masked {
+            assert!(n > 0, "radius {radius}: nothing beyond 1 cm of the camera");
+        }
+    }
     std::fs::remove_dir_all(dir).ok();
 }
 

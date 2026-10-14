@@ -93,7 +93,7 @@ impl LiveModel {
         train_config.sh_background = config.sh_background;
         train_config.sh_background_alpha_weight = config.sh_background_alpha_weight;
         train_config.ssim_every = config.ssim_every;
-        train_config.position_scale_cap_m = config.position_scale_cap_m;
+        train_config.train_radius_m = config.train_radius_m;
         let mut load_config = LoadArgs::parse_from(["brush-guide"]).load;
         load_config.max_scene_batch_cache_size = config.loader_cache_bytes;
         let rng = rand::rngs::StdRng::seed_from_u64(config.seed);
@@ -173,6 +173,14 @@ impl LiveModel {
         self.trainer.as_ref().map_or(0, SplatTrainer::adam_clamped)
     }
 
+    /// Splats the last training step left alone for lying beyond `train_radius_m`; `None` with the radius off or
+    /// before the first step.
+    pub async fn masked_by_radius(&self) -> Option<u32> {
+        let count = self.trainer.as_ref()?.masked_by_radius()?;
+        let data = count.into_data_async().await.ok()?.convert::<i64>();
+        data.try_to_vec::<i64>().ok()?.first().map(|&n| n as u32)
+    }
+
     /// Splats refine pruned for a diverged colour since the model started.
     pub fn sh_pruned(&self) -> u64 {
         self.trainer.as_ref().map_or(0, SplatTrainer::sh_pruned)
@@ -208,8 +216,8 @@ impl LiveModel {
         self.refine_total_s * 1e3
     }
 
-    /// Mean LR and position scale in metres (the bounds' median size, capped by `position_scale_cap_m`) of the
-    /// last training step; zeros before the first.
+    /// Mean LR and position scale in metres (the bounds' median size, which scales the mean LR and clamps the
+    /// position noise) of the last training step; zeros before the first.
     pub fn last_step_lr(&self) -> (f64, f32) {
         self.last_step_lr
     }
@@ -536,7 +544,7 @@ impl LiveModel {
         if self.profiling {
             self.batch_s += t_batch.elapsed().as_secs_f64();
         }
-        let position_scale = trainer.position_scale();
+        let position_scale = trainer.bounds().median_size();
         let (stepped, stats) = trainer.step(batch, splats.train()).await;
         self.last_step_lr = (stats.lr_mean, position_scale);
         let mut splats = stepped.valid();

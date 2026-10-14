@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use super::correct::{correction_frame, live_capture, pose};
@@ -319,9 +320,10 @@ fn live_capture_keeps_feature_points_on_the_live_poses() {
 #[test]
 fn send_order_walks_back_without_the_last_frame_and_skips_forward_held_frames() {
     use crate::order::send_order;
-    assert_eq!(send_order(3, 1, false, None), vec![(0, 0), (1, 1), (2, 2)]);
+    let none = HashSet::new();
+    assert_eq!(send_order(3, 1, false, None, &none), vec![(0, 0), (1, 1), (2, 2)]);
     assert_eq!(
-        send_order(5, 1, true, None),
+        send_order(5, 1, true, None, &none),
         vec![
             (0, 0),
             (1, 1),
@@ -335,14 +337,36 @@ fn send_order_walks_back_without_the_last_frame_and_skips_forward_held_frames() 
         ]
     );
     // Forward frames 1 and 3 are held out with holdout_every 2; the walk back leaves them out.
-    let back: Vec<_> = send_order(5, 1, true, Some(2))
+    let back: Vec<_> = send_order(5, 1, true, Some(2), &none)
         .into_iter()
         .skip(5)
         .collect();
     assert_eq!(back, vec![(6, 2), (8, 0)]);
     // After two loops the return ids start above every forward id.
-    let two = send_order(3, 2, true, None);
+    let two = send_order(3, 2, true, None, &none);
     assert_eq!(&two[6..], &[(6, 1), (7, 0)]);
+}
+
+#[test]
+fn dropped_frames_are_never_sent_and_held_frames_follow_the_send_count() {
+    use crate::order::send_order;
+    let dropped: HashSet<usize> = [2, 3].into();
+    let order = send_order(8, 1, true, Some(2), &dropped);
+    // Forward ids stay frame indices; frames 1, 5 and 7 go out as the 2nd, 4th and 6th keyframe (held out with
+    // holdout_every 2), so the walk back leaves them out along with the dropped ones.
+    assert_eq!(
+        order,
+        vec![(0, 0), (1, 1), (4, 4), (5, 5), (6, 6), (7, 7), (8, 6), (10, 4), (14, 0)]
+    );
+}
+
+#[test]
+fn drop_ranges_parse() {
+    use crate::order::parse_frame_range;
+    assert_eq!(parse_frame_range("485-520"), Ok(485..=520));
+    assert_eq!(parse_frame_range("7"), Ok(7..=7));
+    assert!(parse_frame_range("9-3").is_err());
+    assert!(parse_frame_range("a-3").is_err());
 }
 
 #[test]

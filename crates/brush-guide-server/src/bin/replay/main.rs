@@ -92,6 +92,10 @@ struct Args {
     /// the server's `holdout_every`, so their images are never trained on.
     #[arg(long, requires = "return_pass")]
     return_skip_every: Option<usize>,
+    /// Never send these frames of transforms.json, forward or back: inclusive `A-B` ranges or single indices,
+    /// comma-separated or repeated. The other frames keep their ids.
+    #[arg(long, value_delimiter = ',', value_parser = order::parse_frame_range)]
+    drop_frames: Vec<std::ops::RangeInclusive<usize>>,
 }
 
 #[tokio::main]
@@ -184,7 +188,8 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Sends the frames in [`order::send_order`] (the export `args.loops` times, then the walk back with `--return`) at
+/// Sends the frames in [`order::send_order`] (the export `args.loops` times, then the walk back with `--return`,
+/// without `--drop-frames`) at
 /// `args.rate`, keyframe k at [`order::send_time`] after `started`, and logs the camera path. With `live_poses`, each keyframe carries its frame's live pose instead of
 /// the refined one.
 async fn send_keyframes<S>(
@@ -203,11 +208,26 @@ where
     let mut path_points = Vec::new();
     let mut warned_missing_conf = false;
     let mut mono_frames = 0usize;
+    let dropped: std::collections::HashSet<usize> =
+        args.drop_frames.iter().cloned().flatten().collect();
+    if !dropped.is_empty() {
+        let outside = dropped.iter().filter(|&&j| j >= t.frames.len()).count();
+        println!(
+            "dropping {} frames{}",
+            dropped.len() - outside,
+            if outside > 0 {
+                format!(" ({outside} given indices lie past the last frame)")
+            } else {
+                String::new()
+            }
+        );
+    }
     let order = order::send_order(
         t.frames.len(),
         args.loops,
         args.return_pass,
         args.return_skip_every,
+        &dropped,
     );
     for (k, (id, frame)) in order.into_iter().enumerate() {
         tokio::time::sleep_until(started + order::send_time(k, args.rate)).await;

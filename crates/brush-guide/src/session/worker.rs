@@ -437,6 +437,7 @@ impl Worker {
             lr_mean: self.live.last_step_lr().0,
             position_scale_m: self.live.last_step_lr().1,
             adam_clamped: self.live.adam_clamped(),
+            masked_by_radius: self.live.masked_by_radius().await,
             extras,
             views: r.per_view.clone(),
         };

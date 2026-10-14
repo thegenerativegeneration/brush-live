@@ -24,11 +24,11 @@ pub struct TrainConfig {
     #[arg(long, help_heading = "Training options", default_value = "50.0")]
     pub mean_noise_weight: f32,
 
-    /// Upper bound, in metres, of the scene size that scales the mean LR and clamps the position noise (the
-    /// splat bounds' median size). 0: no bound.
+    /// Splats whose mean lies farther than this many metres from the training camera get no update in that step:
+    /// parameters and Adam moments stay as they are. 0: every splat steps.
     #[arg(long, help_heading = "Training options", default_value = "0")]
     #[serde(default)]
-    pub position_scale_cap_m: f32,
+    pub train_radius_m: f32,
 
     /// Learning rate for the base SH (RGB) coefficients.
     #[arg(long, help_heading = "Training options", default_value = "2e-3")]

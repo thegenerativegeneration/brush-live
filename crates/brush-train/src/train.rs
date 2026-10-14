@@ -61,7 +61,7 @@ struct SplatOptim {
 
 /// Step one parameter: pull its gradient, run Adam on the inner
 /// (autodiff-free) tensor, and re-wrap tracking. Parameters without a
-/// gradient this step are left untouched.
+/// gradient this step are left untouched, and so are the rows set in `frozen`.
 fn step_param<const D: usize>(
     adam: &AdamScaled,
     lr: f64,
@@ -69,12 +69,13 @@ fn step_param<const D: usize>(
     state: &mut AdamState<D>,
     grads: &mut Gradients,
     grad_sq_mean: Option<Tensor<D>>,
+    frozen: Option<&Tensor<1, Bool>>,
 ) -> Param<Tensor<D>> {
     param.map(|t| {
         let Some(grad) = t.grad_remove(grads) else {
             return t;
         };
-        let stepped = adam.step(lr, t.inner(), &grad, grad_sq_mean, state);
+        let stepped = adam.step(lr, t.inner(), &grad, grad_sq_mean, state, frozen);
         Tensor::from_inner(stepped).require_grad()
     })
 }
@@ -120,6 +121,9 @@ pub struct SplatTrainer {
     adam_clamped: u64,
     /// Splats refine pruned for a diverged colour (|sh0| > [`MAX_SH0`]).
     sh_pruned: u64,
+    /// Splats the last step left alone for lying beyond `train_radius_m` (a `[1]` tensor); `None` with the radius
+    /// off.
+    masked_by_radius: Option<Tensor<1, Int>>,
 }
 
 /// `(l1, ssim)` kernel weights for `step` (1-based). The RGB loss is
@@ -164,6 +168,18 @@ fn compute_min_scale(
         });
     }
     min_ratio.map(|r| r.mul_scalar(factor.sqrt()))
+}
+
+/// `[N]` flags of the `means` (`[N, 3]`, inner backend) farther than `radius` from `center`.
+fn beyond_radius(means: Tensor<2>, center: glam::Vec3, radius: f32) -> Tensor<1, Bool> {
+    let n = means.dims()[0];
+    let c = Tensor::<1>::from_floats([center.x, center.y, center.z], &means.device()).reshape([1, 3]);
+    let diff = means - c;
+    diff.clone()
+        .mul(diff)
+        .sum_dim(1)
+        .reshape([n])
+        .greater_elem(radius * radius)
 }
 
 pub async fn get_splat_bounds(splats: Splats, percentile: f32) -> BoundingBox {
@@ -247,6 +263,7 @@ impl SplatTrainer {
             sh_pixel_centres: None,
             adam_clamped: 0,
             sh_pruned: 0,
+            masked_by_radius: None,
             profile: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
@@ -270,6 +287,12 @@ impl SplatTrainer {
         self.adam_clamped
     }
 
+    /// How many splats the last step left alone for lying beyond `train_radius_m` (a `[1]` tensor, read back by
+    /// the caller); `None` with the radius off or before the first step.
+    pub fn masked_by_radius(&self) -> Option<Tensor<1, Int>> {
+        self.masked_by_radius.clone()
+    }
+
     /// Splats refine pruned for a diverged colour since training started.
     pub fn sh_pruned(&self) -> u64 {
         self.sh_pruned
@@ -278,14 +301,6 @@ impl SplatTrainer {
     /// Percentile bounding box of the splats, refreshed on each refine.
     pub fn bounds(&self) -> BoundingBox {
         self.bounds
-    }
-
-    /// Scene size in metres that scales the mean LR and clamps the position noise: the bounds' median size,
-    /// at most `position_scale_cap_m` when that is set.
-    pub fn position_scale(&self) -> f32 {
-        let size = self.bounds.median_size();
-        let cap = self.config.position_scale_cap_m;
-        if cap > 0.0 { size.min(cap) } else { size }
     }
 
     /// Supply per-train-view (world center, focal-px at native res) to enable
@@ -623,7 +638,7 @@ impl SplatTrainer {
             &mut self.rng,
         );
 
-        let median_scale = self.position_scale();
+        let median_scale = self.bounds.median_size();
 
         let lr_mean = self.config.lr_mean
             * self.lr_mean_decay.powi(self.step_count as i32 - 1)
@@ -856,6 +871,15 @@ impl SplatTrainer {
 
         optimizer.transforms.scaling = Some(lr_scaling);
 
+        let frozen = (self.config.train_radius_m > 0.0).then(|| {
+            beyond_radius(
+                splats.means().inner(),
+                camera.position,
+                self.config.train_radius_m,
+            )
+        });
+        self.masked_by_radius = frozen.as_ref().map(|f| f.clone().int().sum());
+
         splats = trace_span!("Optimizer step").in_scope(|| {
             splats.transforms = trace_span!("Transforms step").in_scope(|| {
                 step_param(
@@ -865,6 +889,7 @@ impl SplatTrainer {
                     &mut optimizer.transforms,
                     &mut grads,
                     None,
+                    frozen.as_ref(),
                 )
             });
             splats.sh_coeffs = trace_span!("SH Coeffs step").in_scope(|| {
@@ -875,6 +900,7 @@ impl SplatTrainer {
                     &mut optimizer.sh_coeffs,
                     &mut grads,
                     coeffs_grad_sq,
+                    frozen.as_ref(),
                 )
             });
             splats.raw_opacities = trace_span!("Opacity step").in_scope(|| {
@@ -885,6 +911,7 @@ impl SplatTrainer {
                     &mut optimizer.opacities,
                     &mut grads,
                     None,
+                    frozen.as_ref(),
                 )
             });
             splats
@@ -909,7 +936,12 @@ impl SplatTrainer {
             }
         });
 
-        // Noise uses the forward's floored opacities, without building an autodiff graph.
+        // Noise uses the forward's floored opacities, without building an autodiff graph. Splats beyond the
+        // training radius count as unseen, so they get none.
+        let visible = match &frozen {
+            Some(frozen) => visible.mask_fill(frozen.clone(), 0.0),
+            None => visible,
+        };
         let samples = Tensor::random(
             [splats.num_splats() as usize, 3],
             Distribution::Normal(0.0, 1.0),
@@ -1605,8 +1637,8 @@ mod profile_tests;
 mod sh_background_integration_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
-#[path = "train_position_scale_tests.rs"]
-mod position_scale_tests;
+#[path = "train_radius_tests.rs"]
+mod radius_tests;
 
 #[cfg(test)]
 mod loss_weight_tests {

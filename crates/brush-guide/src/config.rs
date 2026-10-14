@@ -128,9 +128,9 @@ pub struct GuideConfig {
     pub eval_seam_from: u32,
     /// Edge of the area-training tiles in x and z, metres; also the grid of the eval's seam band.
     pub area_tile_size_m: f32,
-    /// Plumbed into `TrainConfig::position_scale_cap_m`: upper bound in metres of the scene size that scales the
-    /// mean LR and clamps the position noise. 0: no bound.
-    pub position_scale_cap_m: f32,
+    /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
+    /// in that step. 0: off.
+    pub train_radius_m: f32,
 }
 
 impl Default for GuideConfig {
@@ -188,7 +188,7 @@ impl Default for GuideConfig {
             eval_extras_views: Vec::new(),
             eval_seam_from: 0,
             area_tile_size_m: 10.0,
-            position_scale_cap_m: 0.0,
+            train_radius_m: 0.0,
         }
     }
 }
@@ -312,15 +312,16 @@ mod eval_extra_tests {
     }
 }
 
+
 #[cfg(test)]
-mod position_scale_cap_tests {
+mod train_radius_tests {
     use super::GuideConfig;
 
     #[test]
     fn defaults_to_off_and_parses() {
         let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-        assert_eq!(cfg.position_scale_cap_m, 0.0);
-        let cfg: GuideConfig = serde_json::from_str(r#"{"position_scale_cap_m": 10}"#).expect("parses");
-        assert_eq!(cfg.position_scale_cap_m, 10.0);
+        assert_eq!(cfg.train_radius_m, 0.0);
+        let cfg: GuideConfig = serde_json::from_str(r#"{"train_radius_m": 25}"#).expect("parses");
+        assert_eq!(cfg.train_radius_m, 25.0);
     }
 }

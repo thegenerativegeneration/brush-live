@@ -47,9 +47,11 @@ pub(super) struct EvalRecord {
     /// Mean LR of the last training step.
     pub lr_mean: f64,
     /// Scene size (m) that step scaled the mean LR and clamped the position noise with: `bounds_median_size` as
-    /// of that step, at most `position_scale_cap_m`.
+    /// of that step.
     pub position_scale_m: f32,
     pub adam_clamped: u64,
+    /// Splats the last training step left alone for lying beyond `train_radius_m`; `None` with the radius off.
+    pub masked_by_radius: Option<u32>,
     /// The eval carried the extras (LPIPS, seam split, saved renders).
     pub extras: bool,
     pub views: Vec<ViewScore>,
@@ -87,6 +89,7 @@ mod tests {
             lr_mean: 1.6e-5,
             position_scale_m: 0.8,
             adam_clamped: 0,
+            masked_by_radius: Some(120),
             extras: false,
             views: vec![ViewScore { id: 9, psnr: 21.5, ssim: 0.7, lpips: None, psnr_band: Some(20.0), psnr_interior: None }],
         }
@@ -111,6 +114,7 @@ mod tests {
         assert_eq!(lines[0]["last_keyframe_id"], 43);
         assert_eq!(lines[0]["lr_mean"].as_f64(), Some(1.6e-5));
         assert_eq!(lines[0]["position_scale_m"].as_f64(), Some(0.8));
+        assert_eq!(lines[0]["masked_by_radius"].as_u64(), Some(120));
         assert_eq!((lines[0]["lpips_ms"].as_f64(), lines[0]["seam_ms"].as_f64()), (Some(12.0), Some(0.0)));
         std::fs::remove_dir_all(dir).ok();
     }
