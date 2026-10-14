@@ -1,14 +1,19 @@
 //! When held-out evals run: every N received keyframes, or every few seconds; extras at checkpoints.
 
+/// Seconds before a checkpoint whose eval scored nothing is tried again.
+const CHECKPOINT_RETRY_S: f64 = 1.0;
+
 /// Decides when an eval is due and whether it carries the extras (LPIPS, seam split, saved renders).
 pub(super) struct EvalSchedule {
     every_keyframes: u32,
     interval_s: f64,
     /// Next received-keyframe count that makes an eval due (keyframe mode).
     next: u32,
-    /// Checkpoints not yet consumed, ascending.
+    /// Checkpoints not yet consumed by an eval that scored views, ascending.
     extras_at: Vec<u32>,
     last_eval_s: Option<f64>,
+    /// When a pending checkpoint may be tried again after an eval that scored nothing.
+    retry_at_s: Option<f64>,
 }
 
 impl EvalSchedule {
@@ -21,28 +26,40 @@ impl EvalSchedule {
             next: every_keyframes,
             extras_at,
             last_eval_s: None,
+            retry_at_s: None,
         }
     }
 
-    /// `Some(extras)` when an eval is due at `received` keyframes and `now_s` seconds; marks it done.
-    pub(super) fn due(&mut self, received: u32, now_s: f64) -> Option<bool> {
-        let checkpoint = self.extras_at.first().is_some_and(|&c| c <= received);
+    /// `Some(extras)` when an eval is due at `received` keyframes and `now_s` seconds. Changes no state: the caller
+    /// reports the eval with [`Self::record`].
+    pub(super) fn due(&self, received: u32, now_s: f64) -> Option<bool> {
+        let checkpoint = self.checkpoint_pending(received) && self.retry_at_s.is_none_or(|t| now_s >= t);
         let periodic = if self.every_keyframes > 0 {
             received >= self.next
         } else {
             self.last_eval_s.is_none_or(|last| now_s - last >= self.interval_s)
         };
-        if !checkpoint && !periodic {
-            return None;
-        }
-        if checkpoint {
+        (checkpoint || periodic).then_some(checkpoint)
+    }
+
+    /// Marks the eval `due` asked for as done. The periodic schedule moves on either way; checkpoints up to
+    /// `received` are consumed only when the eval `scored` views (no splats yet, or no view rendering, keeps them
+    /// pending, tried again after [`CHECKPOINT_RETRY_S`]).
+    pub(super) fn record(&mut self, received: u32, now_s: f64, scored: bool) {
+        if scored {
             self.extras_at.retain(|&c| c > received);
+            self.retry_at_s = None;
+        } else if self.checkpoint_pending(received) {
+            self.retry_at_s = Some(now_s + CHECKPOINT_RETRY_S);
         }
         if self.every_keyframes > 0 && received >= self.next {
             self.next = (received / self.every_keyframes + 1) * self.every_keyframes;
         }
         self.last_eval_s = Some(now_s);
-        Some(checkpoint)
+    }
+
+    fn checkpoint_pending(&self, received: u32) -> bool {
+        self.extras_at.first().is_some_and(|&c| c <= received)
     }
 }
 
@@ -50,25 +67,52 @@ impl EvalSchedule {
 mod tests {
     use super::*;
 
+    /// `due`, and when an eval is due, `record` it as one that scored views.
+    fn step(s: &mut EvalSchedule, received: u32, now_s: f64) -> Option<bool> {
+        let due = s.due(received, now_s);
+        if due.is_some() {
+            s.record(received, now_s, true);
+        }
+        due
+    }
+
     #[test]
     fn keyframe_mode_evals_every_n_received_and_extras_at_checkpoints() {
         let mut s = EvalSchedule::new(50, 10.0, vec![117, 413]);
-        assert_eq!(s.due(49, 0.0), None);
-        assert_eq!(s.due(50, 0.0), Some(false));
-        assert_eq!(s.due(51, 0.0), None, "once per multiple");
-        assert_eq!(s.due(118, 0.0), Some(true), "first eval past checkpoint 117 carries the extras");
-        assert_eq!(s.due(150, 0.0), Some(false));
+        assert_eq!(step(&mut s, 49, 0.0), None);
+        assert_eq!(step(&mut s, 50, 0.0), Some(false));
+        assert_eq!(step(&mut s, 51, 0.0), None, "once per multiple");
+        assert_eq!(step(&mut s, 118, 0.0), Some(true), "first eval past checkpoint 117 carries the extras");
+        assert_eq!(step(&mut s, 150, 0.0), Some(false));
         // A backlog jumps past several multiples and a checkpoint at once: one eval, with extras.
-        assert_eq!(s.due(420, 0.0), Some(true));
-        assert_eq!(s.due(449, 0.0), None);
-        assert_eq!(s.due(450, 0.0), Some(false));
+        assert_eq!(step(&mut s, 420, 0.0), Some(true));
+        assert_eq!(step(&mut s, 449, 0.0), None);
+        assert_eq!(step(&mut s, 450, 0.0), Some(false));
     }
 
     #[test]
     fn time_mode_keeps_todays_interval() {
         let mut s = EvalSchedule::new(0, 30.0, vec![]);
-        assert_eq!(s.due(1, 0.0), Some(false));
-        assert_eq!(s.due(5, 29.0), None);
-        assert_eq!(s.due(9, 30.0), Some(false));
+        assert_eq!(step(&mut s, 1, 0.0), Some(false));
+        assert_eq!(step(&mut s, 5, 29.0), None);
+        assert_eq!(step(&mut s, 9, 30.0), Some(false));
+    }
+
+    #[test]
+    fn a_checkpoint_stays_pending_until_an_eval_scores_views() {
+        let mut s = EvalSchedule::new(50, 10.0, vec![21]);
+        assert_eq!(s.due(21, 0.0), Some(true));
+        assert_eq!(s.due(21, 0.0), Some(true), "due changes no state");
+        // No splats yet, or no view rendered: nothing scored.
+        s.record(21, 0.0, false);
+        assert_eq!(s.due(22, 0.5), None, "retried no sooner than a second later");
+        assert_eq!(s.due(23, 1.0), Some(true), "still pending");
+        s.record(23, 1.0, true);
+        assert_eq!(s.due(24, 1.0), None, "consumed by the eval that scored");
+        // A skipped periodic eval is not retried: the next one is at the next multiple.
+        assert_eq!(s.due(50, 2.0), Some(false));
+        s.record(50, 2.0, false);
+        assert_eq!(s.due(51, 9.0), None);
+        assert_eq!(s.due(100, 9.0), Some(false));
     }
 }

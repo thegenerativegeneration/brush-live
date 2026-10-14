@@ -395,12 +395,16 @@ mod tests {
         let mut h = Holdout::new(2, 30.0);
         h.add_held(5, camera, view, &dir);
         let device = brush_cube::test_helpers::test_device().await.into();
-        let splats = Splats::from_raw(vec![0.0, 0.0, 2.0], vec![1.0, 0.0, 0.0, 0.0], vec![-1.0; 3], vec![0.5; 3],
-            vec![inverse_sigmoid(0.5)], SplatRenderMode::Default, &device);
+        // An opaque splat 1 m wide, 2 m ahead on the tile border x = 0: its surface spans the 0.5 m band and the
+        // interior beyond it.
+        let splats = Splats::from_raw(vec![0.0, 0.0, 2.0], vec![1.0, 0.0, 0.0, 0.0], vec![0.0; 3], vec![0.5; 3],
+            vec![inverse_sigmoid(0.99)], SplatRenderMode::Default, &device);
         let extras = EvalExtras { lpips: true, seam_band_m: 0.5, tile_size_m: 10.0,
             save_dir: Some(dir.join("eval_renders")), save_ids: vec![5], iter: 7 };
         let r = h.eval(&splats, 0.0, &extras).await.expect("scores");
         assert!(r.per_view[0].lpips.is_some_and(f32::is_finite));
+        assert!(r.per_view[0].psnr_band.is_some_and(f32::is_finite), "{:?}", r.per_view[0]);
+        assert!(r.per_view[0].psnr_interior.is_some_and(f32::is_finite), "{:?}", r.per_view[0]);
         assert!(dir.join("eval_renders/5_7.png").exists());
         assert!(dir.join("eval_renders/gt_5.png").exists());
         std::fs::remove_dir_all(dir).ok();

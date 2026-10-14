@@ -127,12 +127,12 @@ pub(super) async fn worker(
             w.voxel_round(now).await;
             w.totals_s.voxel += t.elapsed().as_secs_f64();
         }
+        let (received, now) = (w.holdout.received(), w.clock.elapsed().as_secs_f64());
         if w.holdout.has_views()
-            && let Some(extras) = w
-                .eval_schedule
-                .due(w.holdout.received(), w.clock.elapsed().as_secs_f64())
+            && let Some(extras) = w.eval_schedule.due(received, now)
         {
-            w.eval_holdout(extras).await;
+            let scored = w.eval_holdout(extras).await;
+            w.eval_schedule.record(received, now, scored);
         }
         w.publish_status();
         brush_async::yield_now().await;
@@ -381,8 +381,8 @@ impl Worker {
     }
 
     /// Scores the splats on the held-out views and logs the result; `extras` adds LPIPS, the seam split and
-    /// saved renders as configured.
-    async fn eval_holdout(&mut self, extras: bool) {
+    /// saved renders as configured. Whether any view was scored (not without splats or renderable views).
+    async fn eval_holdout(&mut self, extras: bool) -> bool {
         let now = self.clock.elapsed().as_secs_f64();
         let iter = self.live.iter();
         let eval_extras = EvalExtras {
@@ -395,49 +395,51 @@ impl Worker {
             iter,
         };
         let Some(splats) = self.live.eval_splats().await else {
-            return;
+            return false;
         };
-        if let Some(r) = self.holdout.eval(&splats, now, &eval_extras).await {
-            // Eval time does not count against the training step rate.
-            self.rate_window.0 += r.ms / 1e3;
-            log::info!(
-                "eval at {now:.2} s: {} held-out views, psnr {:.2} dB, ssim {:.4}; iter {}, {} splats ({:.0} ms, black background{})",
-                r.views,
-                r.psnr,
-                r.ssim,
-                self.live.iter(),
-                splats.num_splats(),
-                r.ms,
-                if self.config.sh_background {
-                    ", SH background not composited"
-                } else {
-                    ""
-                }
-            );
-            let record = eval_log::EvalRecord {
-                unix_s: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0.0, |d| d.as_secs_f64()),
-                t_s: now,
-                iter: self.live.iter(),
-                keyframes: self.live.views().len() as u32,
-                received_keyframes: self.holdout.received(),
-                last_keyframe_id: self.live.last_keyframe_id(),
-                splats: splats.num_splats(),
-                resident_splats: self.live.splats().map_or(0, |s| s.num_splats()),
-                loader_cache_bytes: self.live.loader_cache_bytes(),
-                train_ms: (self.totals_s.train * 1e3) as u64,
-                refine_ms: self.live.refine_total_ms(),
-                eval_ms: r.ms,
-                bounds_median_size: self.live.bounds_median_size(),
-                adam_clamped: self.live.adam_clamped(),
-                extras,
-                views: r.per_view.clone(),
-            };
-            if let Err(e) = eval_log::append(&self.session_dir.join("eval.jsonl"), &record) {
-                log::warn!("could not append eval.jsonl: {e}");
+        let Some(r) = self.holdout.eval(&splats, now, &eval_extras).await else {
+            return false;
+        };
+        // Eval time does not count against the training step rate.
+        self.rate_window.0 += r.ms / 1e3;
+        log::info!(
+            "eval at {now:.2} s: {} held-out views, psnr {:.2} dB, ssim {:.4}; iter {}, {} splats ({:.0} ms, black background{})",
+            r.views,
+            r.psnr,
+            r.ssim,
+            self.live.iter(),
+            splats.num_splats(),
+            r.ms,
+            if self.config.sh_background {
+                ", SH background not composited"
+            } else {
+                ""
             }
+        );
+        let record = eval_log::EvalRecord {
+            unix_s: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64()),
+            t_s: now,
+            iter: self.live.iter(),
+            keyframes: self.live.views().len() as u32,
+            received_keyframes: self.holdout.received(),
+            last_keyframe_id: self.live.last_keyframe_id(),
+            splats: splats.num_splats(),
+            resident_splats: self.live.splats().map_or(0, |s| s.num_splats()),
+            loader_cache_bytes: self.live.loader_cache_bytes(),
+            train_ms: (self.totals_s.train * 1e3) as u64,
+            refine_ms: self.live.refine_total_ms(),
+            eval_ms: r.ms,
+            bounds_median_size: self.live.bounds_median_size(),
+            adam_clamped: self.live.adam_clamped(),
+            extras,
+            views: r.per_view.clone(),
+        };
+        if let Err(e) = eval_log::append(&self.session_dir.join("eval.jsonl"), &record) {
+            log::warn!("could not append eval.jsonl: {e}");
         }
+        true
     }
 
     /// The splats as PLY; `finish` also pauses training.
