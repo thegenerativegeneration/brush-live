@@ -280,6 +280,14 @@ impl SplatTrainer {
         self.bounds
     }
 
+    /// Scene size in metres that scales the mean LR and clamps the position noise: the bounds' median size,
+    /// at most `position_scale_cap_m` when that is set.
+    pub fn position_scale(&self) -> f32 {
+        let size = self.bounds.median_size();
+        let cap = self.config.position_scale_cap_m;
+        if cap > 0.0 { size.min(cap) } else { size }
+    }
+
     /// Supply per-train-view (world center, focal-px at native res) to enable
     /// the Mip-Splatting 3D filter (gated on `config.min_scale_factor > 0`).
     pub fn set_view_cams(&mut self, view_cams: Vec<(glam::Vec3, f32)>) {
@@ -615,7 +623,7 @@ impl SplatTrainer {
             &mut self.rng,
         );
 
-        let median_scale = self.bounds.median_size();
+        let median_scale = self.position_scale();
 
         let lr_mean = self.config.lr_mean
             * self.lr_mean_decay.powi(self.step_count as i32 - 1)
@@ -1595,6 +1603,10 @@ mod profile_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "sh_background_integration_tests.rs"]
 mod sh_background_integration_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "train_position_scale_tests.rs"]
+mod position_scale_tests;
 
 #[cfg(test)]
 mod loss_weight_tests {

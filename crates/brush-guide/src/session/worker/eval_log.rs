@@ -44,6 +44,11 @@ pub(super) struct EvalRecord {
     pub seam_ms: f64,
     /// The trainer's bounds' median size, which scales the mean learning rate.
     pub bounds_median_size: f32,
+    /// Mean LR of the last training step.
+    pub lr_mean: f64,
+    /// Scene size (m) that step scaled the mean LR and clamped the position noise with: `bounds_median_size` as
+    /// of that step, at most `position_scale_cap_m`.
+    pub position_scale_m: f32,
     pub adam_clamped: u64,
     /// The eval carried the extras (LPIPS, seam split, saved renders).
     pub extras: bool,
@@ -79,6 +84,8 @@ mod tests {
             lpips_ms: 12.0,
             seam_ms: 0.0,
             bounds_median_size: 0.8,
+            lr_mean: 1.6e-5,
+            position_scale_m: 0.8,
             adam_clamped: 0,
             extras: false,
             views: vec![ViewScore { id: 9, psnr: 21.5, ssim: 0.7, lpips: None, psnr_band: Some(20.0), psnr_interior: None }],
@@ -102,6 +109,8 @@ mod tests {
         assert_eq!(lines[0]["views"][0]["id"], 9);
         assert!(lines[0]["views"][0]["lpips"].is_null());
         assert_eq!(lines[0]["last_keyframe_id"], 43);
+        assert_eq!(lines[0]["lr_mean"].as_f64(), Some(1.6e-5));
+        assert_eq!(lines[0]["position_scale_m"].as_f64(), Some(0.8));
         assert_eq!((lines[0]["lpips_ms"].as_f64(), lines[0]["seam_ms"].as_f64()), (Some(12.0), Some(0.0)));
         std::fs::remove_dir_all(dir).ok();
     }

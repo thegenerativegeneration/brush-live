@@ -434,6 +434,8 @@ impl Worker {
             lpips_ms: r.lpips_ms,
             seam_ms: r.seam_ms,
             bounds_median_size: self.live.bounds_median_size(),
+            lr_mean: self.live.last_step_lr().0,
+            position_scale_m: self.live.last_step_lr().1,
             adam_clamped: self.live.adam_clamped(),
             extras,
             views: r.per_view.clone(),

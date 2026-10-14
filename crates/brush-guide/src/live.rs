@@ -72,6 +72,8 @@ pub struct LiveModel {
     refine_stats: (u32, f64),
     /// Refine wall time since the model started, kept apart from `take_refine_stats`.
     refine_total_s: f64,
+    /// Mean LR and position scale (m) of the last training step.
+    last_step_lr: (f64, f32),
     /// Seconds spent getting training batches since the last profile log.
     batch_s: f64,
     /// Whether the trainer times its phases; `batch_s` only accumulates then.
@@ -91,6 +93,7 @@ impl LiveModel {
         train_config.sh_background = config.sh_background;
         train_config.sh_background_alpha_weight = config.sh_background_alpha_weight;
         train_config.ssim_every = config.ssim_every;
+        train_config.position_scale_cap_m = config.position_scale_cap_m;
         let mut load_config = LoadArgs::parse_from(["brush-guide"]).load;
         load_config.max_scene_batch_cache_size = config.loader_cache_bytes;
         let rng = rand::rngs::StdRng::seed_from_u64(config.seed);
@@ -115,6 +118,7 @@ impl LiveModel {
             num_evicted: 0,
             refine_stats: (0, 0.0),
             refine_total_s: 0.0,
+            last_step_lr: (0.0, 0.0),
             batch_s: 0.0,
             profiling: false,
             rng,
@@ -202,6 +206,12 @@ impl LiveModel {
     /// Milliseconds spent in refine since the model started.
     pub fn refine_total_ms(&self) -> f64 {
         self.refine_total_s * 1e3
+    }
+
+    /// Mean LR and position scale in metres (the bounds' median size, capped by `position_scale_cap_m`) of the
+    /// last training step; zeros before the first.
+    pub fn last_step_lr(&self) -> (f64, f32) {
+        self.last_step_lr
     }
 
     /// Median size of the trainer's bounds, which scales the mean learning rate; 0 before training.
@@ -526,7 +536,9 @@ impl LiveModel {
         if self.profiling {
             self.batch_s += t_batch.elapsed().as_secs_f64();
         }
-        let (stepped, _) = trainer.step(batch, splats.train()).await;
+        let position_scale = trainer.position_scale();
+        let (stepped, stats) = trainer.step(batch, splats.train()).await;
+        self.last_step_lr = (stats.lr_mean, position_scale);
         let mut splats = stepped.valid();
         self.iter += 1;
         if self.iter.is_multiple_of(PROFILE_LOG_EVERY)
