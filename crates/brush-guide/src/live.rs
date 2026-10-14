@@ -42,6 +42,14 @@ const PROFILE_LOG_EVERY: u32 = 100;
 
 /// Splats trained incrementally as keyframes arrive. Splats are kept on the
 /// inner (non-autodiff) device between steps.
+/// One training step's mean learning rate and the scene size that scaled it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StepLr {
+    pub lr_mean: f64,
+    /// The bounds' median size in metres, which scales the mean LR and clamps the position noise.
+    pub position_scale_m: f32,
+}
+
 pub struct LiveModel {
     config: GuideConfig,
     device: Device,
@@ -72,8 +80,7 @@ pub struct LiveModel {
     refine_stats: (u32, f64),
     /// Refine wall time since the model started, kept apart from `take_refine_stats`.
     refine_total_s: f64,
-    /// Mean LR and position scale (m) of the last training step.
-    last_step_lr: (f64, f32),
+    last_step_lr: StepLr,
     /// Seconds spent getting training batches since the last profile log.
     batch_s: f64,
     /// Whether the trainer times its phases; `batch_s` only accumulates then.
@@ -118,7 +125,7 @@ impl LiveModel {
             num_evicted: 0,
             refine_stats: (0, 0.0),
             refine_total_s: 0.0,
-            last_step_lr: (0.0, 0.0),
+            last_step_lr: StepLr::default(),
             batch_s: 0.0,
             profiling: false,
             rng,
@@ -216,9 +223,8 @@ impl LiveModel {
         self.refine_total_s * 1e3
     }
 
-    /// Mean LR and position scale in metres (the bounds' median size, which scales the mean LR and clamps the
-    /// position noise) of the last training step; zeros before the first.
-    pub fn last_step_lr(&self) -> (f64, f32) {
+    /// The last training step's mean LR and position scale; zeros before the first.
+    pub fn last_step_lr(&self) -> StepLr {
         self.last_step_lr
     }
 
@@ -546,7 +552,10 @@ impl LiveModel {
         }
         let position_scale = trainer.bounds().median_size();
         let (stepped, stats) = trainer.step(batch, splats.train()).await;
-        self.last_step_lr = (stats.lr_mean, position_scale);
+        self.last_step_lr = StepLr {
+            lr_mean: stats.lr_mean,
+            position_scale_m: position_scale,
+        };
         let mut splats = stepped.valid();
         self.iter += 1;
         if self.iter.is_multiple_of(PROFILE_LOG_EVERY)

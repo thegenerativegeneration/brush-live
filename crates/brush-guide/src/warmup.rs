@@ -229,6 +229,18 @@ fn warmup_ssim_every(ssim_every: u32) -> u32 {
     ssim_every.min(2)
 }
 
+/// The training options of the warm-up steps: the session's, where they choose kernels (the SH background's globe,
+/// the training radius's masked step).
+fn warmup_train_config(config: &GuideConfig) -> TrainConfig {
+    let mut train_config = TrainConfig::parse_from(["brush-guide-warmup"]);
+    train_config.max_splats = config.max_splats;
+    train_config.ssim_every = warmup_ssim_every(config.ssim_every);
+    train_config.sh_background = config.sh_background;
+    train_config.sh_background_alpha_weight = config.sh_background_alpha_weight;
+    train_config.train_radius_m = config.train_radius_m;
+    train_config
+}
+
 async fn train_steps(
     config: &GuideConfig,
     device: &Device,
@@ -237,9 +249,7 @@ async fn train_steps(
     image: UVec2,
     rng: &mut impl rand::Rng,
 ) -> Splats {
-    let mut train_config = TrainConfig::parse_from(["brush-guide-warmup"]);
-    train_config.max_splats = config.max_splats;
-    train_config.ssim_every = warmup_ssim_every(config.ssim_every);
+    let train_config = warmup_train_config(config);
     let bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
     let mut trainer = SplatTrainer::new_seeded(&train_config, device, bounds, config.seed);
     let pixels: Vec<u8> = (0..image.x * image.y * 3).map(|_| rng.random()).collect();
@@ -265,6 +275,22 @@ async fn train_steps(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warmup_trains_with_the_sessions_kernel_choices() {
+        let config = GuideConfig {
+            sh_background: true,
+            sh_background_alpha_weight: 0.3,
+            train_radius_m: 25.0,
+            ..GuideConfig::default()
+        };
+        let t = warmup_train_config(&config);
+        assert!(t.sh_background);
+        assert_eq!((t.sh_background_alpha_weight, t.train_radius_m), (0.3, 25.0));
+        let t = warmup_train_config(&GuideConfig::default());
+        assert!(!t.sh_background);
+        assert_eq!(t.train_radius_m, 0.0);
+    }
 
     #[test]
     fn warmup_ssim_every_covers_both_loss_variants() {

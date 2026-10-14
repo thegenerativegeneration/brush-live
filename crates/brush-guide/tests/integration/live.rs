@@ -2,7 +2,7 @@ use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
 use brush_guide::keyframe::decode_keyframe;
-use brush_guide::live::{LiveModel, PoseUpdateStats, ViewPose};
+use brush_guide::live::{LiveModel, PoseUpdateStats, StepLr, ViewPose};
 use glam::Vec3;
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -64,12 +64,15 @@ async fn last_step_lr_is_scaled_by_the_bounds_median_size() {
     let device = test_scene::device().await.autodiff();
     let dir = tmp("steplr");
     let mut live = LiveModel::new(GuideConfig::default(), device);
-    assert_eq!(live.last_step_lr(), (0.0, 0.0));
+    assert_eq!(live.last_step_lr(), StepLr::default());
     let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
     live.add_keyframe(decode_keyframe(&h, &p, &dir).await.unwrap())
         .await;
     live.train_step().await;
-    let (lr, scale) = live.last_step_lr();
+    let StepLr {
+        lr_mean: lr,
+        position_scale_m: scale,
+    } = live.last_step_lr();
     let base = brush_train::config::TrainConfig::default().lr_mean;
     assert!(scale > 0.0, "position scale {scale}");
     assert!((lr - base * f64::from(scale)).abs() < base * 1e-6, "lr_mean {lr}");

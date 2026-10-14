@@ -342,6 +342,11 @@ fn send_order_walks_back_without_the_last_frame_and_skips_forward_held_frames() 
         .skip(5)
         .collect();
     assert_eq!(back, vec![(6, 2), (8, 0)]);
+    // holdout_every 1 is off on the server, so nothing is skipped.
+    assert_eq!(
+        send_order(5, 1, true, Some(1), &none),
+        send_order(5, 1, true, None, &none)
+    );
     // After two loops the return ids start above every forward id.
     let two = send_order(3, 2, true, None, &none);
     assert_eq!(&two[6..], &[(6, 1), (7, 0)]);

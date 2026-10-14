@@ -121,9 +121,8 @@ pub struct SplatTrainer {
     adam_clamped: u64,
     /// Splats refine pruned for a diverged colour (|sh0| > [`MAX_SH0`]).
     sh_pruned: u64,
-    /// Splats the last step left alone for lying beyond `train_radius_m` (a `[1]` tensor); `None` with the radius
-    /// off.
-    masked_by_radius: Option<Tensor<1, Int>>,
+    /// The splats the last step left alone for lying beyond `train_radius_m`; `None` with the radius off.
+    last_frozen: Option<Tensor<1, Bool>>,
 }
 
 /// `(l1, ssim)` kernel weights for `step` (1-based). The RGB loss is
@@ -263,7 +262,7 @@ impl SplatTrainer {
             sh_pixel_centres: None,
             adam_clamped: 0,
             sh_pruned: 0,
-            masked_by_radius: None,
+            last_frozen: None,
             profile: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
@@ -290,7 +289,7 @@ impl SplatTrainer {
     /// How many splats the last step left alone for lying beyond `train_radius_m` (a `[1]` tensor, read back by
     /// the caller); `None` with the radius off or before the first step.
     pub fn masked_by_radius(&self) -> Option<Tensor<1, Int>> {
-        self.masked_by_radius.clone()
+        self.last_frozen.clone().map(|f| f.int().sum())
     }
 
     /// Splats refine pruned for a diverged colour since training started.
@@ -878,7 +877,7 @@ impl SplatTrainer {
                 self.config.train_radius_m,
             )
         });
-        self.masked_by_radius = frozen.as_ref().map(|f| f.clone().int().sum());
+        self.last_frozen = frozen.clone();
 
         splats = trace_span!("Optimizer step").in_scope(|| {
             splats.transforms = trace_span!("Transforms step").in_scope(|| {
@@ -930,6 +929,9 @@ impl SplatTrainer {
                 .refine_record
                 .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
             record.gather_stats(refine_weight, importance, visible.clone(), max_radius);
+            if let Some(frozen) = &frozen {
+                record.mark_trained(frozen.clone().bool_not().float());
+            }
             if let Some(e) = self.evict.as_mut() {
                 e.life
                     .get_or_insert_with(|| SplatLife::new(splats.num_splats() as usize, &device));
@@ -1101,6 +1103,8 @@ impl SplatTrainer {
         let (mut splats, refiner, pruned_count) =
             prune_points(splats, &mut optim, refiner, life, origin, prune_mask).await;
         let num_dead = pruned_count.saturating_sub(num_evicted);
+        // With the training radius on, splats no step trained since the last refine neither densify nor decay.
+        let untrained = refiner.untrained();
         let mut split_inds = HashSet::new();
         // After an eviction, the freed room goes to newly observed cells only.
         let recent_mask = match self.evict.as_mut() {
@@ -1122,6 +1126,10 @@ impl SplatTrainer {
         if num_dead > 0 {
             // Replacement weighting: opacity × visibility.
             let vis_f = refiner.vis_mask().float();
+            let vis_f = match &untrained {
+                Some(u) => vis_f.mask_fill(u.clone(), 0.0),
+                None => vis_f,
+            };
             let resampled_weights = splats.opacities() * vis_f.clone();
             let resampled_weights = resampled_weights
                 .into_data_async()
@@ -1140,6 +1148,10 @@ impl SplatTrainer {
         let pre_oversized = split_inds.len();
         if self.config.split_at_screen_size > 0.0 {
             let oversized = refiner.above_screen_size(self.config.split_at_screen_size);
+            let oversized = match &untrained {
+                Some(u) => oversized.bool_and(u.clone().bool_not()),
+                None => oversized,
+            };
             let oversized_inds = oversized.argwhere_async().await;
             if oversized_inds.dims()[0] > 0 {
                 let oversized_inds = oversized_inds
@@ -1170,6 +1182,10 @@ impl SplatTrainer {
         let pre_high_grad = split_inds.len();
         if iter >= self.config.growth_start_iter && iter < self.config.growth_stop_iter {
             let above_threshold = refiner.above_threshold(self.config.growth_grad_threshold);
+            let above_threshold = match &untrained {
+                Some(u) => above_threshold.bool_and(u.clone().bool_not()),
+                None => above_threshold,
+            };
 
             let threshold_count = above_threshold
                 .clone()
@@ -1222,7 +1238,15 @@ impl SplatTrainer {
         // Per-splat max on-screen extent, used by `refine_splats` to cap the
         // split shrink so oversized splats' children land at `split_at_screen_size`.
         let screen_sizes = refiner.max_screen_size.clone();
-        splats = self.refine_splats(&device, optim, splats, split_inds, screen_sizes, iter);
+        splats = self.refine_splats(
+            &device,
+            optim,
+            splats,
+            split_inds,
+            screen_sizes,
+            iter,
+            untrained,
+        );
 
         // Update current bounds based on the splats.
         self.bounds = get_splat_bounds(splats.clone(), BOUND_PERCENTILE).await;
@@ -1268,6 +1292,7 @@ impl SplatTrainer {
         split_inds: HashSet<i32>,
         screen_sizes: Tensor<1>,
         iter: u32,
+        untrained: Option<Tensor<1, Bool>>,
     ) -> Splats {
         let refine_count = split_inds.len();
 
@@ -1392,10 +1417,18 @@ impl SplatTrainer {
         let t_shrink_strength = 1.0 - train_t;
         let minus_opac = self.config.opac_decay * t_shrink_strength;
 
-        // Lower opacity slowly over time.
+        // Lower opacity slowly over time; `untrained` rows (children appended by the split are trained) keep theirs.
+        let keep = untrained.map(|u| {
+            let children = Tensor::<1>::zeros([refine_count], &u.device()).greater_elem(0.0);
+            Tensor::cat(vec![u, children], 0)
+        });
         splats.raw_opacities = splats.raw_opacities.map(|f| {
-            let new_opac = sigmoid(f) - minus_opac;
-            inv_sigmoid(new_opac.clamp(1e-12, 1.0 - 1e-12))
+            let new_opac = sigmoid(f.clone()) - minus_opac;
+            let decayed = inv_sigmoid(new_opac.clamp(1e-12, 1.0 - 1e-12));
+            match keep {
+                Some(keep) => decayed.mask_where(keep, f),
+                None => decayed,
+            }
         });
 
         self.optim = Some(optim);

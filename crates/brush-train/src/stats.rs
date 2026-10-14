@@ -14,6 +14,9 @@ pub(crate) struct RefineRecord {
     // score above zero, per splat.
     pub importance_sum: Tensor<1>,
     pub importance_views: Tensor<1>,
+    /// 1 for splats some step since the last refine trained (within `train_radius_m` of its camera), else 0; built
+    /// only while the training radius is on.
+    pub trained: Option<Tensor<1>>,
 }
 
 impl RefineRecord {
@@ -24,7 +27,21 @@ impl RefineRecord {
             max_screen_size: Tensor::<1>::zeros([num_points as usize], device),
             importance_sum: Tensor::<1>::zeros([num_points as usize], device),
             importance_views: Tensor::<1>::zeros([num_points as usize], device),
+            trained: None,
         }
+    }
+
+    /// Marks the splats a step trained (`in_radius`, 1 or 0 per splat) as trained since the last refine.
+    pub(crate) fn mark_trained(&mut self, in_radius: Tensor<1>) {
+        self.trained = Some(match self.trained.take() {
+            Some(t) => t.max_pair(in_radius),
+            None => in_radius,
+        });
+    }
+
+    /// Splats no step trained since the last refine; `None` without the trained column (radius off).
+    pub(crate) fn untrained(&self) -> Option<Tensor<1, Bool>> {
+        self.trained.clone().map(|t| t.lower_elem(0.5))
     }
 
     pub(crate) fn above_threshold(&self, threshold: f32) -> Tensor<1, Bool> {
@@ -69,7 +86,8 @@ impl RefineRecord {
             vis_weight: self.vis_weight.clone().select(0, indices.clone()),
             max_screen_size: self.max_screen_size.select(0, indices.clone()),
             importance_sum: self.importance_sum.select(0, indices.clone()),
-            importance_views: self.importance_views.select(0, indices),
+            importance_views: self.importance_views.select(0, indices.clone()),
+            trained: self.trained.map(|t| t.select(0, indices)),
         }
     }
 
@@ -84,6 +102,7 @@ impl RefineRecord {
             max_screen_size: pad(self.max_screen_size),
             importance_sum: pad(self.importance_sum),
             importance_views: pad(self.importance_views),
+            trained: self.trained.map(pad),
         }
     }
 }

@@ -312,7 +312,6 @@ mod eval_extra_tests {
     }
 }
 
-
 #[cfg(test)]
 mod train_radius_tests {
     use super::GuideConfig;

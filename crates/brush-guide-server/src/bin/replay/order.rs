@@ -7,7 +7,8 @@ use std::ops::RangeInclusive;
 /// then with `return_pass` the frames back to the first in reverse without the last one, as ids
 /// `n·loops + (n − 2 − frame)`. Frames in `dropped` are never sent. The walk back also leaves out the frames the
 /// first forward pass sent as its `skip_every`-th, `2·skip_every`-th, ... keyframe (the forward pass's held-out
-/// frames when `skip_every` is the server's `holdout_every`, which counts received keyframes).
+/// frames when `skip_every` is the server's `holdout_every`, which counts received keyframes; 1 skips nothing, as the
+/// server treats `holdout_every` 1 as off).
 pub(crate) fn send_order(
     n: usize,
     loops: usize,
@@ -21,7 +22,7 @@ pub(crate) fn send_order(
         .collect();
     if return_pass && n >= 2 {
         let held: HashSet<usize> = match skip_every {
-            Some(k) if k > 0 => (0..n)
+            Some(k) if k > 1 => (0..n)
                 .filter(|j| !dropped.contains(j))
                 .enumerate()
                 .filter(|(sent, _)| (sent + 1) % k == 0)
