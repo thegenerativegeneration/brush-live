@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use brush_async::Actor;
 use burn::tensor::TensorData;
@@ -22,14 +25,17 @@ struct BatchCache {
     slots: Vec<Option<Arc<SceneBatch>>>,
     used_bytes: u64,
     budget_bytes: u64,
+    /// Mirror of `used_bytes` that readers outside the cache lock can poll.
+    published_bytes: Arc<AtomicU64>,
 }
 
 impl BatchCache {
-    fn new(n_views: usize, budget_bytes: u64) -> Self {
+    fn new(n_views: usize, budget_bytes: u64, published_bytes: Arc<AtomicU64>) -> Self {
         Self {
             slots: vec![None; n_views],
             used_bytes: 0,
             budget_bytes,
+            published_bytes,
         }
     }
 
@@ -52,6 +58,7 @@ impl BatchCache {
             return;
         }
         self.used_bytes += batch.packed_bytes();
+        self.published_bytes.store(self.used_bytes, Ordering::Relaxed);
         self.slots[index] = Some(batch);
     }
 }
@@ -61,6 +68,7 @@ pub struct SceneLoader {
     // Owns the loader actor threads. Dropping cancels them; their
     // senders then drop, the channel closes, and `next_batch` returns.
     _actors: Vec<Actor>,
+    cached: Arc<AtomicU64>,
 }
 
 impl SceneLoader {
@@ -81,9 +89,11 @@ impl SceneLoader {
         const TASKS_PER_ACTOR: usize = 2;
 
         let views = scene.views.clone();
+        let cached = Arc::new(AtomicU64::new(0));
         let cache = Arc::new(Mutex::new(BatchCache::new(
             views.len(),
             config.max_scene_batch_cache_size,
+            cached.clone(),
         )));
 
         let mut task_idx: u64 = 0;
@@ -107,7 +117,13 @@ impl SceneLoader {
         Self {
             rx,
             _actors: actors,
+            cached,
         }
+    }
+
+    /// Bytes of decoded batches this loader's cache holds.
+    pub fn cached_bytes(&self) -> u64 {
+        self.cached.load(Ordering::Relaxed)
     }
 
     pub async fn next_batch(&mut self) -> SceneBatch {

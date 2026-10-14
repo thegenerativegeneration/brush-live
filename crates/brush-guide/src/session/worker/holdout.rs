@@ -5,6 +5,7 @@
 use brush_dataset::scene::SceneView;
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
+use super::eval_log::ViewScore;
 use brush_train::eval::eval_stats;
 use std::collections::HashSet;
 use std::path::Path;
@@ -27,6 +28,8 @@ pub(super) struct EvalResult {
     pub psnr: f32,
     pub ssim: f32,
     pub ms: f64,
+    /// Scores of each view that was scored, in holdout order.
+    pub per_view: Vec<ViewScore>,
 }
 
 impl Holdout {
@@ -98,6 +101,11 @@ impl Holdout {
         moved
     }
 
+    /// Keyframes received so far, trained or held out.
+    pub(super) fn received(&self) -> u32 {
+        self.received
+    }
+
     pub(super) fn due(&self, now_s: f64) -> bool {
         !self.views.is_empty()
             && self
@@ -115,12 +123,21 @@ impl Holdout {
         let start = Instant::now();
         let device = splats.device();
         let (mut psnr, mut ssim, mut n) = (0.0f32, 0.0f32, 0usize);
-        for (_, view) in &self.views {
+        let mut per_view = Vec::new();
+        for (id, view) in &self.views {
             match score_view(splats, view, &device).await {
                 Ok((p, s)) => {
                     psnr += p;
                     ssim += s;
                     n += 1;
+                    per_view.push(ViewScore {
+                        id: *id,
+                        psnr: p,
+                        ssim: s,
+                        lpips: None,
+                        psnr_band: None,
+                        psnr_interior: None,
+                    });
                 }
                 Err(e) => log::warn!("held-out view skipped: {e}"),
             }
@@ -130,6 +147,7 @@ impl Holdout {
             psnr: psnr / n as f32,
             ssim: ssim / n as f32,
             ms: start.elapsed().as_secs_f64() * 1e3,
+            per_view,
         })
     }
 }
@@ -300,6 +318,9 @@ mod tests {
         let result = h.eval(&splats, 0.0).await.expect("one view scores");
         assert_eq!(result.views, 1);
         assert!(result.psnr.is_finite(), "psnr {}", result.psnr);
+        assert_eq!(result.per_view.len(), 1);
+        assert_eq!(result.per_view[0].id, 1);
+        assert!((result.per_view[0].psnr - result.psnr).abs() < 1e-6);
         std::fs::remove_dir_all(dir).ok();
     }
 }

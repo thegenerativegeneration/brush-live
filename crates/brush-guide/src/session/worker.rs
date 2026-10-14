@@ -3,6 +3,7 @@
 //! `finish_fisher` a final Fisher pass adds coverage and uncertainty.
 
 mod drain;
+mod eval_log;
 mod fisher;
 mod holdout;
 mod poses;
@@ -364,10 +365,10 @@ impl Worker {
     /// Scores the splats on the held-out views and logs the result.
     async fn eval_holdout(&mut self) {
         let now = self.clock.elapsed().as_secs_f64();
-        let Some(splats) = self.live.splats() else {
+        let Some(splats) = self.live.eval_splats().await else {
             return;
         };
-        if let Some(r) = self.holdout.eval(splats, now).await {
+        if let Some(r) = self.holdout.eval(&splats, now).await {
             // Eval time does not count against the training step rate.
             self.rate_window.0 += r.ms / 1e3;
             log::info!(
@@ -384,6 +385,28 @@ impl Worker {
                     ""
                 }
             );
+            let record = eval_log::EvalRecord {
+                unix_s: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0.0, |d| d.as_secs_f64()),
+                t_s: now,
+                iter: self.live.iter(),
+                keyframes: self.live.views().len() as u32,
+                received_keyframes: self.holdout.received(),
+                last_keyframe_id: self.live.last_keyframe_id(),
+                splats: splats.num_splats(),
+                resident_splats: self.live.splats().map_or(0, |s| s.num_splats()),
+                loader_cache_bytes: self.live.loader_cache_bytes(),
+                train_ms: (self.totals_s.train * 1e3) as u64,
+                refine_ms: self.live.refine_total_ms(),
+                eval_ms: r.ms,
+                bounds_median_size: self.live.bounds_median_size(),
+                adam_clamped: self.live.adam_clamped(),
+                views: r.per_view.clone(),
+            };
+            if let Err(e) = eval_log::append(&self.session_dir.join("eval.jsonl"), &record) {
+                log::warn!("could not append eval.jsonl: {e}");
+            }
         }
     }
 

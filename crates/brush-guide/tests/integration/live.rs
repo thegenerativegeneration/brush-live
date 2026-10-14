@@ -118,3 +118,23 @@ async fn poses_for_unknown_ids_are_counted_not_applied() {
     assert_eq!(live.iter(), 5);
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// The loaders cache decoded views and report the bytes they hold.
+#[tokio::test]
+async fn loader_cache_bytes_follow_the_cached_views() {
+    let device = test_scene::device().await.autodiff();
+    let dir = tmp("cache-bytes");
+    let mut live = LiveModel::new(GuideConfig::default(), device);
+    assert_eq!(live.loader_cache_bytes(), 0);
+    for (i, a) in [0.0f32, 1.2, 2.4].iter().enumerate() {
+        let (h, p) = test_scene::keyframe(i as u64, Vec3::new(2.0 * a.sin(), 0.0, 2.0 * a.cos()));
+        live.add_keyframe(decode_keyframe(&h, &p, &dir).await.unwrap()).await;
+    }
+    for _ in 0..40 {
+        live.train_step().await;
+    }
+    let bytes = live.loader_cache_bytes();
+    // 64x48 RGBA8 per cached view, at most 3 views in each of the two loaders.
+    assert!(bytes > 0 && bytes <= 2 * 3 * 64 * 48 * 4, "{bytes}");
+    std::fs::remove_dir_all(dir).ok();
+}

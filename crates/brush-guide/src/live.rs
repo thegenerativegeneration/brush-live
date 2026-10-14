@@ -70,6 +70,8 @@ pub struct LiveModel {
     num_evicted: u64,
     /// Refines and their time since `take_refine_stats`, for debug timing.
     refine_stats: (u32, f64),
+    /// Refine wall time since the model started, kept apart from `take_refine_stats`.
+    refine_total_s: f64,
     /// Seconds spent getting training batches since the last profile log.
     batch_s: f64,
     /// Whether the trainer times its phases; `batch_s` only accumulates then.
@@ -112,6 +114,7 @@ impl LiveModel {
             iter: 0,
             num_evicted: 0,
             refine_stats: (0, 0.0),
+            refine_total_s: 0.0,
             batch_s: 0.0,
             profiling: false,
             rng,
@@ -180,6 +183,30 @@ impl LiveModel {
     /// Refines and their seconds since the last call.
     pub fn take_refine_stats(&mut self) -> (u32, f64) {
         std::mem::take(&mut self.refine_stats)
+    }
+
+    /// Bytes both loaders' caches hold.
+    pub fn loader_cache_bytes(&self) -> u64 {
+        [&self.recent, &self.all]
+            .iter()
+            .filter_map(|l| l.as_ref())
+            .map(SceneLoader::cached_bytes)
+            .sum()
+    }
+
+    /// The splats a held-out eval or an export renders: today the trainer's splats.
+    pub async fn eval_splats(&self) -> Option<Splats> {
+        self.splats.clone()
+    }
+
+    /// Milliseconds spent in refine since the model started.
+    pub fn refine_total_ms(&self) -> f64 {
+        self.refine_total_s * 1e3
+    }
+
+    /// Median size of the trainer's bounds, which scales the mean learning rate; 0 before training.
+    pub fn bounds_median_size(&self) -> f32 {
+        self.trainer.as_ref().map_or(0.0, |t| t.bounds().median_size())
     }
 
     /// Number of training steps taken.
@@ -530,6 +557,7 @@ impl LiveModel {
             let dt = t.elapsed().as_secs_f64();
             self.refine_stats.0 += 1;
             self.refine_stats.1 += dt;
+            self.refine_total_s += dt;
             log::debug!(
                 target: crate::timing::TARGET,
                 "refine at iter {}: {:.0} ms, splats {before} -> {}, {} evicted",
