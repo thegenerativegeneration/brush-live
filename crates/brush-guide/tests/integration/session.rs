@@ -156,6 +156,16 @@ async fn warm_up_runs_the_session_kernels_on_dummy_splats() {
     assert!(secs > 0.0 && secs.is_finite());
 }
 
+/// The warm-up with the training radius and the SH background on runs their kernels (the masked step) too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_up_runs_with_the_training_radius() {
+    let device = test_scene::device().await.autodiff();
+    let config: GuideConfig =
+        serde_json::from_str(r#"{"max_splats": 4096, "train_radius_m": 25, "sh_background": true}"#).unwrap();
+    let secs = brush_guide::warmup::warm_up(&config, &device).await;
+    assert!(secs > 0.0 && secs.is_finite());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn paused_session_holds_keyframes_and_stops_training_until_resumed() {
     let device = test_scene::device().await.autodiff();

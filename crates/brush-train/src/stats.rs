@@ -17,6 +17,9 @@ pub(crate) struct RefineRecord {
     /// 1 for splats some step since the last refine trained (within `train_radius_m` of its camera), else 0; built
     /// only while the training radius is on.
     pub trained: Option<Tensor<1>>,
+    /// The Mip-Splatting floor rows carried into the refine that holds this record, while untrained rows keep theirs
+    /// through it (set by refine).
+    pub kept_floor: Option<Tensor<1>>,
 }
 
 impl RefineRecord {
@@ -28,6 +31,7 @@ impl RefineRecord {
             importance_sum: Tensor::<1>::zeros([num_points as usize], device),
             importance_views: Tensor::<1>::zeros([num_points as usize], device),
             trained: None,
+            kept_floor: None,
         }
     }
 
@@ -87,12 +91,13 @@ impl RefineRecord {
             max_screen_size: self.max_screen_size.select(0, indices.clone()),
             importance_sum: self.importance_sum.select(0, indices.clone()),
             importance_views: self.importance_views.select(0, indices.clone()),
-            trained: self.trained.map(|t| t.select(0, indices)),
+            trained: self.trained.map(|t| t.select(0, indices.clone())),
+            kept_floor: self.kept_floor.map(|f| f.select(0, indices)),
         }
     }
 
     /// Zero-pad the per-splat stats with `n` fresh (never-observed) entries,
-    /// for splats appended after this record was created.
+    /// for splats appended after this record was created; with the trained column, they start untrained.
     pub(crate) fn pad(self, n: usize) -> Self {
         let device = self.vis_weight.device();
         let pad = |t: Tensor<1>| Tensor::cat(vec![t, Tensor::zeros([n], &device)], 0);
@@ -103,6 +108,7 @@ impl RefineRecord {
             importance_sum: pad(self.importance_sum),
             importance_views: pad(self.importance_views),
             trained: self.trained.map(pad),
+            kept_floor: self.kept_floor.map(pad),
         }
     }
 }

@@ -14,11 +14,14 @@ use clap::Parser;
 const NEAR: usize = 10;
 const FAR: usize = 10;
 const FAR_ROWS: std::ops::Range<usize> = NEAR..NEAR + FAR;
+/// One near splat below `MIN_OPACITY`, last so pruning it moves no other row: refine replaces it (`num_dead` > 0).
+const DEAD: usize = NEAR + FAR;
 
-/// The training camera: away from the origin and turned, so the radius is measured from a real pose.
+/// The training camera: far from the world origin and turned, so the radius is measured from a real pose (every
+/// splat lies more than 5 m from the origin).
 fn pose() -> (glam::Vec3, glam::Quat) {
     (
-        glam::vec3(3.0, 1.0, -2.0),
+        glam::vec3(30.0, 2.0, -20.0),
         glam::Quat::from_euler(glam::EulerRot::YXZ, 0.5, 0.15, 0.05),
     )
 }
@@ -29,12 +32,14 @@ fn world(local: glam::Vec3) -> [f32; 3] {
     (position + rotation * local).to_array()
 }
 
-/// `NEAR` splats 2 m and `FAR` splats 20 m ahead of the camera, all in view, SH degree 1 (rest coefficients
-/// nonzero). `far_opacity` 0.05 lets the position noise act on the far splats; 0.9 keeps it at zero.
+/// `NEAR` splats 2 m and `FAR` splats 20 m ahead of the camera, all in view, and the `DEAD` one 2 m ahead; SH
+/// degree 1 (rest coefficients nonzero). `far_opacity` 0.05 lets the position noise act on the far splats; 0.9 keeps
+/// it at zero.
 fn splats(far_opacity: f32, device: &Device) -> Splats {
     let near = (0..NEAR).flat_map(|i| world(glam::vec3(i as f32 * 0.1 - 0.45, 0.0, 2.0)));
     let far = (0..FAR).flat_map(|i| world(glam::vec3(i as f32 * 1.0 - 4.5, 0.0, 20.0)));
-    let n = NEAR + FAR;
+    let dead = world(glam::vec3(0.0, 0.2, 2.0));
+    let n = NEAR + FAR + 1;
     let coeffs = sh_coeffs_for_degree(1) as usize;
     let sh = (0..n * coeffs)
         .flat_map(|k| {
@@ -46,13 +51,14 @@ fn splats(far_opacity: f32, device: &Device) -> Splats {
         })
         .collect();
     Splats::from_raw(
-        near.chain(far).collect(),
+        near.chain(far).chain(dead).collect(),
         [1.0, 0.0, 0.0, 0.0].repeat(n),
-        [vec![-2.0; NEAR * 3], vec![0.0; FAR * 3]].concat(),
+        [vec![-2.0; NEAR * 3], vec![0.0; FAR * 3], vec![-2.0; 3]].concat(),
         sh,
         [
             vec![inverse_sigmoid(0.9); NEAR],
             vec![inverse_sigmoid(far_opacity); FAR],
+            vec![inverse_sigmoid(0.001)],
         ]
         .concat(),
         SplatRenderMode::Default,
@@ -268,12 +274,14 @@ struct Refined {
     transforms: Vec<f32>,
     transforms_after: Vec<f32>,
     trained_column: bool,
+    stats: RefineStats,
 }
 
 const REFINE_STEPS: u32 = 3;
 
 /// `REFINE_STEPS` steps with `radius` from the start, then every splat's refine weight set far above the growth
-/// threshold (as if each had a large gradient) and one refine growing every candidate.
+/// threshold (as if each had a large gradient) and every on-screen size above `split_at_screen_size`, and one refine
+/// growing every candidate. The `DEAD` row is pruned, so the refine also picks a replacement parent.
 async fn refine_after_steps(radius: f32) -> Refined {
     let device = device().await;
     let mut trainer = trainer(radius, &device);
@@ -284,16 +292,18 @@ async fn refine_after_steps(radius: f32) -> Refined {
     }
     let record = trainer.refine_record.as_mut().expect("stepped");
     record.refine_weight_norm = record.refine_weight_norm.clone().ones_like();
+    record.max_screen_size = record.max_screen_size.clone().ones_like();
     let trained_column = record.trained.is_some();
     let opac = floats(splats.raw_opacities.val().inner()).await;
     let transforms = floats(splats.transforms.val().inner()).await;
-    let (refined, _) = trainer.refine(REFINE_STEPS, splats.valid()).await;
+    let (refined, stats) = trainer.refine(REFINE_STEPS, splats.valid()).await;
     Refined {
         opac,
         opac_after: floats(refined.raw_opacities.val()).await,
         transforms,
         transforms_after: floats(refined.transforms.val()).await,
         trained_column,
+        stats,
     }
 }
 
@@ -322,12 +332,22 @@ fn assert_split_and_decayed(r: &Refined, rows: std::ops::Range<usize>) {
     }
 }
 
-/// Rows no step trained since the last refine keep their opacity and transforms and are not split, however large
-/// their refine weight; trained rows split and decay as without the radius.
+/// Rows no step trained since the last refine keep their opacity and transforms and are no split parent (high
+/// gradient, oversized or dead-splat replacement), however large their refine weight and screen size; trained rows
+/// split and decay as without the radius.
 #[tokio::test]
 async fn untrained_rows_are_not_decayed_or_densified_at_refine() {
     let r = refine_after_steps(5.0).await;
     assert!(r.trained_column);
+    assert!(
+        sigmoid(r.opac[DEAD]) < MIN_OPACITY,
+        "the dead splat stays below the opacity floor"
+    );
+    assert_eq!(
+        r.stats.num_pruned, 1,
+        "the dead splat is pruned and replaced"
+    );
+    assert!(r.stats.num_split_oversized > 0);
     assert_eq!(
         r.opac_after.len(),
         2 * NEAR + FAR,
@@ -354,4 +374,84 @@ async fn radius_off_refines_every_row_as_today() {
     assert!(!r.trained_column);
     assert_eq!(r.opac_after.len(), 2 * (NEAR + FAR), "every splat splits");
     assert_split_and_decayed(&r, 0..NEAR + FAR);
+}
+
+/// Two refines with the Mip-Splatting floor on: the first attaches a floor to every splat; across the second, rows no
+/// step trained keep their raw (unbaked) params, their opacity and their floor values bit for bit.
+#[tokio::test]
+async fn untrained_rows_keep_raw_params_and_floor_across_refine() {
+    let device = device().await;
+    let mut trainer = trainer(5.0, &device);
+    let (position, _) = pose();
+    trainer.set_view_cams(vec![(position, 27.7)]);
+    let mut splats = trainer.step(batch(), splats(0.9, &device).train()).await.0;
+    splats = trainer.refine(1, splats.valid()).await.0.train();
+    for _ in 0..REFINE_STEPS {
+        splats = trainer.step(batch(), splats).await.0;
+    }
+    let record = trainer.refine_record.as_mut().expect("stepped");
+    record.refine_weight_norm = record.refine_weight_norm.clone().ones_like();
+    let splats = splats.valid();
+    let floor = |s: &Splats| s.min_scale.clone().expect("floor attached");
+    let before = (
+        floats(splats.transforms.val()).await,
+        floats(splats.raw_opacities.val()).await,
+        floats(floor(&splats)).await,
+    );
+    let (refined, _) = trainer.refine(2, splats).await;
+    let after = (
+        floats(refined.transforms.val()).await,
+        floats(refined.raw_opacities.val()).await,
+        floats(floor(&refined)).await,
+    );
+    let far_t = NEAR * 10..(NEAR + FAR) * 10;
+    assert_eq!(
+        bits(&before.0[far_t.clone()]),
+        bits(&after.0[far_t]),
+        "far raw params changed"
+    );
+    assert_eq!(
+        bits(&before.1[FAR_ROWS]),
+        bits(&after.1[FAR_ROWS]),
+        "far opacity changed"
+    );
+    assert_eq!(
+        bits(&before.2[FAR_ROWS]),
+        bits(&after.2[FAR_ROWS]),
+        "far floor changed"
+    );
+    assert!(
+        before.2[FAR_ROWS].iter().all(|f| *f > 0.0),
+        "far splats carry a floor"
+    );
+}
+
+/// Refine statistics count what a step trained: a frozen row the camera sees gathers no refine weight, visibility or
+/// screen size; with the radius off it does.
+#[tokio::test]
+async fn frozen_rows_gather_no_densification_stats() {
+    for (radius, far_counts) in [(5.0, false), (0.0, true)] {
+        let device = device().await;
+        let mut trainer = trainer(radius, &device);
+        trainer.step(batch(), splats(0.9, &device).train()).await;
+        let record = trainer.refine_record.as_ref().expect("stepped");
+        let weight = floats(record.refine_weight_norm.clone()).await;
+        let vis = floats(record.vis_weight.clone()).await;
+        let size = floats(record.max_screen_size.clone()).await;
+        for row in FAR_ROWS {
+            let counted = weight[row] > 0.0 && vis[row] > 0.0 && size[row] > 0.0;
+            let zero = weight[row] == 0.0 && vis[row] == 0.0 && size[row] == 0.0;
+            assert!(
+                if far_counts { counted } else { zero },
+                "radius {radius}, row {row}: {} {} {}",
+                weight[row],
+                vis[row],
+                size[row]
+            );
+        }
+        assert!(
+            (0..NEAR).all(|row| vis[row] > 0.0),
+            "radius {radius}: near rows unseen"
+        );
+    }
 }

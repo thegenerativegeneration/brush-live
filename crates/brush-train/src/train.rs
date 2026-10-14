@@ -169,18 +169,6 @@ fn compute_min_scale(
     min_ratio.map(|r| r.mul_scalar(factor.sqrt()))
 }
 
-/// `[N]` flags of the `means` (`[N, 3]`, inner backend) farther than `radius` from `center`.
-fn beyond_radius(means: Tensor<2>, center: glam::Vec3, radius: f32) -> Tensor<1, Bool> {
-    let n = means.dims()[0];
-    let c = Tensor::<1>::from_floats([center.x, center.y, center.z], &means.device()).reshape([1, 3]);
-    let diff = means - c;
-    diff.clone()
-        .mul(diff)
-        .sum_dim(1)
-        .reshape([n])
-        .greater_elem(radius * radius)
-}
-
 pub async fn get_splat_bounds(splats: Splats, percentile: f32) -> BoundingBox {
     let means: Vec<f32> = splats
         .means()
@@ -871,7 +859,7 @@ impl SplatTrainer {
         optimizer.transforms.scaling = Some(lr_scaling);
 
         let frozen = (self.config.train_radius_m > 0.0).then(|| {
-            beyond_radius(
+            radius::beyond_radius(
                 splats.means().inner(),
                 camera.position,
                 self.config.train_radius_m,
@@ -920,6 +908,16 @@ impl SplatTrainer {
             phases[3] = lap(&mut clock);
         }
 
+        // Splats beyond the training radius count as unseen this step: no refine weight, visibility, screen size or
+        // position noise (importance stays, so eviction is unchanged).
+        let (refine_weight, visible, max_radius) = match &frozen {
+            Some(frozen) => (
+                refine_weight.mask_fill(frozen.clone(), 0.0),
+                visible.mask_fill(frozen.clone(), 0.0),
+                max_radius.mask_fill(frozen.clone(), 0.0),
+            ),
+            None => (refine_weight, visible, max_radius),
+        };
         trace_span!("Housekeeping").in_scope(|| {
             // Refine state accumulates on the inner (non-autodiff) device.
             // Kept after the optimizer so it doesn't sit between the
@@ -938,12 +936,7 @@ impl SplatTrainer {
             }
         });
 
-        // Noise uses the forward's floored opacities, without building an autodiff graph. Splats beyond the
-        // training radius count as unseen, so they get none.
-        let visible = match &frozen {
-            Some(frozen) => visible.mask_fill(frozen.clone(), 0.0),
-            None => visible,
-        };
+        // Noise uses the forward's floored opacities, without building an autodiff graph.
         let samples = Tensor::random(
             [splats.num_splats() as usize, 3],
             Distribution::Normal(0.0, 1.0),
@@ -988,17 +981,31 @@ impl SplatTrainer {
 
     pub async fn refine(&mut self, iter: u32, splats: Splats) -> (Splats, RefineStats) {
         let progress = iter as f32 / self.config.total_train_iters.max(1) as f32;
+        let mut refiner = self
+            .refine_record
+            .take()
+            .expect("Can only refine if refine stats are initialized");
         // Refine manipulates the canonical (un-floored) params, so bake the
         // current 3D-filter floor into them first — split/clone/prune then see
         // the splat's true scales with no double-apply. A freshly recomputed
         // floor is attached at the end (below), once positions/count are known.
-        let splats = splats.bake_min_scale();
+        // With the training radius on, rows no step trained since the last refine stay raw and keep their floor
+        // through the refine instead, so a frozen splat does not get its floor folded in again at every refine.
+        let refresh_floor = progress < MIN_SCALE_FREEZE_FRAC
+            && self.config.min_scale_factor > 0.0
+            && !self.view_cams.is_empty();
+        let untrained_in = refiner.untrained().filter(|_| refresh_floor);
+        let (splats, prune_view) = match untrained_in {
+            Some(untrained) => match radius::bake_trained(splats, &untrained) {
+                Ok(bake) => {
+                    refiner.kept_floor = Some(bake.floor);
+                    (bake.splats, Some((bake.opacities, bake.scales)))
+                }
+                Err(splats) => (splats, None),
+            },
+            None => (splats.bake_min_scale(), None),
+        };
         let device = splats.device();
-
-        let refiner = self
-            .refine_record
-            .take()
-            .expect("Can only refine if refine stats are initialized");
         if let Some(e) = self.evict.as_mut()
             && let Some(life) = e.life.as_mut()
         {
@@ -1031,8 +1038,8 @@ impl SplatTrainer {
                 .expect("Failed to count clamped optimizer steps");
             self.adam_clamped += n.max(0) as u64;
         }
-        let alpha_mask = splats.opacities().lower_elem(MIN_OPACITY);
-        let scales = splats.scales();
+        let (opacities, scales) = prune_view.unwrap_or_else(|| (splats.opacities(), splats.scales()));
+        let alpha_mask = opacities.lower_elem(MIN_OPACITY);
 
         // Note: we do NOT cull on a minimum scale. A genuinely flat splat
         // (a thin "pancake" representing a surface) legitimately has a tiny
@@ -1238,6 +1245,7 @@ impl SplatTrainer {
         // Per-splat max on-screen extent, used by `refine_splats` to cap the
         // split shrink so oversized splats' children land at `split_at_screen_size`.
         let screen_sizes = refiner.max_screen_size.clone();
+        let kept_floor = refiner.kept_floor.clone().zip(untrained.clone());
         splats = self.refine_splats(
             &device,
             optim,
@@ -1263,6 +1271,10 @@ impl SplatTrainer {
             if let Some(f) =
                 compute_min_scale(&means, &self.view_cams, self.config.min_scale_factor)
             {
+                let f = match kept_floor {
+                    Some((kept, untrained)) => radius::keep_floor(f, kept, untrained),
+                    None => f,
+                };
                 splats = splats.with_min_scale(f);
             }
         }
@@ -1668,6 +1680,9 @@ mod profile_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "sh_background_integration_tests.rs"]
 mod sh_background_integration_tests;
+
+#[path = "train_radius.rs"]
+mod radius;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "train_radius_tests.rs"]
