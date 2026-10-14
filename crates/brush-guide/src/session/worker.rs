@@ -25,6 +25,7 @@ use drain::{Drain, try_take};
 use glam::UVec2;
 use eval_schedule::EvalSchedule;
 use holdout::{EvalExtras, Holdout};
+pub(crate) use holdout::warm_up_eval;
 use poses::Held;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -131,8 +132,8 @@ pub(super) async fn worker(
         if w.holdout.has_views()
             && let Some(extras) = w.eval_schedule.due(received, now)
         {
-            let scored = w.eval_holdout(extras).await;
-            w.eval_schedule.record(received, now, scored);
+            let scored = w.eval_holdout(extras, false).await;
+            w.eval_schedule.record(received, now, extras, scored);
         }
         w.publish_status();
         brush_async::yield_now().await;
@@ -236,7 +237,7 @@ impl Worker {
     fn new(config: GuideConfig, device: Device, session_dir: PathBuf, channels: Channels) -> Self {
         let clock = Instant::now();
         let live = LiveModel::new(config.clone(), device.clone());
-        let holdout = Holdout::new(config.holdout_every, config.eval_interval_s);
+        let holdout = Holdout::from_config(&config);
         let eval_schedule = eval_schedule_of(&config);
         let mut voxels = VoxelAggregator::new(
             config.voxel_size,
@@ -381,19 +382,18 @@ impl Worker {
     }
 
     /// Scores the splats on the held-out views and logs the result; `extras` adds LPIPS, the seam split and
-    /// saved renders as configured. Whether any view was scored (not without splats or renderable views).
-    async fn eval_holdout(&mut self, extras: bool) -> bool {
+    /// saved renders as configured ([`EvalExtras::for_eval`]), `finish` marks the finish eval. Whether any view
+    /// was scored (not without splats or renderable views).
+    async fn eval_holdout(&mut self, extras: bool, finish: bool) -> bool {
         let now = self.clock.elapsed().as_secs_f64();
-        let iter = self.live.iter();
-        let eval_extras = EvalExtras {
-            lpips: extras && self.config.eval_lpips,
-            seam_band_m: if extras { self.config.eval_seam_band_m } else { 0.0 },
-            tile_size_m: self.config.area_tile_size_m,
-            save_dir: (extras && !self.config.eval_save_views.is_empty())
-                .then(|| self.session_dir.join("eval_renders")),
-            save_ids: self.config.eval_save_views.clone(),
-            iter,
-        };
+        let eval_extras = EvalExtras::for_eval(
+            &self.config,
+            extras,
+            self.holdout.received(),
+            finish,
+            &self.session_dir,
+            self.live.iter(),
+        );
         let Some(splats) = self.live.eval_splats().await else {
             return false;
         };
@@ -431,6 +431,8 @@ impl Worker {
             train_ms: (self.totals_s.train * 1e3) as u64,
             refine_ms: self.live.refine_total_ms(),
             eval_ms: r.ms,
+            lpips_ms: r.lpips_ms,
+            seam_ms: r.seam_ms,
             bounds_median_size: self.live.bounds_median_size(),
             adam_clamped: self.live.adam_clamped(),
             extras,
@@ -451,7 +453,7 @@ impl Worker {
             None => Err("no splats yet".to_owned()),
         };
         if finish && result.is_ok() {
-            self.eval_holdout(true).await;
+            self.eval_holdout(true, true).await;
             if self.config.finish_fisher {
                 let t = Instant::now();
                 self.finish_pass(self.clock.elapsed().as_secs_f64()).await;
@@ -485,7 +487,7 @@ impl Worker {
         }
         let config = &self.config;
         self.live.reset();
-        self.holdout = Holdout::new(config.holdout_every, config.eval_interval_s);
+        self.holdout = Holdout::from_config(config);
         self.eval_schedule = eval_schedule_of(&config);
         self.voxels.reset();
         self.voxel_cadence = voxel_cadence(config);

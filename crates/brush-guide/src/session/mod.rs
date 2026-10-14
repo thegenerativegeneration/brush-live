@@ -4,6 +4,7 @@ pub(crate) mod splat_read;
 #[cfg(test)]
 mod tests;
 mod worker;
+pub(crate) use worker::warm_up_eval;
 
 pub use frames::forward_frames;
 

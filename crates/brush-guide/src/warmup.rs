@@ -4,8 +4,9 @@
 //! bucket on dummy splats compiles them before a phone connects. Where
 //! autotune is enabled (host builds), the same run also tunes them and fills
 //! the cache in memory and on disk under the server's working directory.
-//! Only training and the voxel round's readback are warmed; the optional
-//! finish-time Fisher pass runs on first use.
+//! Training and the voxel round's readback are warmed, and with a holdout
+//! the evals' extras (LPIPS, seam render); the optional finish-time Fisher
+//! pass runs on first use.
 
 use crate::config::GuideConfig;
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};
@@ -145,7 +146,8 @@ pub fn warmup_sizes(max_splats: u32) -> Vec<u32> {
 }
 
 /// Runs, at each of `warmup_sizes(config.max_splats)`: two training steps
-/// and a refine. `device` is the autodiff device. Returns the seconds it took.
+/// and a refine; then, with a holdout, the evals' extras once on the largest
+/// splat set. `device` is the autodiff device. Returns the seconds it took.
 pub async fn warm_up(config: &GuideConfig, device: &Device) -> f64 {
     warm_up_gated(config, device, None).await
 }
@@ -166,6 +168,7 @@ async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&
     let mut rng = rand::rngs::StdRng::seed_from_u64(config.seed);
     let sizes = warmup_sizes(config.max_splats);
     reset_progress(sizes.len() as u32);
+    let mut last = None;
     for n in sizes {
         if let Some(gate) = gate.as_deref_mut() {
             gate.pass().await;
@@ -181,6 +184,12 @@ async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&
             "warm-up: {n} splats in {:.0} ms",
             t.elapsed().as_secs_f64() * 1e3
         );
+        last = Some(trained);
+    }
+    if let Some(splats) = last.filter(|_| config.holdout_every >= 2) {
+        let t = Instant::now();
+        crate::session::warm_up_eval(config, &splats, &camera, image).await;
+        log::info!("warm-up: eval extras in {:.0} ms", t.elapsed().as_secs_f64() * 1e3);
     }
     start.elapsed().as_secs_f64()
 }

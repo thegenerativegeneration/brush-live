@@ -43,13 +43,13 @@ impl EvalSchedule {
     }
 
     /// Marks the eval `due` asked for as done. The periodic schedule moves on either way; checkpoints up to
-    /// `received` are consumed only when the eval `scored` views (no splats yet, or no view rendering, keeps them
-    /// pending, tried again after [`CHECKPOINT_RETRY_S`]).
-    pub(super) fn record(&mut self, received: u32, now_s: f64, scored: bool) {
-        if scored {
+    /// `received` are consumed only by an eval with `extras` that `scored` views (no splats yet, or no view
+    /// rendering, keeps them pending, tried again after [`CHECKPOINT_RETRY_S`]).
+    pub(super) fn record(&mut self, received: u32, now_s: f64, extras: bool, scored: bool) {
+        if extras && scored {
             self.extras_at.retain(|&c| c > received);
             self.retry_at_s = None;
-        } else if self.checkpoint_pending(received) {
+        } else if extras && self.checkpoint_pending(received) {
             self.retry_at_s = Some(now_s + CHECKPOINT_RETRY_S);
         }
         if self.every_keyframes > 0 && received >= self.next {
@@ -70,8 +70,8 @@ mod tests {
     /// `due`, and when an eval is due, `record` it as one that scored views.
     fn step(s: &mut EvalSchedule, received: u32, now_s: f64) -> Option<bool> {
         let due = s.due(received, now_s);
-        if due.is_some() {
-            s.record(received, now_s, true);
+        if let Some(extras) = due {
+            s.record(received, now_s, extras, true);
         }
         due
     }
@@ -104,15 +104,26 @@ mod tests {
         assert_eq!(s.due(21, 0.0), Some(true));
         assert_eq!(s.due(21, 0.0), Some(true), "due changes no state");
         // No splats yet, or no view rendered: nothing scored.
-        s.record(21, 0.0, false);
+        s.record(21, 0.0, true, false);
         assert_eq!(s.due(22, 0.5), None, "retried no sooner than a second later");
         assert_eq!(s.due(23, 1.0), Some(true), "still pending");
-        s.record(23, 1.0, true);
+        s.record(23, 1.0, true, true);
         assert_eq!(s.due(24, 1.0), None, "consumed by the eval that scored");
         // A skipped periodic eval is not retried: the next one is at the next multiple.
         assert_eq!(s.due(50, 2.0), Some(false));
-        s.record(50, 2.0, false);
+        s.record(50, 2.0, false, false);
         assert_eq!(s.due(51, 9.0), None);
         assert_eq!(s.due(100, 9.0), Some(false));
+    }
+
+    #[test]
+    fn a_periodic_eval_inside_the_retry_window_leaves_the_checkpoint_pending() {
+        let mut s = EvalSchedule::new(50, 10.0, vec![48]);
+        assert_eq!(s.due(48, 0.0), Some(true));
+        s.record(48, 0.0, true, false);
+        // The periodic eval at 50 falls inside the retry window: no extras, and it scores.
+        assert_eq!(s.due(50, 0.5), Some(false));
+        s.record(50, 0.5, false, true);
+        assert_eq!(s.due(51, 1.0), Some(true), "the checkpoint is still pending after the window");
     }
 }

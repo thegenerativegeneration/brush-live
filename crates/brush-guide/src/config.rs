@@ -88,6 +88,8 @@ pub struct GuideConfig {
     /// score the splats on them (PSNR, SSIM in the log, black background), for
     /// replays. 0 off; 2 or more (1 would hold out every keyframe and counts as 0).
     pub holdout_every: u32,
+    /// Keyframes received after this many are never held out (0: no limit), e.g. a replay's walk back.
+    pub holdout_max_received: u32,
     /// Seconds between held-out scorings; there is one more at finish.
     pub eval_interval_s: f32,
     /// Time training-step phases (GPU synced at each boundary; slower steps)
@@ -118,6 +120,12 @@ pub struct GuideConfig {
     pub eval_seam_band_m: f32,
     /// Keyframe ids of held-out views whose renders are saved to `eval_renders/` in evals with extras.
     pub eval_save_views: Vec<u64>,
+    /// Held-out keyframe ids scored with LPIPS in evals with extras (empty: every held-out view); PSNR and SSIM
+    /// always cover every held-out view.
+    pub eval_extras_views: Vec<u64>,
+    /// Evals with extras at or after this many received keyframes carry the seam split, and so does the finish
+    /// eval (0: every eval with extras).
+    pub eval_seam_from: u32,
     /// Edge of the area-training tiles in x and z, metres; also the grid of the eval's seam band.
     pub area_tile_size_m: f32,
 }
@@ -161,6 +169,7 @@ impl Default for GuideConfig {
             sh_background_alpha_weight: 0.0,
             max_train_steps: None,
             holdout_every: 0,
+            holdout_max_received: 0,
             eval_interval_s: 30.0,
             profile_steps: false,
             ssim_every: 1,
@@ -173,6 +182,8 @@ impl Default for GuideConfig {
             eval_lpips: false,
             eval_seam_band_m: 0.0,
             eval_save_views: Vec::new(),
+            eval_extras_views: Vec::new(),
+            eval_seam_from: 0,
             area_tile_size_m: 10.0,
         }
     }
@@ -281,11 +292,18 @@ mod eval_extra_tests {
         assert_eq!((cfg.eval_every_keyframes, cfg.eval_lpips, cfg.eval_seam_band_m), (0, false, 0.0));
         assert!(cfg.eval_extras_at.is_empty());
         assert!(cfg.eval_save_views.is_empty());
+        assert!(cfg.eval_extras_views.is_empty());
+        assert_eq!((cfg.eval_seam_from, cfg.holdout_max_received), (0, 0));
         assert_eq!(cfg.area_tile_size_m, 10.0);
         let cfg: GuideConfig = serde_json::from_str(
             r#"{"eval_every_keyframes": 50, "eval_extras_at": [117, 413], "eval_lpips": true, "eval_save_views": [19, 59]}"#,
         )
         .expect("parses");
         assert_eq!(cfg.eval_save_views, vec![19, 59]);
+        let cfg: GuideConfig = serde_json::from_str(
+            r#"{"eval_extras_views": [9, 109], "eval_seam_from": 674, "holdout_max_received": 674}"#,
+        )
+        .expect("parses");
+        assert_eq!((cfg.eval_extras_views, cfg.eval_seam_from, cfg.holdout_max_received), (vec![9, 109], 674, 674));
     }
 }

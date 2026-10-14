@@ -3,7 +3,7 @@
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
 use brush_render::{TextureMode, render_splats};
-use burn::tensor::Tensor;
+use burn::tensor::{Tensor, TensorData};
 use glam::{UVec2, Vec2, Vec3};
 
 /// Depth that codes to a colour of 1.
@@ -52,17 +52,38 @@ pub(super) fn split_psnr(render: &[f32], gt: &[f32], band: &[Option<bool>]) -> (
     (psnr(0), psnr(1))
 }
 
+/// The splats' means on the host, `[x, y, z]` per splat, for [`surface_points`].
+pub(crate) async fn read_means(splats: &Splats) -> Result<Vec<f32>, String> {
+    splats
+        .means()
+        .into_data_async()
+        .await
+        .map_err(|e| e.to_string())?
+        .try_to_vec::<f32>()
+        .map_err(|e| format!("{e:?}"))
+}
+
 /// World position of each pixel's surface (row-major, `size`), from a render that codes depth as colour;
-/// `None` where the accumulated opacity is below 0.5.
-pub(super) async fn surface_points(splats: &Splats, camera: &Camera, size: UVec2) -> Vec<Option<Vec3>> {
+/// `None` where the accumulated opacity is below 0.5. `means` are the splats' means from [`read_means`]; the depth
+/// code is computed on the host, so only the render kernels run on the GPU. The float render does not clamp
+/// colours at 1, so depths beyond `DEPTH_FAR_M` still decode (projection clamps colours at 100: 20 km).
+pub(crate) async fn surface_points(
+    splats: &Splats,
+    means: &[f32],
+    camera: &Camera,
+    size: UVec2,
+) -> Vec<Option<Vec3>> {
     let device = splats.device();
     let n = splats.num_splats() as usize;
     let fwd = camera.rotation * Vec3::Z;
-    let forward = Tensor::<1>::from_floats([fwd.x, fwd.y, fwd.z], &device).reshape([3, 1]);
-    let offset = camera.position.dot(fwd);
-    let z = splats.means().matmul(forward).sub_scalar(offset).reshape([n]);
-    let dc = z.div_scalar(DEPTH_FAR_M).sub_scalar(0.5).div_scalar(SH_C0).reshape([n, 1, 1]);
-    let dc = Tensor::cat(vec![dc.clone(), dc.clone(), dc], 2);
+    let dc: Vec<f32> = means
+        .chunks_exact(3)
+        .flat_map(|m| {
+            let z = (Vec3::from_slice(m) - camera.position).dot(fwd);
+            [(z / DEPTH_FAR_M - 0.5) / SH_C0; 3]
+        })
+        .collect();
+    let dc = Tensor::<3>::from_data(TensorData::new(dc, [n, 1, 3]), &device);
     let mut coded = Splats::from_tensor_data(
         splats.means(),
         splats.rotations(),
@@ -126,6 +147,41 @@ mod tests {
         assert_eq!(split_psnr(&render, &gt, &[None, None]), (None, None));
     }
 
+    /// A scene the size of the phone's model rendered at a keyframe size this process has not rendered yet: two
+    /// calls in a row label every pixel the same.
+    #[tokio::test]
+    async fn surface_points_are_the_same_on_a_second_call() {
+        let device = brush_cube::test_helpers::test_device().await.into();
+        let n = 50_000usize;
+        // Deterministic pseudo-random splats in a 20 m box ahead of the camera.
+        let mut state = 0x2545_f491_u32;
+        let mut r = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as f32 / u32::MAX as f32
+        };
+        let means: Vec<f32> = (0..n).flat_map(|_| [r() * 20.0 - 10.0, r() * 6.0 - 3.0, r() * 20.0 + 1.0]).collect();
+        let splats = Splats::from_raw(
+            means,
+            [1.0, 0.0, 0.0, 0.0].repeat(n),
+            (0..n * 3).map(|_| r() * 2.0 - 4.0).collect(),
+            vec![0.5; n * 3],
+            vec![inverse_sigmoid(0.9); n],
+            SplatRenderMode::Default,
+            &device,
+        );
+        let fov = 70f64.to_radians();
+        let camera = Camera::new(Vec3::ZERO, Quat::IDENTITY, fov, fov * 0.75, glam::vec2(0.5, 0.5), CameraModel::Pinhole);
+        let size = UVec2::new(497, 373);
+        let means = read_means(&splats).await.unwrap();
+        let first = border_band(&surface_points(&splats, &means, &camera, size).await, 10.0, 0.5);
+        let second = border_band(&surface_points(&splats, &means, &camera, size).await, 10.0, 0.5);
+        let differ = first.iter().zip(&second).filter(|(a, b)| a != b).count();
+        let labelled = first.iter().filter(|l| l.is_some()).count();
+        assert_eq!(differ, 0, "{differ} of {} pixels differ ({labelled} labelled)", first.len());
+    }
+
     /// A wall of opaque splats at z = 3 in front of the camera comes back at depth 3.
     #[tokio::test]
     async fn surface_points_find_a_wall_at_its_depth() {
@@ -145,7 +201,8 @@ mod tests {
         );
         let fov = 60f64.to_radians();
         let camera = Camera::new(Vec3::ZERO, Quat::IDENTITY, fov, fov, glam::vec2(0.5, 0.5), CameraModel::Pinhole);
-        let pts = surface_points(&splats, &camera, UVec2::new(32, 32)).await;
+        let means = read_means(&splats).await.unwrap();
+        let pts = surface_points(&splats, &means, &camera, UVec2::new(32, 32)).await;
         let centre = pts[16 * 32 + 16].expect("the wall covers the centre pixel");
         assert!((centre.z - 3.0).abs() < 0.05, "{centre}");
     }

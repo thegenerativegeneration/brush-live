@@ -39,6 +39,9 @@ pub(super) struct EvalRecord {
     /// Cumulative refine wall time (part of `train_ms`).
     pub refine_ms: f64,
     pub eval_ms: f64,
+    /// Parts of `eval_ms` spent on LPIPS (model load included) and on the seam split.
+    pub lpips_ms: f64,
+    pub seam_ms: f64,
     /// The trainer's bounds' median size, which scales the mean learning rate.
     pub bounds_median_size: f32,
     pub adam_clamped: u64,
@@ -73,6 +76,8 @@ mod tests {
             train_ms: 9000,
             refine_ms: 400.0,
             eval_ms: 31.0,
+            lpips_ms: 12.0,
+            seam_ms: 0.0,
             bounds_median_size: 0.8,
             adam_clamped: 0,
             extras: false,
@@ -97,6 +102,7 @@ mod tests {
         assert_eq!(lines[0]["views"][0]["id"], 9);
         assert!(lines[0]["views"][0]["lpips"].is_null());
         assert_eq!(lines[0]["last_keyframe_id"], 43);
+        assert_eq!((lines[0]["lpips_ms"].as_f64(), lines[0]["seam_ms"].as_f64()), (Some(12.0), Some(0.0)));
         std::fs::remove_dir_all(dir).ok();
     }
 }
