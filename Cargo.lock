@@ -1096,6 +1096,7 @@ dependencies = [
  "half",
  "image",
  "log",
+ "lpips",
  "rand 0.10.2",
  "serde",
  "serde_json",

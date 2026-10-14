@@ -107,6 +107,19 @@ pub struct GuideConfig {
     /// On a pose update, move each splat with the view whose seeds created it (`brush_train`'s origin tags). Off:
     /// only the views' cameras change and training alone has to move the drifted splats.
     pub move_anchored_splats: bool,
+    /// Held-out evals every this many received keyframes (0: every `eval_interval_s` seconds).
+    pub eval_every_keyframes: u32,
+    /// Received-keyframe counts at which the first eval at or after carries the extras (LPIPS, seam split,
+    /// saved renders); finish always does.
+    pub eval_extras_at: Vec<u32>,
+    /// Score LPIPS in evals with extras.
+    pub eval_lpips: bool,
+    /// Width in metres of the seam band at tile borders for the split PSNR (0: no split).
+    pub eval_seam_band_m: f32,
+    /// Keyframe ids of held-out views whose renders are saved to `eval_renders/` in evals with extras.
+    pub eval_save_views: Vec<u64>,
+    /// Edge of the area-training tiles in x and z, metres; also the grid of the eval's seam band.
+    pub area_tile_size_m: f32,
 }
 
 impl Default for GuideConfig {
@@ -155,6 +168,12 @@ impl Default for GuideConfig {
             mono_min_depth_with_lidar_m: 4.5,
             mono_scale_range: (0.3, 3.0),
             move_anchored_splats: true,
+            eval_every_keyframes: 0,
+            eval_extras_at: Vec::new(),
+            eval_lpips: false,
+            eval_seam_band_m: 0.0,
+            eval_save_views: Vec::new(),
+            area_tile_size_m: 10.0,
         }
     }
 }
@@ -249,5 +268,24 @@ mod anchored_splat_tests {
         let cfg: GuideConfig =
             serde_json::from_str(r#"{"move_anchored_splats": false}"#).expect("parses");
         assert!(!cfg.move_anchored_splats);
+    }
+}
+
+#[cfg(test)]
+mod eval_extra_tests {
+    use super::GuideConfig;
+
+    #[test]
+    fn eval_extras_default_off_and_parse() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!((cfg.eval_every_keyframes, cfg.eval_lpips, cfg.eval_seam_band_m), (0, false, 0.0));
+        assert!(cfg.eval_extras_at.is_empty());
+        assert!(cfg.eval_save_views.is_empty());
+        assert_eq!(cfg.area_tile_size_m, 10.0);
+        let cfg: GuideConfig = serde_json::from_str(
+            r#"{"eval_every_keyframes": 50, "eval_extras_at": [117, 413], "eval_lpips": true, "eval_save_views": [19, 59]}"#,
+        )
+        .expect("parses");
+        assert_eq!(cfg.eval_save_views, vec![19, 59]);
     }
 }

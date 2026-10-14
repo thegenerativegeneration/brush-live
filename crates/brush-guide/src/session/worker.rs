@@ -4,8 +4,10 @@
 
 mod drain;
 mod eval_log;
+mod eval_schedule;
 mod fisher;
 mod holdout;
+mod holdout_seam;
 mod poses;
 
 use super::preview::{PREVIEW_FLOATS, PreviewClock, PreviewSnapshot};
@@ -21,7 +23,8 @@ use brush_render::gaussian_splats::Splats;
 use burn::tensor::Device;
 use drain::{Drain, try_take};
 use glam::UVec2;
-use holdout::Holdout;
+use eval_schedule::EvalSchedule;
+use holdout::{EvalExtras, Holdout};
 use poses::Held;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -124,8 +127,12 @@ pub(super) async fn worker(
             w.voxel_round(now).await;
             w.totals_s.voxel += t.elapsed().as_secs_f64();
         }
-        if w.holdout.due(w.clock.elapsed().as_secs_f64()) {
-            w.eval_holdout().await;
+        if w.holdout.has_views()
+            && let Some(extras) = w
+                .eval_schedule
+                .due(w.holdout.received(), w.clock.elapsed().as_secs_f64())
+        {
+            w.eval_holdout(extras).await;
         }
         w.publish_status();
         brush_async::yield_now().await;
@@ -206,6 +213,7 @@ struct Worker {
     /// From the last `Command::Reset`; stamped on every preview snapshot.
     generation: u64,
     holdout: Holdout,
+    eval_schedule: EvalSchedule,
 }
 
 #[derive(Default)]
@@ -216,11 +224,20 @@ struct Between {
     kfs: u32,
 }
 
+fn eval_schedule_of(config: &GuideConfig) -> EvalSchedule {
+    EvalSchedule::new(
+        config.eval_every_keyframes,
+        config.eval_interval_s,
+        config.eval_extras_at.clone(),
+    )
+}
+
 impl Worker {
     fn new(config: GuideConfig, device: Device, session_dir: PathBuf, channels: Channels) -> Self {
         let clock = Instant::now();
         let live = LiveModel::new(config.clone(), device.clone());
         let holdout = Holdout::new(config.holdout_every, config.eval_interval_s);
+        let eval_schedule = eval_schedule_of(&config);
         let mut voxels = VoxelAggregator::new(
             config.voxel_size,
             config.min_cell_opacity,
@@ -254,6 +271,7 @@ impl Worker {
             preview_version: 0,
             generation: 0,
             holdout,
+            eval_schedule,
         }
     }
 
@@ -362,13 +380,24 @@ impl Worker {
         Ok(())
     }
 
-    /// Scores the splats on the held-out views and logs the result.
-    async fn eval_holdout(&mut self) {
+    /// Scores the splats on the held-out views and logs the result; `extras` adds LPIPS, the seam split and
+    /// saved renders as configured.
+    async fn eval_holdout(&mut self, extras: bool) {
         let now = self.clock.elapsed().as_secs_f64();
+        let iter = self.live.iter();
+        let eval_extras = EvalExtras {
+            lpips: extras && self.config.eval_lpips,
+            seam_band_m: if extras { self.config.eval_seam_band_m } else { 0.0 },
+            tile_size_m: self.config.area_tile_size_m,
+            save_dir: (extras && !self.config.eval_save_views.is_empty())
+                .then(|| self.session_dir.join("eval_renders")),
+            save_ids: self.config.eval_save_views.clone(),
+            iter,
+        };
         let Some(splats) = self.live.eval_splats().await else {
             return;
         };
-        if let Some(r) = self.holdout.eval(&splats, now).await {
+        if let Some(r) = self.holdout.eval(&splats, now, &eval_extras).await {
             // Eval time does not count against the training step rate.
             self.rate_window.0 += r.ms / 1e3;
             log::info!(
@@ -402,6 +431,7 @@ impl Worker {
                 eval_ms: r.ms,
                 bounds_median_size: self.live.bounds_median_size(),
                 adam_clamped: self.live.adam_clamped(),
+                extras,
                 views: r.per_view.clone(),
             };
             if let Err(e) = eval_log::append(&self.session_dir.join("eval.jsonl"), &record) {
@@ -419,7 +449,7 @@ impl Worker {
             None => Err("no splats yet".to_owned()),
         };
         if finish && result.is_ok() {
-            self.eval_holdout().await;
+            self.eval_holdout(true).await;
             if self.config.finish_fisher {
                 let t = Instant::now();
                 self.finish_pass(self.clock.elapsed().as_secs_f64()).await;
@@ -454,6 +484,7 @@ impl Worker {
         let config = &self.config;
         self.live.reset();
         self.holdout = Holdout::new(config.holdout_every, config.eval_interval_s);
+        self.eval_schedule = eval_schedule_of(&config);
         self.voxels.reset();
         self.voxel_cadence = voxel_cadence(config);
         self.throttle = IterThrottle::new(config.max_iters_per_s);

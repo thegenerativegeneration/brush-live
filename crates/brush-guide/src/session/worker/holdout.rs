@@ -1,25 +1,56 @@
 //! Held-out keyframes for measuring image quality in replays: every
 //! `holdout_every`-th new keyframe is kept out of training and seeding, and
-//! the splats are scored on those views every `eval_interval_s` and at finish.
+//! the splats are scored on those views on the `EvalSchedule` and at finish.
 
 use brush_dataset::scene::SceneView;
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use super::eval_log::ViewScore;
-use brush_train::eval::eval_stats;
+use super::holdout_seam::{border_band, split_psnr, surface_points};
+use brush_train::eval::{EvalSample, eval_stats};
+use burn::tensor::{Tensor, TensorData};
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use web_time::Instant;
 
 pub(super) struct Holdout {
     every: u32,
-    interval_s: f64,
     /// New keyframes seen, held out or not.
     received: u32,
     ids: HashSet<u64>,
     /// Images are loaded at eval time, so they do not sit in memory.
     views: Vec<(u64, SceneView)>,
-    last_eval_s: Option<f64>,
+    /// Loaded on the first eval with LPIPS.
+    lpips: Option<lpips::LpipsModel>,
+    /// Ids whose ground truth image was already saved.
+    gt_saved: HashSet<u64>,
+}
+
+/// What one eval computes besides PSNR and SSIM.
+pub(super) struct EvalExtras {
+    pub lpips: bool,
+    /// Width of the seam band in metres; 0 skips the split.
+    pub seam_band_m: f32,
+    pub tile_size_m: f32,
+    /// Where renders of `save_ids` go; `None` saves nothing.
+    pub save_dir: Option<PathBuf>,
+    pub save_ids: Vec<u64>,
+    pub iter: u32,
+}
+
+impl EvalExtras {
+    /// PSNR and SSIM only.
+    #[cfg(test)]
+    pub(super) fn none() -> Self {
+        Self {
+            lpips: false,
+            seam_band_m: 0.0,
+            tile_size_m: 10.0,
+            save_dir: None,
+            save_ids: Vec::new(),
+            iter: 0,
+        }
+    }
 }
 
 /// Mean quality over the held-out views.
@@ -33,8 +64,9 @@ pub(super) struct EvalResult {
 }
 
 impl Holdout {
-    /// `every` 0 holds nothing out; 1 would hold out everything and counts as 0.
-    pub(super) fn new(every: u32, interval_s: f32) -> Self {
+    /// `every` 0 holds nothing out; 1 would hold out everything and counts as 0. The eval interval belongs to
+    /// the `EvalSchedule`.
+    pub(super) fn new(every: u32, _interval_s: f32) -> Self {
         let every = if every == 1 {
             log::warn!("holdout_every 1 would hold out every keyframe; holdout off");
             0
@@ -43,11 +75,11 @@ impl Holdout {
         };
         Self {
             every,
-            interval_s: f64::from(interval_s),
             received: 0,
             ids: HashSet::new(),
             views: Vec::new(),
-            last_eval_s: None,
+            lpips: None,
+            gt_saved: HashSet::new(),
         }
     }
 
@@ -106,38 +138,41 @@ impl Holdout {
         self.received
     }
 
-    pub(super) fn due(&self, now_s: f64) -> bool {
+    /// Whether any view is held out.
+    pub(super) fn has_views(&self) -> bool {
         !self.views.is_empty()
-            && self
-                .last_eval_s
-                .is_none_or(|last| now_s - last >= self.interval_s)
     }
 
     /// Scores `splats` on every held-out view that renders and loads; `None`
     /// if no view could be scored.
-    pub(super) async fn eval(&mut self, splats: &Splats, now_s: f64) -> Option<EvalResult> {
+    pub(super) async fn eval(
+        &mut self,
+        splats: &Splats,
+        _now_s: f64,
+        extras: &EvalExtras,
+    ) -> Option<EvalResult> {
         if self.views.is_empty() {
             return None;
         }
-        self.last_eval_s = Some(now_s);
+        if extras.lpips && self.lpips.is_none() {
+            self.lpips = Some(lpips::load_vgg_lpips(&splats.device()));
+        }
         let start = Instant::now();
         let device = splats.device();
         let (mut psnr, mut ssim, mut n) = (0.0f32, 0.0f32, 0usize);
         let mut per_view = Vec::new();
         for (id, view) in &self.views {
-            match score_view(splats, view, &device).await {
-                Ok((p, s)) => {
-                    psnr += p;
-                    ssim += s;
+            match score_view(*id, splats, view, &device, extras, self.lpips.as_ref()).await {
+                Ok((score, gt_to_save)) => {
+                    psnr += score.psnr;
+                    ssim += score.ssim;
                     n += 1;
-                    per_view.push(ViewScore {
-                        id: *id,
-                        psnr: p,
-                        ssim: s,
-                        lpips: None,
-                        psnr_band: None,
-                        psnr_interior: None,
-                    });
+                    per_view.push(score);
+                    if let Some((path, img)) = gt_to_save.filter(|_| self.gt_saved.insert(*id)) {
+                        if let Err(e) = img.save(&path) {
+                            log::warn!("could not save {path:?}: {e}");
+                        }
+                    }
                 }
                 Err(e) => log::warn!("held-out view skipped: {e}"),
             }
@@ -152,11 +187,15 @@ impl Holdout {
     }
 }
 
+/// Scores one view; also returns the ground truth image and its path when `extras` saves this view.
 async fn score_view(
+    id: u64,
     splats: &Splats,
     view: &SceneView,
     device: &burn::tensor::Device,
-) -> Result<(f32, f32), String> {
+    extras: &EvalExtras,
+    lpips: Option<&lpips::LpipsModel>,
+) -> Result<(ViewScore, Option<(PathBuf, image::RgbImage)>), String> {
     let image = view.image.load().await.map_err(|e| e.to_string())?;
     let sample = eval_stats(
         splats.clone(),
@@ -167,17 +206,50 @@ async fn score_view(
     )
     .await
     .map_err(|e| e.to_string())?;
-    let psnr = sample
-        .psnr
-        .into_scalar_async::<f32>()
-        .await
-        .map_err(|e| e.to_string())?;
-    let ssim = sample
-        .ssim
-        .into_scalar_async::<f32>()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok((psnr, ssim))
+    let scalar = |t: Tensor<1>| async move { t.into_scalar_async::<f32>().await.map_err(|e| e.to_string()) };
+    let mut score = ViewScore {
+        id,
+        psnr: scalar(sample.psnr.clone()).await?,
+        ssim: scalar(sample.ssim.clone()).await?,
+        lpips: None,
+        psnr_band: None,
+        psnr_interior: None,
+    };
+    if let Some(model) = lpips.filter(|_| extras.lpips) {
+        let gt = gt_tensor(&sample, device);
+        score.lpips = Some(scalar(model.lpips(sample.rendered.clone().unsqueeze_dim(0), gt)).await?);
+    }
+    if extras.seam_band_m > 0.0 {
+        let [h, w, _] = sample.rendered.dims();
+        let points = surface_points(splats, &view.camera, glam::uvec2(w as u32, h as u32)).await;
+        let band = border_band(&points, extras.tile_size_m, extras.seam_band_m);
+        let render = sample
+            .rendered
+            .clone()
+            .into_data_async()
+            .await
+            .map_err(|e| e.to_string())?
+            .try_to_vec::<f32>()
+            .map_err(|e| format!("{e:?}"))?;
+        let gt = sample.gt_img.to_rgb32f().into_raw();
+        (score.psnr_band, score.psnr_interior) = split_psnr(&render, &gt, &band);
+    }
+    let mut gt_to_save = None;
+    if let Some(dir) = extras.save_dir.as_ref().filter(|_| extras.save_ids.contains(&id)) {
+        let path = dir.join(format!("{id}_{}.png", extras.iter));
+        if let Err(e) = sample.save_to_disk(&path).await {
+            log::warn!("could not save {path:?}: {e}");
+        }
+        gt_to_save = Some((dir.join(format!("gt_{id}.png")), sample.gt_img.to_rgb8()));
+    }
+    Ok((score, gt_to_save))
+}
+
+/// The ground truth as a `[1, h, w, 3]` float tensor.
+fn gt_tensor(sample: &EvalSample, device: &burn::tensor::Device) -> Tensor<4> {
+    let rgb = sample.gt_img.to_rgb32f();
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    Tensor::from_data(TensorData::new(rgb.into_raw(), [1, h, w, 3]), device)
 }
 
 #[cfg(test)]
@@ -246,20 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn due_only_with_views_and_after_the_interval() {
-        let dir = std::env::temp_dir().join(format!("holdout-due-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut h = Holdout::new(2, 30.0);
-        assert!(!h.due(100.0), "no views yet");
-        h.views.push((0, view(&dir, 0)));
-        assert!(h.due(0.0));
-        h.last_eval_s = Some(10.0);
-        assert!(!h.due(39.0));
-        assert!(h.due(40.0));
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
     fn corrected_poses_move_held_out_views() {
         let dir = std::env::temp_dir().join(format!("holdout-poses-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -315,12 +373,36 @@ mod tests {
             SplatRenderMode::Default,
             &device,
         );
-        let result = h.eval(&splats, 0.0).await.expect("one view scores");
+        let result = h.eval(&splats, 0.0, &EvalExtras::none()).await.expect("one view scores");
         assert_eq!(result.views, 1);
         assert!(result.psnr.is_finite(), "psnr {}", result.psnr);
         assert_eq!(result.per_view.len(), 1);
         assert_eq!(result.per_view[0].id, 1);
         assert!((result.per_view[0].psnr - result.psnr).abs() < 1e-6);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn extras_add_lpips_and_save_renders() {
+        let dir = std::env::temp_dir().join(format!("holdout-extras-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rel = PathBuf::from("5.jpg");
+        image::RgbImage::from_pixel(64, 64, image::Rgb([90, 120, 30])).save(dir.join(&rel)).unwrap();
+        let vfs = Arc::new(BrushVfs::from_directory_files(&dir, vec![rel.clone()]));
+        let view = SceneView { image: LoadImage::new(vfs, rel, None, 64, None, false), camera: Camera::default() };
+        let camera = Camera::new(glam::Vec3::ZERO, glam::Quat::IDENTITY, 1.0, 1.0, glam::vec2(0.5, 0.5),
+            brush_render::kernels::camera_model::CameraModel::Pinhole);
+        let mut h = Holdout::new(2, 30.0);
+        h.add_held(5, camera, view, &dir);
+        let device = brush_cube::test_helpers::test_device().await.into();
+        let splats = Splats::from_raw(vec![0.0, 0.0, 2.0], vec![1.0, 0.0, 0.0, 0.0], vec![-1.0; 3], vec![0.5; 3],
+            vec![inverse_sigmoid(0.5)], SplatRenderMode::Default, &device);
+        let extras = EvalExtras { lpips: true, seam_band_m: 0.5, tile_size_m: 10.0,
+            save_dir: Some(dir.join("eval_renders")), save_ids: vec![5], iter: 7 };
+        let r = h.eval(&splats, 0.0, &extras).await.expect("scores");
+        assert!(r.per_view[0].lpips.is_some_and(f32::is_finite));
+        assert!(dir.join("eval_renders/5_7.png").exists());
+        assert!(dir.join("eval_renders/gt_5.png").exists());
         std::fs::remove_dir_all(dir).ok();
     }
 }

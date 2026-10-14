@@ -42,6 +42,8 @@ pub(super) struct EvalRecord {
     /// The trainer's bounds' median size, which scales the mean learning rate.
     pub bounds_median_size: f32,
     pub adam_clamped: u64,
+    /// The eval carried the extras (LPIPS, seam split, saved renders).
+    pub extras: bool,
     pub views: Vec<ViewScore>,
 }
 
@@ -73,6 +75,7 @@ mod tests {
             eval_ms: 31.0,
             bounds_median_size: 0.8,
             adam_clamped: 0,
+            extras: false,
             views: vec![ViewScore { id: 9, psnr: 21.5, ssim: 0.7, lpips: None, psnr_band: Some(20.0), psnr_interior: None }],
         }
     }
