@@ -112,3 +112,12 @@ impl RefineRecord {
         }
     }
 }
+
+/// `mask` without the rows flagged in `untrained` (rows no step trained since the last refine); `mask` itself
+/// without the trained column.
+pub(crate) fn trained_only(mask: Tensor<1, Bool>, untrained: Option<&Tensor<1, Bool>>) -> Tensor<1, Bool> {
+    match untrained {
+        Some(u) => mask.bool_and(u.clone().bool_not()),
+        None => mask,
+    }
+}

@@ -292,6 +292,20 @@ async fn split_trainer_at_budget() -> (SplatTrainer, Splats) {
     (trainer, s.valid())
 }
 
+/// With the training radius's trained column, rows no step trained since the last refine want no split, so they make
+/// no eviction demand: all untrained, nothing is evicted; all trained, eviction runs as without the column.
+#[tokio::test]
+async fn untrained_rows_make_no_eviction_demand() {
+    for (trained, evicted) in [(0.0, 0), (1.0, 6)] {
+        let (mut trainer, s) = split_trainer_at_budget().await;
+        trainer.note_keyframe_seeds(&rows(s.means()).await.concat());
+        let record = trainer.refine_record.as_mut().expect("stepped");
+        record.trained = Some(record.vis_weight.clone().zeros_like().add_scalar(trained));
+        let (_, stats) = trainer.refine(1, s).await;
+        assert_eq!(stats.num_evicted, evicted, "trained column {trained}");
+    }
+}
+
 #[tokio::test]
 async fn evictions_stop_once_the_keyframe_window_passes() {
     // Cells stay recent for 2 refines; every refine has fresh scores.

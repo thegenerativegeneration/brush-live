@@ -293,6 +293,7 @@ async fn refine_after_steps(radius: f32) -> Refined {
     let record = trainer.refine_record.as_mut().expect("stepped");
     record.refine_weight_norm = record.refine_weight_norm.clone().ones_like();
     record.max_screen_size = record.max_screen_size.clone().ones_like();
+    record.vis_weight = record.vis_weight.clone().ones_like();
     let trained_column = record.trained.is_some();
     let opac = floats(splats.raw_opacities.val().inner()).await;
     let transforms = floats(splats.transforms.val().inner()).await;
@@ -376,8 +377,9 @@ async fn radius_off_refines_every_row_as_today() {
     assert_split_and_decayed(&r, 0..NEAR + FAR);
 }
 
-/// Two refines with the Mip-Splatting floor on: the first attaches a floor to every splat; across the second, rows no
-/// step trained keep their raw (unbaked) params, their opacity and their floor values bit for bit.
+/// Two refines with the Mip-Splatting floor on: the first attaches a floor to every splat; across the second (no
+/// growth, split or dead splat), rows no step trained keep their raw (unbaked) params, their opacity and their floor
+/// values bit for bit, while trained rows get their floor baked in and a fresh one attached.
 #[tokio::test]
 async fn untrained_rows_keep_raw_params_and_floor_across_refine() {
     let device = device().await;
@@ -389,8 +391,8 @@ async fn untrained_rows_keep_raw_params_and_floor_across_refine() {
     for _ in 0..REFINE_STEPS {
         splats = trainer.step(batch(), splats).await.0;
     }
-    let record = trainer.refine_record.as_mut().expect("stepped");
-    record.refine_weight_norm = record.refine_weight_norm.clone().ones_like();
+    trainer.config.growth_stop_iter = 0;
+    trainer.config.split_at_screen_size = 0.0;
     let splats = splats.valid();
     let floor = |s: &Splats| s.min_scale.clone().expect("floor attached");
     let before = (
@@ -424,34 +426,30 @@ async fn untrained_rows_keep_raw_params_and_floor_across_refine() {
         before.2[FAR_ROWS].iter().all(|f| *f > 0.0),
         "far splats carry a floor"
     );
-}
-
-/// Refine statistics count what a step trained: a frozen row the camera sees gathers no refine weight, visibility or
-/// screen size; with the radius off it does.
-#[tokio::test]
-async fn frozen_rows_gather_no_densification_stats() {
-    for (radius, far_counts) in [(5.0, false), (0.0, true)] {
-        let device = device().await;
-        let mut trainer = trainer(radius, &device);
-        trainer.step(batch(), splats(0.9, &device).train()).await;
-        let record = trainer.refine_record.as_ref().expect("stepped");
-        let weight = floats(record.refine_weight_norm.clone()).await;
-        let vis = floats(record.vis_weight.clone()).await;
-        let size = floats(record.max_screen_size.clone()).await;
-        for row in FAR_ROWS {
-            let counted = weight[row] > 0.0 && vis[row] > 0.0 && size[row] > 0.0;
-            let zero = weight[row] == 0.0 && vis[row] == 0.0 && size[row] == 0.0;
+    assert_eq!(after.1.len(), before.1.len(), "no row split or pruned");
+    let config = TrainConfig::parse_from(["test"]);
+    for row in 0..NEAR {
+        let f = before.2[row];
+        for axis in 7..10 {
+            let l = before.0[row * 10 + axis];
+            let baked = 0.5 * ((2.0 * l).exp() + f * f).ln();
+            let got = after.0[row * 10 + axis];
             assert!(
-                if far_counts { counted } else { zero },
-                "radius {radius}, row {row}: {} {} {}",
-                weight[row],
-                vis[row],
-                size[row]
+                (got - baked).abs() < 1e-5,
+                "near row {row} axis {axis}: {got}, baked {baked}"
             );
         }
+        let mean = glam::Vec3::from_slice(&after.0[row * 10..row * 10 + 3]);
+        let fresh = config.min_scale_factor.sqrt() * mean.distance(position) / 27.7;
+        let got = after.2[row];
         assert!(
-            (0..NEAR).all(|row| vis[row] > 0.0),
-            "radius {radius}: near rows unseen"
+            (got - fresh).abs() <= 1e-5 * fresh,
+            "near row {row}: floor {got}, fresh {fresh}"
+        );
+        assert_ne!(
+            got.to_bits(),
+            f.to_bits(),
+            "near row {row} kept its old floor"
         );
     }
 }

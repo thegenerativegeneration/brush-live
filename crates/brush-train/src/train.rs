@@ -15,7 +15,7 @@ use crate::{
         upsample_background, world_dirs,
     },
     splat_init::bounds_from_pos,
-    stats::RefineRecord,
+    stats::{RefineRecord, trained_only},
 };
 use brush_dataset::scene::SceneBatch;
 use brush_loss::{ImageLossConfig, image_loss};
@@ -412,20 +412,30 @@ impl SplatTrainer {
                 .into_scalar_async::<i32>()
                 .await
                 .expect("dead count readback") as u32;
-            let demand = growth_demand(refiner, &self.config, iter, num_dead).await;
+            let untrained = refiner.untrained();
+            let demand =
+                growth_demand(refiner, &self.config, iter, num_dead, untrained.as_ref()).await;
             let limit = crate::evict::growth_limit(self.config.max_splats, ev.config.headroom);
             if current.saturating_add(demand) > limit {
                 let m = read_f32(splats.means()).await;
                 let in_recent = ev.recent.mask(&m, window);
                 let oversized = if self.config.split_at_screen_size > 0.0 {
-                    read_bool(refiner.above_screen_size(self.config.split_at_screen_size)).await
+                    read_bool(trained_only(
+                        refiner.above_screen_size(self.config.split_at_screen_size),
+                        untrained.as_ref(),
+                    ))
+                    .await
                 } else {
                     vec![]
                 };
                 let growing =
                     iter >= self.config.growth_start_iter && iter < self.config.growth_stop_iter;
                 let above = if growing {
-                    read_bool(refiner.above_threshold(self.config.growth_grad_threshold)).await
+                    read_bool(trained_only(
+                        refiner.above_threshold(self.config.growth_grad_threshold),
+                        untrained.as_ref(),
+                    ))
+                    .await
                 } else {
                     vec![]
                 };
@@ -908,16 +918,6 @@ impl SplatTrainer {
             phases[3] = lap(&mut clock);
         }
 
-        // Splats beyond the training radius count as unseen this step: no refine weight, visibility, screen size or
-        // position noise (importance stays, so eviction is unchanged).
-        let (refine_weight, visible, max_radius) = match &frozen {
-            Some(frozen) => (
-                refine_weight.mask_fill(frozen.clone(), 0.0),
-                visible.mask_fill(frozen.clone(), 0.0),
-                max_radius.mask_fill(frozen.clone(), 0.0),
-            ),
-            None => (refine_weight, visible, max_radius),
-        };
         trace_span!("Housekeeping").in_scope(|| {
             // Refine state accumulates on the inner (non-autodiff) device.
             // Kept after the optimizer so it doesn't sit between the
@@ -936,7 +936,12 @@ impl SplatTrainer {
             }
         });
 
-        // Noise uses the forward's floored opacities, without building an autodiff graph.
+        // Noise uses the forward's floored opacities, without building an autodiff graph. Splats beyond the
+        // training radius get none.
+        let visible = match &frozen {
+            Some(frozen) => visible.mask_fill(frozen.clone(), 0.0),
+            None => visible,
+        };
         let samples = Tensor::random(
             [splats.num_splats() as usize, 3],
             Distribution::Normal(0.0, 1.0),

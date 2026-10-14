@@ -121,3 +121,23 @@ fn evictions_settle_once_keyframes_stop() {
     assert!(evicted[..14].iter().all(|&n| n > 0), "{evicted:?}");
     assert!(evicted[14..].iter().all(|&n| n == 0), "{evicted:?}");
 }
+
+/// Rows no step trained since the last refine add no split or growth demand; without the trained column every row
+/// counts.
+#[tokio::test]
+async fn growth_demand_leaves_untrained_rows_out() {
+    use burn::tensor::{Device, Tensor, TensorData};
+    use clap::Parser;
+    let device: Device = brush_cube::test_helpers::test_device().await.into();
+    let mut record = RefineRecord::new(10, &device);
+    record.refine_weight_norm = Tensor::ones([10], &device);
+    record.vis_weight = Tensor::ones([10], &device);
+    record.max_screen_size = Tensor::ones([10], &device);
+    let mut config = TrainConfig::parse_from(["test"]);
+    config.growth_select_fraction = 1.0;
+    let flags: Vec<bool> = (0..10).map(|i| i < 4).collect();
+    let untrained = Tensor::<1, Bool>::from_data(TensorData::new(flags, [10]), &device);
+    // Oversized 10 + growth 10, or 6 + 6 with 4 rows untrained.
+    assert_eq!(growth_demand(&record, &config, 1, 0, None).await, 20);
+    assert_eq!(growth_demand(&record, &config, 1, 0, Some(&untrained)).await, 12);
+}

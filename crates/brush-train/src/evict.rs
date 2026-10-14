@@ -24,7 +24,7 @@
 
 use crate::config::TrainConfig;
 use crate::lod::top_k_indices;
-use crate::stats::RefineRecord;
+use crate::stats::{RefineRecord, trained_only};
 use burn::tensor::{Bool, Device, Int, Tensor, TensorData};
 
 #[derive(Clone, Debug)]
@@ -255,19 +255,23 @@ async fn count_true(mask: Tensor<1, Bool>) -> u32 {
 }
 
 /// How many splats this refine's force-split and growth would add if the
-/// budget allowed it, with `num_dead` dead splats about to be replaced.
+/// budget allowed it, with `num_dead` dead splats about to be replaced. Rows flagged in `untrained` (no step
+/// trained them since the last refine) neither split nor grow, so they add none.
 pub(crate) async fn growth_demand(
     refiner: &RefineRecord,
     config: &TrainConfig,
     iter: u32,
     num_dead: u32,
+    untrained: Option<&Tensor<1, Bool>>,
 ) -> u32 {
     let mut demand = 0;
     if config.split_at_screen_size > 0.0 {
-        demand += count_true(refiner.above_screen_size(config.split_at_screen_size)).await;
+        let oversized = refiner.above_screen_size(config.split_at_screen_size);
+        demand += count_true(trained_only(oversized, untrained)).await;
     }
     if iter >= config.growth_start_iter && iter < config.growth_stop_iter {
-        let above = count_true(refiner.above_threshold(config.growth_grad_threshold)).await;
+        let above = refiner.above_threshold(config.growth_grad_threshold);
+        let above = count_true(trained_only(above, untrained)).await;
         let grow = (above as f32 * config.growth_select_fraction).round() as u32;
         demand += grow.saturating_sub(num_dead);
     }
