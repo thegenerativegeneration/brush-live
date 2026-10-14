@@ -4,6 +4,7 @@
 mod correct;
 mod dataset;
 mod dump;
+mod order;
 mod receive;
 #[cfg(test)]
 mod tests;
@@ -80,6 +81,14 @@ struct Args {
     /// keyframe sent so far, as the phone's engine gets them after a loop closure.
     #[arg(long, requires = "live_poses")]
     correct_after: Option<usize>,
+    /// After the last frame, walk back: send the frames again in reverse order (without the last one) under new
+    /// ids, like a capture that returns to its start.
+    #[arg(long = "return", conflicts_with = "live_poses")]
+    return_pass: bool,
+    /// With `--return`, leave out frames `j` with `(j + 1) % N == 0`: the forward pass's held-out frames when N is
+    /// the server's `holdout_every`, so their images are never trained on.
+    #[arg(long, requires = "return_pass")]
+    return_skip_every: Option<usize>,
 }
 
 #[tokio::main]
@@ -146,7 +155,10 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep_until(started + Duration::from_secs_f32(after)).await;
         sink.send(Message::binary(encode_frame(&ClientHeader::Finish, &[])))
             .await?;
-        println!("finish sent; session {session_id}");
+        println!(
+            "[{:8.2} s] finish sent; session {session_id}",
+            started.elapsed().as_secs_f64()
+        );
     } else {
         println!("All frames sent. Leave running to watch scores settle; Ctrl-C to quit.");
     }
@@ -155,8 +167,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Sends every frame of the export `args.loops` times at `args.rate` and logs
-/// the camera path. With `live_poses`, each keyframe carries its frame's live pose instead of the refined one.
+/// Sends the frames in [`order::send_order`] (the export `args.loops` times, then the walk back with `--return`) at
+/// `args.rate` and logs the camera path. With `live_poses`, each keyframe carries its frame's live pose instead of
+/// the refined one.
 async fn send_keyframes<S>(
     args: &Args,
     t: &Transforms,
@@ -172,12 +185,18 @@ where
     let mut path_points = Vec::new();
     let mut warned_missing_conf = false;
     let mut mono_frames = 0usize;
-    let frames = t.frames.iter().cycle().take(t.frames.len() * args.loops);
-    for (i, f) in frames.enumerate() {
-        let (header, jpeg) = keyframe_header(args, t, f, i)?;
+    let order = order::send_order(
+        t.frames.len(),
+        args.loops,
+        args.return_pass,
+        args.return_skip_every,
+    );
+    for (k, (id, frame)) in order.into_iter().enumerate() {
+        let f = &t.frames[frame];
+        let (header, jpeg) = keyframe_header(args, t, f, id, k)?;
         let header = match live_poses {
             Some(poses) => KeyframeHeader {
-                pose: poses[i % poses.len()],
+                pose: poses[frame],
                 ..header
             },
             None => header,
@@ -223,10 +242,10 @@ where
             &payload,
         )))
         .await?;
-        if args.correct_after == Some(i + 1) {
-            sink.send(Message::binary(correct::correction_frame(t, i + 1)))
+        if args.correct_after == Some(k + 1) {
+            sink.send(Message::binary(correct::correction_frame(t, k + 1)))
                 .await?;
-            println!("poses sent for {} keyframes", i + 1);
+            println!("poses sent for {} keyframes", k + 1);
         }
 
         let c2w = Mat4::from_cols_array_2d(&f.transform_matrix).transpose();
@@ -259,13 +278,14 @@ fn visible_points(
         .collect())
 }
 
-/// Frame `i`'s image as JPEG, scaled to `args.long_side`, and its header
-/// without depth or points.
+/// Frame `f`'s image as JPEG, scaled to `args.long_side`, and its header (keyframe `id`, the `send_index`-th
+/// keyframe sent) without depth or points.
 fn keyframe_header(
     args: &Args,
     t: &Transforms,
     f: &Frame,
-    i: usize,
+    id: u64,
+    send_index: usize,
 ) -> anyhow::Result<(KeyframeHeader, Vec<u8>)> {
     let img = image::open(args.dataset.join(&f.file_path))?.into_rgb8();
     let (w0, h0) = (
@@ -297,8 +317,8 @@ fn keyframe_header(
         f.cy.or(t.cy).unwrap_or(h0 as f32 / 2.0) * scale,
     );
     let header = KeyframeHeader {
-        id: i as u64,
-        timestamp: i as f64 / args.rate as f64,
+        id,
+        timestamp: send_index as f64 / args.rate as f64,
         pose: c2w.to_cols_array(),
         fx,
         fy,

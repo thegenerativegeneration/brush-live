@@ -315,3 +315,32 @@ fn live_capture_keeps_feature_points_on_the_live_poses() {
         "the refined camera sees it at {px}"
     );
 }
+
+#[test]
+fn send_order_walks_back_without_the_last_frame_and_skips_forward_held_frames() {
+    use crate::order::send_order;
+    assert_eq!(send_order(3, 1, false, None), vec![(0, 0), (1, 1), (2, 2)]);
+    assert_eq!(
+        send_order(5, 1, true, None),
+        vec![
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 3),
+            (6, 2),
+            (7, 1),
+            (8, 0)
+        ]
+    );
+    // Forward frames 1 and 3 are held out with holdout_every 2; the walk back leaves them out.
+    let back: Vec<_> = send_order(5, 1, true, Some(2))
+        .into_iter()
+        .skip(5)
+        .collect();
+    assert_eq!(back, vec![(6, 2), (8, 0)]);
+    // After two loops the return ids start above every forward id.
+    let two = send_order(3, 2, true, None);
+    assert_eq!(&two[6..], &[(6, 1), (7, 0)]);
+}
