@@ -73,6 +73,9 @@ struct Args {
     /// the model to `<root>/<session_id>/splat.ply`.
     #[arg(long)]
     finish_after: Option<f32>,
+    /// Like `--finish-after`, but this many seconds after the last keyframe was sent.
+    #[arg(long, conflicts_with = "finish_after")]
+    tail: Option<f32>,
     /// Send each keyframe with the pose the phone sent during capture (`transforms_live.json`) instead of the
     /// refined one in `transforms.json`.
     #[arg(long)]
@@ -142,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .map(|p| ScoreDump::open(p, started.into_std()))
             .transpose()?,
-        stop_on_splat: args.finish_after.is_some(),
+        stop_on_splat: args.finish_after.is_some() || args.tail.is_some(),
         dump_every_s: args.dump_every,
         started: started.into_std(),
         last_dump: None,
@@ -150,9 +153,23 @@ async fn main() -> anyhow::Result<()> {
     };
     let receiver = tokio::spawn(receiver.run(source));
 
-    send_keyframes(&args, &t, live_poses.as_deref(), &points, &mut sink, &rec).await?;
-    if let Some(after) = args.finish_after {
-        tokio::time::sleep_until(started + Duration::from_secs_f32(after)).await;
+    send_keyframes(
+        &args,
+        &t,
+        live_poses.as_deref(),
+        &points,
+        &mut sink,
+        &rec,
+        started,
+    )
+    .await?;
+    let finish_at = match (args.tail, args.finish_after) {
+        (Some(tail), _) => Some(tokio::time::Instant::now() + Duration::from_secs_f32(tail)),
+        (None, Some(after)) => Some(started + Duration::from_secs_f32(after)),
+        (None, None) => None,
+    };
+    if let Some(at) = finish_at {
+        tokio::time::sleep_until(at).await;
         sink.send(Message::binary(encode_frame(&ClientHeader::Finish, &[])))
             .await?;
         println!(
@@ -168,7 +185,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Sends the frames in [`order::send_order`] (the export `args.loops` times, then the walk back with `--return`) at
-/// `args.rate` and logs the camera path. With `live_poses`, each keyframe carries its frame's live pose instead of
+/// `args.rate`, keyframe k at [`order::send_time`] after `started`, and logs the camera path. With `live_poses`, each keyframe carries its frame's live pose instead of
 /// the refined one.
 async fn send_keyframes<S>(
     args: &Args,
@@ -177,6 +194,7 @@ async fn send_keyframes<S>(
     points: &[Vec3],
     sink: &mut S,
     rec: &rerun::RecordingStream,
+    started: tokio::time::Instant,
 ) -> anyhow::Result<()>
 where
     S: Sink<Message> + Unpin,
@@ -192,6 +210,7 @@ where
         args.return_skip_every,
     );
     for (k, (id, frame)) in order.into_iter().enumerate() {
+        tokio::time::sleep_until(started + order::send_time(k, args.rate)).await;
         let f = &t.frames[frame];
         let (header, jpeg) = keyframe_header(args, t, f, id, k)?;
         let header = match live_poses {
@@ -254,7 +273,6 @@ where
             "camera_path",
             &rerun::LineStrips3D::new([path_points.clone()]),
         )?;
-        tokio::time::sleep(Duration::from_secs_f32(1.0 / args.rate)).await;
     }
     if args.mono == MonoMode::On {
         println!("{mono_frames} keyframes carried the phone's mono depth");

@@ -22,3 +22,9 @@ pub(crate) fn send_order(
     }
     out
 }
+
+/// When the `k`-th keyframe goes out, from the replay's start: a fixed schedule, so the time spent preparing a
+/// keyframe does not slow the rate down.
+pub(crate) fn send_time(k: usize, rate: f32) -> std::time::Duration {
+    std::time::Duration::from_secs_f64(k as f64 / f64::from(rate))
+}

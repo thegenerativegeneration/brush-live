@@ -344,3 +344,12 @@ fn send_order_walks_back_without_the_last_frame_and_skips_forward_held_frames() 
     let two = send_order(3, 2, true, None);
     assert_eq!(&two[6..], &[(6, 1), (7, 0)]);
 }
+
+#[test]
+fn keyframes_go_out_on_a_fixed_schedule() {
+    use crate::order::send_time;
+    use std::time::Duration;
+    assert_eq!(send_time(0, 2.0), Duration::ZERO);
+    assert_eq!(send_time(3, 2.0), Duration::from_millis(1500));
+    assert_eq!(send_time(10, 4.0), Duration::from_millis(2500));
+}
