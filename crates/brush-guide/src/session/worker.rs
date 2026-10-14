@@ -438,6 +438,7 @@ impl Worker {
             position_scale_m: self.live.last_step_lr().position_scale_m,
             adam_clamped: self.live.adam_clamped(),
             masked_by_radius: self.live.masked_by_radius().await,
+            near_views: self.live.near_views_at_last_draw(),
             extras,
             views: r.per_view.clone(),
         };

@@ -3,7 +3,7 @@ use crate::keyframe::DecodedKeyframe;
 use crate::mono::{MonoSeed, ScaleFit, ScaleHistory, mono_seed_for};
 use crate::seed::{SeedInput, Seeds, seed_points, stride_for};
 use brush_dataset::config::LoadDatasetConfig;
-use brush_dataset::scene::{Scene, SceneBatch, SceneView, view_to_packed_data};
+use brush_dataset::scene::{Scene, SceneView};
 use brush_dataset::scene_loader::SceneLoader;
 use brush_render::gaussian_splats::{SplatRenderMode, Splats, TextureMode, render_splats};
 use brush_render::sh::rgb_to_sh;
@@ -16,13 +16,16 @@ use burn::module::Module;
 use burn::tensor::{Device, s};
 use clap::Parser;
 use glam::{UVec2, Vec3};
-use rand::{RngExt as _, SeedableRng};
+use rand::SeedableRng;
 use std::collections::HashMap;
-use std::ops::Range;
 
+mod draw;
 mod poses;
+use draw::{Draw, NearCache, choose_draw, load_batch, near_views};
 pub use poses::{PoseUpdateStats, ViewPose};
 
+#[cfg(test)]
+mod near_tests;
 #[cfg(test)]
 mod scale_history_tests;
 
@@ -67,7 +70,12 @@ pub struct LiveModel {
     /// few samples of their own; `reset` keeps it.
     scale_history: ScaleHistory,
     recent: Option<SceneLoader>,
+    /// The loader over all views; never built with `train_views_radius_m` on.
     all: Option<SceneLoader>,
+    /// Packed images of the views `train_views_radius_m` draws; empty with it off.
+    near_cache: NearCache,
+    /// Views within `train_views_radius_m` at the last step; `None` with it off or before the first step.
+    near_at_last_draw: Option<u32>,
     /// Views in the recent loader; those after `views_in_recent` are in no
     /// recent pool yet and get drawn directly in `train_step`.
     recent_len: usize,
@@ -104,6 +112,7 @@ impl LiveModel {
         let mut load_config = LoadArgs::parse_from(["brush-guide"]).load;
         load_config.max_scene_batch_cache_size = config.loader_cache_bytes;
         let rng = rand::rngs::StdRng::seed_from_u64(config.seed);
+        let near_cache = NearCache::new(config.loader_cache_bytes);
         Self {
             config,
             device,
@@ -118,6 +127,8 @@ impl LiveModel {
             scale_history: ScaleHistory::default(),
             recent: None,
             all: None,
+            near_cache,
+            near_at_last_draw: None,
             recent_len: 0,
             views_in_recent: 0,
             views_in_all: 0,
@@ -204,13 +215,27 @@ impl LiveModel {
         std::mem::take(&mut self.refine_stats)
     }
 
-    /// Bytes both loaders' caches hold.
+    /// Bytes both loaders' caches and the near cache hold.
     pub fn loader_cache_bytes(&self) -> u64 {
         [&self.recent, &self.all]
             .iter()
             .filter_map(|l| l.as_ref())
             .map(SceneLoader::cached_bytes)
-            .sum()
+            .sum::<u64>()
+            + self.near_cache.bytes()
+    }
+
+    /// Views within `train_views_radius_m` of the newest view at the last step; `None` with the radius off or
+    /// before the first step.
+    pub fn near_views_at_last_draw(&self) -> Option<u32> {
+        self.near_at_last_draw
+    }
+
+    /// Indices of the views within `train_views_radius_m` of the newest view's current camera; `None` with the
+    /// radius off.
+    fn near_view_indices(&self) -> Option<Vec<usize>> {
+        let radius = self.config.train_views_radius_m;
+        (radius > 0.0).then(|| near_views(self.views.iter().map(|v| v.camera.position), radius))
     }
 
     /// The splats a held-out eval or an export renders: today the trainer's splats.
@@ -341,15 +366,19 @@ impl LiveModel {
         self.views_in_recent = n;
     }
 
-    /// The loader over all views; `salt` 0 gives the usual seed.
+    /// The loader over all views; `salt` 0 gives the usual seed. None with `train_views_radius_m` on: it would
+    /// decode and cache views no step draws.
     fn build_all_loader(&mut self, salt: u64) {
+        self.views_in_all = self.views.len();
+        if self.config.train_views_radius_m > 0.0 {
+            return;
+        }
         let all = Scene::new(self.views.clone());
         self.all = Some(SceneLoader::new(
             &all,
             self.config.seed ^ salt,
             &self.load_config,
         ));
-        self.views_in_all = self.views.len();
     }
 
     /// Keeps a seeded random subset of `seeds` that fits under `max_splats`
@@ -518,34 +547,39 @@ impl LiveModel {
     }
 
     /// One optimisation step on a batch drawn from the recent window (with
-    /// probability `recent_fraction`) or from all views. No-op without views.
+    /// probability `recent_fraction`) or else from all views, or with `train_views_radius_m` on from the views near
+    /// the newest one (see [`choose_draw`]). No-op without views.
     pub async fn train_step(&mut self) {
+        let near = self.near_view_indices();
         let (Some(splats), Some(trainer)) = (self.splats.take(), self.trainer.as_mut()) else {
             return;
         };
-        let use_recent = self.rng.random::<f32>() < self.config.recent_fraction;
-        let pending = use_recent
-            .then(|| {
-                pick_pending(
-                    &mut self.rng,
-                    self.recent_len,
-                    self.views_in_recent..self.views.len(),
-                )
-            })
-            .flatten();
+        self.near_at_last_draw = near.as_ref().map(|n| n.len() as u32);
+        let draw = choose_draw(
+            &mut self.rng,
+            self.config.recent_fraction,
+            self.recent_len,
+            self.views_in_recent..self.views.len(),
+            near.as_deref(),
+        );
         let t_batch = web_time::Instant::now();
-        let batch = if let Some(i) = pending {
-            load_batch(&self.views[i]).await
-        } else {
-            let loader = if use_recent {
-                self.recent.as_mut()
-            } else {
-                self.all.as_mut()
-            };
-            loader
-                .expect("loaders exist once views exist")
-                .next_batch()
-                .await
+        let batch = match draw {
+            Draw::Pending(i) => load_batch(&self.views[i]).await,
+            Draw::Near(i) => {
+                let near = near.as_deref().unwrap_or_default();
+                self.near_cache.batch(i, &self.views[i], near).await
+            }
+            Draw::RecentLoader | Draw::AllLoader => {
+                let loader = if draw == Draw::RecentLoader {
+                    self.recent.as_mut()
+                } else {
+                    self.all.as_mut()
+                };
+                loader
+                    .expect("loaders exist once views exist")
+                    .next_batch()
+                    .await
+            }
         };
         if self.profiling {
             self.batch_s += t_batch.elapsed().as_secs_f64();
@@ -598,80 +632,6 @@ impl LiveModel {
             self.num_evicted += u64::from(stats.num_evicted);
         }
         self.splats = Some(splats);
-    }
-}
-
-/// For a recent-window draw: one of the `pending` views (added since the
-/// recent loader was built) to train on directly, or `None` to draw from the
-/// loader's `loader_len` views. Every view gets the same share.
-fn pick_pending(
-    rng: &mut impl rand::Rng,
-    loader_len: usize,
-    pending: Range<usize>,
-) -> Option<usize> {
-    if pending.is_empty() {
-        return None;
-    }
-    let r = rng.random_range(0..loader_len + pending.len());
-    (r >= loader_len).then(|| pending.start + r - loader_len)
-}
-
-/// A training batch for one view, decoded and packed as `SceneLoader` does.
-async fn load_batch(view: &SceneView) -> SceneBatch {
-    let raw = view.image.load().await.expect("keyframe image decodes");
-    let (img_packed, has_alpha) = view_to_packed_data(raw, view.image.alpha_mode());
-    SceneBatch {
-        img_packed,
-        has_alpha,
-        alpha_mode: view.image.alpha_mode(),
-        camera: view.camera,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn no_pending_views_leave_the_rng_untouched() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        let mut fresh = rand::rngs::StdRng::seed_from_u64(7);
-        for _ in 0..10 {
-            assert!(pick_pending(&mut rng, 20, 20..20).is_none());
-        }
-        assert_eq!(rng.random::<u64>(), fresh.random::<u64>());
-    }
-
-    #[test]
-    fn pending_views_after_the_window_slid_map_to_their_indices() {
-        // 35 views pooled at the last rebuild (the loader holds the last 20), 2 new since.
-        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
-        let picked: std::collections::HashSet<usize> = (0..2000)
-            .filter_map(|_| pick_pending(&mut rng, 20, 35..37))
-            .collect();
-        assert_eq!(picked, [35, 36].into_iter().collect());
-    }
-
-    #[test]
-    fn pending_views_get_a_loader_views_share() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        let draws = 22_000;
-        let mut hits = [0usize; 2];
-        for _ in 0..draws {
-            if let Some(i) = pick_pending(&mut rng, 20, 20..22) {
-                hits[i - 20] += 1;
-            }
-        }
-        // Each of the 22 views should get ~1/22 of the draws (1000).
-        for h in hits {
-            assert!((850..1150).contains(&h), "pending view drawn {h} times");
-        }
-    }
-
-    #[test]
-    fn no_pending_views_always_uses_the_loader() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
-        assert!((0..1000).all(|_| pick_pending(&mut rng, 20, 20..20).is_none()));
     }
 }
 

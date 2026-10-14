@@ -105,7 +105,7 @@ impl LiveModel {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::config::GuideConfig;
     use crate::keyframe::decode_keyframe;
@@ -114,13 +114,13 @@ mod tests {
 
     /// `tests/integration/test_scene::arkit_pose_at`: integration-test helpers are not visible to unit tests, and
     /// these need `LiveModel`'s private loaders.
-    fn pose_at(pos: Vec3) -> [f32; 16] {
+    pub(in crate::live) fn pose_at(pos: Vec3) -> [f32; 16] {
         Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y)
             .inverse()
             .to_cols_array()
     }
 
-    fn keyframe(id: u64, pos: Vec3) -> (KeyframeHeader, Vec<u8>) {
+    pub(in crate::live) fn keyframe(id: u64, pos: Vec3) -> (KeyframeHeader, Vec<u8>) {
         let (w, h) = (16u32, 12u32);
         let img = image::RgbImage::from_fn(w, h, |x, y| {
             image::Rgb([(x * 16) as u8, (y * 20) as u8, 90])
