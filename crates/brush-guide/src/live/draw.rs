@@ -109,8 +109,9 @@ impl NearCache {
         self.bytes
     }
 
-    /// The batch for view `index` with its current camera. A miss decodes the view and caches it if it fits the
-    /// budget after dropping the views outside `near` (ascending).
+    /// The batch for view `index` with its current camera. A miss drops the cached views outside `near` (ascending),
+    /// so the cache holds only views a step can still draw, then decodes the view and caches it if it fits the
+    /// budget.
     pub(super) async fn batch(
         &mut self,
         index: usize,
@@ -125,15 +126,13 @@ impl NearCache {
         }
         let mut batch = load_batch(view).await;
         let size = batch.packed_bytes();
-        if self.bytes + size > self.budget {
-            self.batches.retain(|i, b| {
-                let keep = near.binary_search(i).is_ok();
-                if !keep {
-                    self.bytes -= b.packed_bytes();
-                }
-                keep
-            });
-        }
+        self.batches.retain(|i, b| {
+            let keep = near.binary_search(i).is_ok();
+            if !keep {
+                self.bytes -= b.packed_bytes();
+            }
+            keep
+        });
         if self.bytes + size <= self.budget {
             batch.img_packed = share_packed(batch.img_packed);
             self.bytes += size;

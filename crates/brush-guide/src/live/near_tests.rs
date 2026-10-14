@@ -86,6 +86,24 @@ async fn near_cache_stays_in_budget_and_follows_the_walker() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// A miss drops the cached views the walker left, though the budget has room for them.
+#[tokio::test]
+async fn near_cache_drops_views_the_walker_left() {
+    let dir = tmp("left");
+    let mut live = model(0.8, 10 * VIEW_BYTES, &[0.0, 0.3, 0.6], &dir).await;
+    for _ in 0..60 {
+        live.train_step().await;
+    }
+    assert_eq!(live.near_cache.cached_views(), vec![0, 1, 2]);
+    add(&mut live, 3, 10.0, &dir).await;
+    for _ in 0..30 {
+        live.train_step().await;
+    }
+    assert_eq!(live.near_cache.cached_views(), vec![3]);
+    assert_eq!(live.near_cache.bytes(), VIEW_BYTES);
+    std::fs::remove_dir_all(dir).ok();
+}
+
 /// With the radius off nothing changes: the all loader exists, no near count is reported, the near cache stays empty.
 #[tokio::test]
 async fn radius_off_keeps_the_all_loader() {
