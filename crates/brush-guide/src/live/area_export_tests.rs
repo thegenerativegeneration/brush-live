@@ -157,3 +157,25 @@ async fn no_splats_no_file() {
     assert!(std::fs::read_dir(ply.parent().unwrap()).unwrap().next().is_none());
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// A failed export leaves an earlier `splat.ply` as it was, removes its tmp file, and names the path: the tmp path
+/// taken by a directory (create fails), then the target a directory (rename fails after the file was written).
+#[tokio::test]
+async fn a_failed_export_keeps_the_earlier_file_and_removes_the_tmp_file() {
+    let (live, dir) = parked_origin("final-fails").await;
+    let ply = ply_path(&dir);
+    let tmp_path = dir.join("out/splat.ply.tmp");
+    std::fs::write(&ply, b"earlier export").unwrap();
+    std::fs::create_dir(&tmp_path).unwrap();
+    let e = live.write_final(&ply).await.unwrap_err();
+    assert!(e.to_string().starts_with(&format!("writing splat {}", tmp_path.display())), "{e}");
+    assert_eq!(std::fs::read(&ply).unwrap(), b"earlier export");
+    std::fs::remove_dir(&tmp_path).unwrap();
+    let target = dir.join("out/taken.ply");
+    std::fs::create_dir_all(target.join("inside")).unwrap();
+    let e = live.write_final(&target).await.unwrap_err();
+    assert!(e.to_string().starts_with(&format!("writing splat {}", target.display())), "{e}");
+    assert!(!dir.join("out/taken.ply.tmp").exists(), "the tmp file was left behind");
+    assert_eq!(std::fs::read(&ply).unwrap(), b"earlier export");
+    std::fs::remove_dir_all(dir).ok();
+}

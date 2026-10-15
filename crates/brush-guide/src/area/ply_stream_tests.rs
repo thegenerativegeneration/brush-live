@@ -32,7 +32,7 @@ fn body(ply: &[u8]) -> Vec<f32> {
 #[tokio::test]
 async fn streamed_ply_matches_splat_to_ply_byte_for_byte() {
     let device = device().await;
-    for coeffs in [1u32, 4, 9] {
+    for coeffs in [1u32, 4, 9, 16] {
         let r = rows(7, coeffs);
         let reference = brush_serde::splat_to_ply(r.to_splats_raw(&device), None).await.unwrap();
         let degree = brush_render::sh::sh_degree_from_coeffs(coeffs);

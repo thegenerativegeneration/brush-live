@@ -25,13 +25,20 @@ pub struct FinalExport {
     pub ms: f64,
 }
 
+/// `e` with its kind, naming `path`: `writing splat <path>: …`.
+fn context(path: &Path) -> impl Fn(io::Error) -> io::Error + '_ {
+    move |e| io::Error::new(e.kind(), format!("writing splat {}: {e}", path.display()))
+}
+
 fn other(e: impl std::fmt::Display) -> io::Error {
     io::Error::other(e.to_string())
 }
 
 impl LiveModel {
-    /// Writes the final export to `ply_path` through `<name>.tmp` beside it, renamed on success and removed on
-    /// failure, so a failed export leaves no partial file. `NotFound` without splats, before any file is touched.
+    /// Writes the final export to `ply_path` through `<name>.tmp` beside it, synced to disk and renamed on success,
+    /// removed on failure, so a failed export leaves no partial file and an earlier `ply_path` as it was. File errors
+    /// keep their kind and name the path (`writing splat <path>: …`). `NotFound` without splats, before any file is
+    /// touched.
     pub async fn write_final(&self, ply_path: &Path) -> io::Result<FinalExport> {
         if self.splats.is_none() {
             return Err(io::Error::new(io::ErrorKind::NotFound, "no splats yet"));
@@ -39,9 +46,11 @@ impl LiveModel {
         let name = ply_path.file_name().ok_or_else(|| other(format!("{} names no file", ply_path.display())))?;
         let tmp = ply_path.with_file_name(format!("{}.tmp", name.to_string_lossy()));
         let written = async {
-            let (out, e) = self.write_final_to(BufWriter::new(std::fs::File::create(&tmp)?)).await?;
-            out.into_inner().map_err(io::IntoInnerError::into_error)?;
-            std::fs::rename(&tmp, ply_path)?;
+            let file = std::fs::File::create(&tmp).map_err(context(&tmp))?;
+            let (out, e) = self.write_final_to(BufWriter::new(file)).await?;
+            let file = out.into_inner().map_err(io::IntoInnerError::into_error).map_err(context(&tmp))?;
+            file.sync_all().map_err(context(&tmp))?;
+            std::fs::rename(&tmp, ply_path).map_err(context(ply_path))?;
             Ok(e)
         }
         .await;

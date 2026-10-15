@@ -301,8 +301,8 @@ async fn left_tiles_park_before_an_eviction_bites() {
 }
 
 /// Steady state: with no eviction pending, the splats the previous refine evicted (its own growth demand, which
-/// `pending_evictions` cannot see) still park the held left tiles before the next refine, so they make the room
-/// instead of the live area.
+/// `pending_evictions` cannot see) beyond the room left below the cap still park the held left tiles before the next
+/// refine, so they make the room instead of the live area; evictions the room absorbs park nothing.
 #[tokio::test]
 async fn the_last_refines_evictions_park_left_tiles_before_the_next() {
     let dir = tmp("freeze-park-last-evicted");
@@ -316,11 +316,40 @@ async fn the_last_refines_evictions_park_left_tiles_before_the_next() {
     let held = live.area_report().unwrap().frozen_rows;
     assert!(held > 10);
     assert_eq!(live.trainer.as_ref().unwrap().pending_evictions(live.splats().unwrap().num_splats()), 0);
+    // The 5 steps before the next refine change no count, so the room now is the room at that refine.
+    let room = |live: &LiveModel| 20_000 - live.splats().unwrap().num_splats();
+    live.last_refine_evicted = room(&live);
     train(&mut live, 5).await;
-    assert_eq!(live.area_report().unwrap().counters.parks, 0, "nothing parks without an eviction");
-    live.last_refine_evicted = held;
+    assert_eq!(live.area_report().unwrap().counters.parks, 0, "evictions the room absorbs park nothing");
+    live.last_refine_evicted = room(&live) + held;
     train(&mut live, 5).await;
     let r = live.area_report().unwrap();
     assert!(r.counters.parks >= 1, "{r:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// `refine` records its own evictions as the next refine's floor: at the cap, with parking off, one refine evicts and
+/// `last_refine_evicted` is what it evicted.
+#[tokio::test]
+async fn a_refine_records_what_it_evicted() {
+    let dir = tmp("freeze-last-evicted");
+    let config = GuideConfig {
+        max_splats: 60,
+        seed_view_fraction: 1.0,
+        evict_min_age: 0,
+        evict_max_cell_fraction: 1.0,
+        ..area_config(2.0)
+    };
+    let mut live = LiveModel::new(config, device().await);
+    live.enable_area(dir.join("tiles"));
+    add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
+    train(&mut live, 5).await;
+    live.area.as_mut().unwrap().parking_off = true;
+    add(&mut live, &dir, 1, Vec3::new(0.3, 0.0, 2.0), Vec3::new(0.3, 0.0, 0.0)).await;
+    let before = live.num_evicted();
+    train(&mut live, 5).await;
+    let evicted = live.num_evicted() - before;
+    assert!(evicted > 0, "the refine evicted nothing");
+    assert_eq!(u64::from(live.last_refine_evicted), evicted);
     std::fs::remove_dir_all(dir).ok();
 }

@@ -105,8 +105,6 @@ pub enum SessionError {
     Stopped,
     #[error("{0}")]
     Rejected(String),
-    #[error("writing splat: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// A client frame [`GuideSession::push_frame`] accepted.
