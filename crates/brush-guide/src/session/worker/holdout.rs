@@ -8,7 +8,8 @@ use brush_render::gaussian_splats::Splats;
 use super::eval_log::ViewScore;
 use super::holdout_seam::{border_band, read_means, split_psnr, surface_points};
 use crate::config::GuideConfig;
-use brush_train::eval::{EvalSample, eval_stats};
+use brush_train::eval::{EvalSample, eval_stats_over};
+use brush_train::sh_background::ShBackground;
 use burn::tensor::{Tensor, TensorData};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -191,13 +192,14 @@ impl Holdout {
         !self.views.is_empty()
     }
 
-    /// Scores `splats` on every held-out view that renders and loads; `None`
-    /// if no view could be scored.
+    /// Scores `splats` on every held-out view that renders and loads, composited over `background` when given
+    /// (black otherwise); `None` if no view could be scored.
     pub(super) async fn eval(
         &mut self,
         splats: &Splats,
         _now_s: f64,
         extras: &EvalExtras,
+        background: Option<&ShBackground>,
     ) -> Option<EvalResult> {
         if self.views.is_empty() {
             return None;
@@ -220,8 +222,8 @@ impl Holdout {
         let (mut psnr, mut ssim, mut n) = (0.0f32, 0.0f32, 0usize);
         let mut per_view = Vec::new();
         for (id, view) in &self.views {
-            let scored =
-                score_view(*id, splats, view, &device, extras, self.lpips.as_ref(), means.as_deref(), &mut cost).await;
+            let ctx = ViewContext { splats, device: &device, extras, lpips: self.lpips.as_ref(), means: means.as_deref(), background };
+            let scored = score_view(*id, view, &ctx, &mut cost).await;
             match scored {
                 Ok((score, gt_to_save)) => {
                     psnr += score.psnr;
@@ -256,25 +258,34 @@ struct ViewCost {
     seam_ms: f64,
 }
 
-/// Scores one view; also returns the ground truth image and its path when `extras` saves this view. `means`
-/// (the splats' means on the host) enables the seam split; time spent on extras is added to `cost`.
-#[allow(clippy::too_many_arguments)]
+/// What every view of one eval shares.
+struct ViewContext<'a> {
+    splats: &'a Splats,
+    device: &'a burn::tensor::Device,
+    extras: &'a EvalExtras,
+    lpips: Option<&'a lpips::LpipsModel>,
+    /// The splats' means on the host; enables the seam split.
+    means: Option<&'a [f32]>,
+    /// Composited behind every render; black without.
+    background: Option<&'a ShBackground>,
+}
+
+/// Scores one view; also returns the ground truth image and its path when `extras` saves this view. Time spent on
+/// extras is added to `cost`.
 async fn score_view(
     id: u64,
-    splats: &Splats,
     view: &SceneView,
-    device: &burn::tensor::Device,
-    extras: &EvalExtras,
-    lpips: Option<&lpips::LpipsModel>,
-    means: Option<&[f32]>,
+    ctx: &ViewContext<'_>,
     cost: &mut ViewCost,
 ) -> Result<(ViewScore, Option<(PathBuf, image::RgbImage)>), String> {
+    let ViewContext { splats, device, extras, lpips, means, background } = *ctx;
     let image = view.image.load().await.map_err(|e| e.to_string())?;
-    let sample = eval_stats(
+    let sample = eval_stats_over(
         splats.clone(),
         &view.camera,
         image,
         view.image.alpha_mode(),
+        background,
         device,
     )
     .await

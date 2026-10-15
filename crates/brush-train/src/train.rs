@@ -662,6 +662,11 @@ impl SplatTrainer {
         splats
     }
 
+    /// The learned SH environment background; `None` when `config.sh_background` is off.
+    pub fn sh_background(&self) -> Option<&ShBackground> {
+        self.sh_background.as_ref()
+    }
+
     /// The SH background's coefficients as JSON, or `None` when the flag is
     /// off.
     pub async fn sh_background_json(&self) -> Option<String> {

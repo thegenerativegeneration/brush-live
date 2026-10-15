@@ -176,6 +176,12 @@ impl LiveModel {
         self.trainer.as_ref()?.sh_background_json().await
     }
 
+    /// The trainer's SH environment background, which held-out evals composite behind their renders; `None`
+    /// when the flag is off or training hasn't started.
+    pub fn sh_background(&self) -> Option<&brush_train::sh_background::ShBackground> {
+        self.trainer.as_ref()?.sh_background()
+    }
+
     pub fn views(&self) -> &[SceneView] {
         &self.views
     }

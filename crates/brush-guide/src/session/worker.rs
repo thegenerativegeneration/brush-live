@@ -410,24 +410,21 @@ impl Worker {
         let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
         // Loading the parked tiles does not count against the training step rate.
         self.rate_window.0 += load_ms / 1e3;
-        let Some(r) = self.holdout.eval(&splats, now, &eval_extras).await else {
+        let background = self.live.sh_background();
+        let Some(r) = self.holdout.eval(&splats, now, &eval_extras, background).await else {
             return false;
         };
         // Nor does the eval itself.
         self.rate_window.0 += r.ms / 1e3;
         log::info!(
-            "eval at {now:.2} s: {} held-out views, psnr {:.2} dB, ssim {:.4}; iter {}, {} splats ({:.0} ms, black background{})",
+            "eval at {now:.2} s: {} held-out views, psnr {:.2} dB, ssim {:.4}; iter {}, {} splats ({:.0} ms, {} background)",
             r.views,
             r.psnr,
             r.ssim,
             self.live.iter(),
             splats.num_splats(),
             r.ms,
-            if self.config.sh_background {
-                ", SH background not composited"
-            } else {
-                ""
-            }
+            if self.live.sh_background().is_some() { "SH" } else { "black" }
         );
         let record = eval_log::EvalRecord {
             unix_s: std::time::SystemTime::now()

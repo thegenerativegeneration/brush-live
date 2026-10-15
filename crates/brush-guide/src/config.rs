@@ -88,7 +88,7 @@ pub struct GuideConfig {
     /// until the session ends.
     pub max_train_steps: Option<u32>,
     /// Hold every this many new keyframes out of training and seeding and
-    /// score the splats on them (PSNR, SSIM in the log, black background), for
+    /// score the splats on them (PSNR, SSIM in the log; renders over the SH background when on, else black), for
     /// replays. 0 off; 2 or more (1 would hold out every keyframe and counts as 0).
     pub holdout_every: u32,
     /// Keyframes received after this many are never held out (0: no limit), e.g. a replay's walk back.

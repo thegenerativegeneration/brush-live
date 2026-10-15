@@ -7,6 +7,7 @@ use brush_loss::{ImageLossConfig, image_loss_eval, psnr_from_mse};
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use brush_render::{AlphaMode, RenderAux, TextureMode, render_splats};
+use crate::sh_background::ShBackground;
 use burn::tensor::{Device, Int, Tensor, s};
 use glam::Vec3;
 use image::DynamicImage;
@@ -19,6 +20,7 @@ pub struct EvalSample {
     pub render_aux: RenderAux,
 }
 
+/// [`eval_stats_over`] on a black background.
 pub async fn eval_stats(
     splats: Splats,
     gt_cam: &Camera,
@@ -26,15 +28,33 @@ pub async fn eval_stats(
     alpha_mode: AlphaMode,
     device: &Device,
 ) -> Result<EvalSample> {
+    eval_stats_over(splats, gt_cam, gt_img, alpha_mode, None, device).await
+}
+
+/// Renders `splats` from `gt_cam` and scores the render against `gt_img`. With `background`, the render is
+/// composited over that globe the way a training step composites it (`rgb + (1 - alpha) * bg`); without, it is
+/// rendered on black.
+pub async fn eval_stats_over(
+    splats: Splats,
+    gt_cam: &Camera,
+    gt_img: DynamicImage,
+    alpha_mode: AlphaMode,
+    background: Option<&ShBackground>,
+    device: &Device,
+) -> Result<EvalSample> {
     let res = glam::uvec2(gt_img.width(), gt_img.height());
 
     let (gt_packed_data, _has_alpha) = view_to_packed_data(gt_img.clone(), alpha_mode);
     let gt_packed: Tensor<2, Int> = Tensor::from_data(gt_packed_data, device);
 
-    // Render on reference black background.
     let (img, render_aux) =
         render_splats(splats, gt_cam, res, Vec3::ZERO, None, TextureMode::Float).await;
-    let render_rgb = img.slice(s![.., .., 0..3]);
+    let render_rgb = img.clone().slice(s![.., .., 0..3]);
+    let render_rgb = match background {
+        // The render's alpha channel is its accumulated opacity, whatever its background.
+        Some(bg) => render_rgb + (1.0f32 - img.slice(s![.., .., 3..4])) * bg.render_background(gt_cam, res),
+        None => render_rgb,
+    };
 
     // Simulate an 8-bit roundtrip for fair comparison.
     let render_rgb = (render_rgb * 255.0).round() / 255.0;
@@ -81,3 +101,7 @@ impl EvalSample {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "eval_tests.rs"]
+mod tests;

@@ -155,7 +155,7 @@ async fn eval_scores_views_that_load_and_skips_the_missing_one() {
         SplatRenderMode::Default,
         &device,
     );
-    let result = h.eval(&splats, 0.0, &EvalExtras::none()).await.expect("one view scores");
+    let result = h.eval(&splats, 0.0, &EvalExtras::none(), None).await.expect("one view scores");
     assert_eq!(result.views, 1);
     assert_eq!((result.lpips_ms, result.seam_ms), (0.0, 0.0));
     assert!(result.psnr.is_finite(), "psnr {}", result.psnr);
@@ -184,12 +184,85 @@ async fn extras_add_lpips_and_save_renders() {
         vec![inverse_sigmoid(0.99)], SplatRenderMode::Default, &device);
     let extras = EvalExtras { lpips: true, lpips_ids: Vec::new(), seam_band_m: 0.5, tile_size_m: 10.0,
         save_dir: Some(dir.join("eval_renders")), save_ids: vec![5], iter: 7 };
-    let r = h.eval(&splats, 0.0, &extras).await.expect("scores");
+    let r = h.eval(&splats, 0.0, &extras, None).await.expect("scores");
     assert!(r.lpips_ms > 0.0 && r.seam_ms > 0.0, "{} {}", r.lpips_ms, r.seam_ms);
     assert!(r.per_view[0].lpips.is_some_and(f32::is_finite));
     assert!(r.per_view[0].psnr_band.is_some_and(f32::is_finite), "{:?}", r.per_view[0]);
     assert!(r.per_view[0].psnr_interior.is_some_and(f32::is_finite), "{:?}", r.per_view[0]);
     assert!(dir.join("eval_renders/5_7.png").exists());
     assert!(dir.join("eval_renders/gt_5.png").exists());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+const GT_RGB: [u8; 3] = [90, 120, 30];
+
+/// A holdout of one 64x64 view of `GT_RGB` (id 5) in `dir`, seen by a pinhole camera at the origin looking down +z.
+fn solid_holdout(dir: &Path) -> Holdout {
+    std::fs::create_dir_all(dir).unwrap();
+    let rel = PathBuf::from("5.png");
+    image::RgbImage::from_pixel(64, 64, image::Rgb(GT_RGB)).save(dir.join(&rel)).unwrap();
+    let vfs = Arc::new(BrushVfs::from_directory_files(dir, vec![rel.clone()]));
+    let view = SceneView { image: LoadImage::new(vfs, rel, None, 64, None, false), camera: Camera::default() };
+    let camera = Camera::new(glam::Vec3::ZERO, glam::Quat::IDENTITY, 1.0, 1.0, glam::vec2(0.5, 0.5),
+        brush_render::kernels::camera_model::CameraModel::Pinhole);
+    let mut h = Holdout::new(2, 30.0);
+    h.add_held(5, camera, view, dir);
+    h
+}
+
+/// A globe of `GT_RGB` everywhere.
+fn gt_globe(device: &burn::tensor::Device) -> ShBackground {
+    ShBackground::constant(&device.clone().autodiff(), glam::Vec3::from_array(GT_RGB.map(|v| f32::from(v) / 255.0)))
+}
+
+/// One opaque splat 1 m wide, 2 m ahead on the tile border x = 0, or (`behind`) out of view behind the camera.
+fn one_splat(device: &burn::tensor::Device, behind: bool) -> Splats {
+    let z = if behind { -2.0 } else { 2.0 };
+    Splats::from_raw(vec![0.0, 0.0, z], vec![1.0, 0.0, 0.0, 0.0], vec![0.0; 3], vec![0.5; 3],
+        vec![inverse_sigmoid(0.99)], SplatRenderMode::Default, device)
+}
+
+#[tokio::test]
+async fn saved_renders_show_the_sh_background() {
+    let dir = std::env::temp_dir().join(format!("holdout-globe-save-{}", std::process::id()));
+    let mut h = solid_holdout(&dir);
+    let device = brush_cube::test_helpers::test_device().await.into();
+    let splats = one_splat(&device, true);
+    let globe = gt_globe(&device);
+    let save = |iter| EvalExtras { save_dir: Some(dir.join("eval_renders")), save_ids: vec![5], iter,
+        ..EvalExtras::none() };
+    let black = h.eval(&splats, 0.0, &save(1), None).await.expect("scores");
+    let over = h.eval(&splats, 0.0, &save(2), Some(&globe)).await.expect("scores");
+    assert!(black.psnr < 15.0 && over.psnr > 40.0, "black {} dB, over the globe {} dB", black.psnr, over.psnr);
+    let pixel = |iter: u32| image::open(dir.join(format!("eval_renders/5_{iter}.png"))).unwrap().to_rgb8()[(32, 32)].0;
+    assert_eq!(pixel(1), [0, 0, 0]);
+    let saved = pixel(2);
+    assert!(saved.iter().zip(GT_RGB).all(|(a, b)| a.abs_diff(b) <= 1), "saved {saved:?} vs {GT_RGB:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn seam_split_keeps_its_pixels_over_the_sh_background() {
+    let dir = std::env::temp_dir().join(format!("holdout-globe-seam-{}", std::process::id()));
+    let mut h = solid_holdout(&dir);
+    let device = brush_cube::test_helpers::test_device().await.into();
+    // A splat of the ground truth's colour 2 m ahead whose surface spans the 0.5 m band at x = 0 and the interior
+    // beyond, leaving the left of the view open.
+    let dc: Vec<f32> = GT_RGB.iter().map(|v| (f32::from(*v) / 255.0 - 0.5) / 0.282_094_8).collect();
+    let splats = Splats::from_raw(vec![0.4, 0.0, 2.0], vec![1.0, 0.0, 0.0, 0.0], vec![-1.2; 3], dc,
+        vec![inverse_sigmoid(0.99)], SplatRenderMode::Default, &device);
+    let globe = gt_globe(&device);
+    let seam = EvalExtras { seam_band_m: 0.5, ..EvalExtras::none() };
+    let black = h.eval(&splats, 0.0, &seam, None).await.expect("scores").per_view.remove(0);
+    let over = h.eval(&splats, 0.0, &seam, Some(&globe)).await.expect("scores").per_view.remove(0);
+    let (Some(band_black), Some(interior_black), Some(band), Some(interior)) =
+        (black.psnr_band, black.psnr_interior, over.psnr_band, over.psnr_interior)
+    else {
+        panic!("both groups labelled either way: {black:?} {over:?}");
+    };
+    assert!(black.psnr < 20.0 && over.psnr > 40.0, "open view: {} -> {} dB", black.psnr, over.psnr);
+    // The same pixels, now with the globe filling what the splat's alpha leaves open: exact.
+    assert!(band_black < 40.0 && band > 40.0, "band {band_black} -> {band}");
+    assert!(interior_black < 40.0 && interior > 40.0, "interior {interior_black} -> {interior}");
     std::fs::remove_dir_all(dir).ok();
 }

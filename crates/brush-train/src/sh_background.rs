@@ -230,6 +230,18 @@ pub fn background_match_mask(gt: Tensor<3>, bg: Tensor<3>) -> Tensor<2> {
     (sum / 9.0).greater_elem(BG_MATCH_NEIGHBOURHOOD).float()
 }
 
+/// `max(basis · coeffs + 0.5, 0)`, `[n, 3]`, for an `[n, 9]` basis and
+/// `[9, 3]` coefficients.
+fn globe_colour(coeffs: Tensor<2>, basis: Tensor<2>) -> Tensor<2> {
+    // Broadcast-and-sum rather than `matmul`: the coefficient gradient is
+    // then a sum over all pixels, which reduces in parallel, whereas the
+    // matmul backward (`[9, n] x [n, 3]`) has only 27 outputs to spread a
+    // reduction over hundreds of thousands of pixels across.
+    let [n, k] = basis.dims();
+    let weighted = basis.reshape([n, k, 1]) * coeffs.reshape([1, k, 3]);
+    (weighted.sum_dim(1).reshape([n, 3]) + 0.5).clamp_min(0.0)
+}
+
 /// The learned globe: degree-2 SH coefficients `[9, 3]`, with their own tiny
 /// Adam state (reusing `crate::adam_scaled`, the trainer's own optimizer, so
 /// the globe gets the same numerics as every other learned parameter).
@@ -262,13 +274,31 @@ impl ShBackground {
     /// it would zero the gradient wherever the globe reaches white, which
     /// overexposed sky does all the time.
     pub fn image(&self, basis: Tensor<2>) -> Tensor<2> {
-        // Broadcast-and-sum rather than `matmul`: the coefficient gradient is
-        // then a sum over all pixels, which reduces in parallel, whereas the
-        // matmul backward (`[9, n] x [n, 3]`) has only 27 outputs to spread a
-        // reduction over hundreds of thousands of pixels across.
-        let [n, k] = basis.dims();
-        let weighted = basis.reshape([n, k, 1]) * self.coeffs.clone().reshape([1, k, 3]);
-        (weighted.sum_dim(1).reshape([n, 3]) + 0.5).clamp_min(0.0)
+        globe_colour(self.coeffs.clone(), basis)
+    }
+
+    /// A globe of one colour in every direction (band 0 only), with fresh
+    /// Adam state.
+    pub fn constant(device: &Device, colour: Vec3) -> Self {
+        let mut bg = Self::new(device, 1.0);
+        let mut coeffs = [0.0f32; 27];
+        for (c, v) in colour.to_array().into_iter().enumerate() {
+            coeffs[c] = (v - 0.5) / SH_C0;
+        }
+        bg.coeffs = Tensor::<1>::from_floats(coeffs, device).reshape([9, 3]).require_grad();
+        bg
+    }
+
+    /// The background `[h, w, 3]` a training step composites behind a render
+    /// of `camera` at `size`: the globe on the [`BG_BLOCK_PX`] block grid,
+    /// upsampled. Off the autodiff graph, on the coefficients' inner device.
+    pub fn render_background(&self, camera: &Camera, size: UVec2) -> Tensor<3> {
+        let coeffs = self.coeffs.clone().inner();
+        let grid = block_grid_size(size);
+        let centres = pixel_centres(grid, &coeffs.device());
+        let low = globe_colour(coeffs, sh_basis(world_dirs(centres, camera, grid)))
+            .reshape([grid.y as usize, grid.x as usize, 3]);
+        upsample_background(low, size.y as usize, size.x as usize)
     }
 
     /// The coefficients, on the autodiff graph — composite with this (not
