@@ -244,3 +244,39 @@ async fn an_unreadable_far_tile_is_dropped_when_rows_drift_into_it() {
     assert_eq!(here, 3, "the drifted rows stay resident");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Task 14b: the eval model holds 40 parked tiles (more parts than a Metal kernel binds buffers): every resident and
+/// parked mean comes back as stored.
+#[tokio::test]
+async fn the_eval_model_holds_forty_parked_tiles() {
+    let dir = tmp("park-forty");
+    let mut live = LiveModel::new(area_config(2.0), device().await);
+    live.enable_area(dir.join("tiles"));
+    add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
+    train(&mut live, 3).await;
+    let rows = live.trainer.as_ref().unwrap().read_rows(live.splats.as_ref().unwrap()).await;
+    let mut means = rows.means.clone();
+    let mut tiles = Vec::new();
+    for i in 0..40 {
+        let mut tile = rows.select(&[0, 1]);
+        tile.means = vec![100.5 + i as f32, 0.0, 0.5, 100.5 + i as f32, 0.2, 0.5];
+        means.extend(&tile.means);
+        tiles.push((TileKey { x: 100 + i, z: 0 }, tile));
+    }
+    let area = live.area.as_mut().unwrap();
+    area.registry.note_resident(&means, &[], live.iter);
+    for (key, tile) in &tiles {
+        let slot_poses = live.slot_poses(tile);
+        write_tile(&dir.join("tiles"), &ParkedTile { key: *key, version: 1, slot_poses, rows: tile.clone() }).unwrap();
+        live.area.as_mut().unwrap().registry.mark_parked(*key, 2, live.iter);
+    }
+    let eval = live.eval_splats().await.unwrap();
+    let got: Vec<f32> = eval.means().into_data_async().await.unwrap().try_to_vec().unwrap();
+    let key = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    let mut got: Vec<Vec<u32>> = got.chunks(3).map(key).collect();
+    let mut want: Vec<Vec<u32>> = means.chunks(3).map(key).collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+    std::fs::remove_dir_all(dir).ok();
+}

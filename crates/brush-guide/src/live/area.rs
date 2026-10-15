@@ -7,6 +7,7 @@ use super::LiveModel;
 use brush_dataset::scene::SceneBatch;
 use crate::area::{AreaCounters, AreaParams, AreaReport, TileKey, TileRegistry, area_views};
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
+use brush_train::rows::SplatRows;
 use burn::tensor::{Tensor, s};
 use glam::Vec3;
 use std::collections::{BTreeMap, BTreeSet};
@@ -220,18 +221,20 @@ impl LiveModel {
         let device = self.device.clone().inner();
         let coeffs = resident.sh_coeffs.dims()[1] as u32;
         let mode = if resident.render_mip { SplatRenderMode::Mip } else { SplatRenderMode::Default };
-        let mut parts = vec![resident.bake_min_scale()];
-        let (mut tiles, mut rows) = (0u32, 0usize);
+        let mut parked = Vec::new();
         for key in keys {
             match self.full_model_rows(key, coeffs) {
                 Ok(r) if r.is_empty() => {}
-                Ok(r) => {
-                    tiles += 1;
-                    rows += r.len();
-                    parts.push(r.baked().to_splats_raw(&device));
-                }
+                Ok(r) => parked.push(r.baked()),
                 Err(e) => log::warn!("area: eval leaves out parked tile {}: {e}", key.stem()),
             }
+        }
+        let (tiles, parked) = (parked.len(), SplatRows::concat(&parked));
+        let rows = parked.len();
+        // One part for all parked tiles: a kernel joining one buffer per tile exceeds Metal's 31 buffer bindings.
+        let mut parts = vec![resident.bake_min_scale()];
+        if rows > 0 {
+            parts.push(parked.to_splats_raw(&device));
         }
         let splats = concat_splats(&parts, mode);
         log::info!(
