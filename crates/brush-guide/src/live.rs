@@ -83,6 +83,8 @@ pub struct LiveModel {
     iter: u32,
     /// Splats evicted to stay within the budget, in total.
     num_evicted: u64,
+    /// Splats the last refine evicted; a floor for what the next refine parks before it evicts.
+    last_refine_evicted: u32,
     /// Refines and their time since `take_refine_stats`, for debug timing.
     refine_stats: (u32, f64),
     /// Refine wall time since the model started, kept apart from `take_refine_stats`.
@@ -132,6 +134,7 @@ impl LiveModel {
             all_members: Vec::new(),
             iter: 0,
             num_evicted: 0,
+            last_refine_evicted: 0,
             refine_stats: (0, 0.0),
             refine_total_s: 0.0,
             last_step_lr: StepLr::default(),
@@ -412,6 +415,7 @@ impl LiveModel {
             stats.num_evicted
         );
         self.num_evicted += u64::from(stats.num_evicted);
+        self.last_refine_evicted = stats.num_evicted;
         let splats = self.park_after_refine(splats).await;
         self.hold_left_rows_after_refine(&splats).await;
         splats

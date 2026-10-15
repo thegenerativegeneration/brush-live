@@ -44,8 +44,10 @@ impl LiveModel {
     /// Right before a refine that will evict (a seed shortfall noted, or blocked growth backlog while keyframes seed
     /// new cells, [`brush_train::train::SplatTrainer::pending_evictions`]): parks resident left tiles, farthest first,
     /// holding as many splats as the eviction would free ([`crate::area::TileRegistry::left_to_park`]), so the
-    /// eviction takes from the area the walker left instead of the live one. Needs the registry as the visibility
-    /// readback just left it. No-op without area training, with parking off, or when nothing would be evicted.
+    /// eviction takes from the area the walker left instead of the live one. The splats the previous refine evicted
+    /// are a floor for that count: a refine's own split and growth demand is not pending beforehand, and at the cap
+    /// the next refine usually evicts about as many again. Needs the registry as the visibility readback just left
+    /// it. No-op without area training, with parking off, or when nothing would be evicted.
     pub(super) async fn park_left_before_eviction(&mut self, splats: Splats) -> Splats {
         let (Some(area), Some(trainer), Some(&(centre, _))) =
             (self.area.as_ref(), self.trainer.as_ref(), self.view_cams.last())
@@ -53,7 +55,7 @@ impl LiveModel {
             return splats;
         };
         let current = splats.num_splats();
-        let evict = trainer.pending_evictions(current);
+        let evict = trainer.pending_evictions(current).max(self.last_refine_evicted);
         if area.parking_off || evict == 0 {
             return splats;
         }

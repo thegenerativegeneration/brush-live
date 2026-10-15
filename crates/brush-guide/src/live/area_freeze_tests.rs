@@ -299,3 +299,28 @@ async fn left_tiles_park_before_an_eviction_bites() {
     assert_eq!(rows_where(&live, live_rows).await.len(), 20, "live-area rows went");
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Steady state: with no eviction pending, the splats the previous refine evicted (its own growth demand, which
+/// `pending_evictions` cannot see) still park the held left tiles before the next refine, so they make the room
+/// instead of the live area.
+#[tokio::test]
+async fn the_last_refines_evictions_park_left_tiles_before_the_next() {
+    let dir = tmp("freeze-park-last-evicted");
+    let config = GuideConfig { area_seen_window_steps: 1000, ..area_config(2.0) };
+    let mut live = LiveModel::new(config, device().await);
+    live.enable_area(dir.join("tiles"));
+    add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
+    train(&mut live, 5).await;
+    // Keyframe 1 looks back at the origin: left, held, in view, so no park after a refine takes it.
+    add(&mut live, &dir, 1, Vec3::new(6.0, 0.0, 2.0), Vec3::ZERO).await;
+    let held = live.area_report().unwrap().frozen_rows;
+    assert!(held > 10);
+    assert_eq!(live.trainer.as_ref().unwrap().pending_evictions(live.splats().unwrap().num_splats()), 0);
+    train(&mut live, 5).await;
+    assert_eq!(live.area_report().unwrap().counters.parks, 0, "nothing parks without an eviction");
+    live.last_refine_evicted = held;
+    train(&mut live, 5).await;
+    let r = live.area_report().unwrap();
+    assert!(r.counters.parks >= 1, "{r:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
