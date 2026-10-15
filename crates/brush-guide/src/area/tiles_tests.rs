@@ -281,3 +281,43 @@ fn room_plan_never_parks_every_resident_splat() {
     let plan = RoomPlan { park_first: vec![TileKey { x: 9, z: 0 }], restore: false, shortfall: 9 };
     assert_eq!(r.plan_room(10, 3, 3, c, 5000, 100), plan);
 }
+
+/// Fix round 1: seeds in a left tile are dropped and never restore it, resident or parked; an unvisited parked tile
+/// within reach still comes back, and new ground keeps its seeds.
+#[test]
+fn seeds_on_left_tiles_are_dropped() {
+    let mut r = TileRegistry::new(params());
+    r.note_walker(Vec3::new(5.0, 0.0, 5.0));
+    r.note_resident(&flat(&[[5.0, 0.0, 5.0], [15.0, 0.0, 5.0], [45.0, 0.0, 5.0]]), &[], 0);
+    r.mark_parked(TileKey { x: 1, z: 0 }, 1, 0);
+    r.mark_parked(TileKey { x: 4, z: 0 }, 1, 0);
+    // From x = 52: (0, 0) lies 42 m away and (1, 0) 32 m (both left, (1, 0) within radius + far_seed 35 m); (4, 0) was
+    // never visited.
+    let c = Vec3::new(52.0, 0.0, 5.0);
+    let mut seeds = vec![[5.0, 0.0, 5.0]];
+    seeds.extend(vec![[15.0, 0.0, 5.0]; 8]);
+    seeds.extend(vec![[45.0, 0.0, 5.0]; 8]);
+    seeds.push([65.0, 0.0, 5.0]);
+    let t = r.triage_seeds(&flat(&seeds), c, 8);
+    assert_eq!(t.restore, vec![TileKey { x: 4, z: 0 }]);
+    let want: Vec<bool> = (0..seeds.len()).map(|i| i == seeds.len() - 1).collect();
+    assert_eq!(t.keep, want);
+}
+
+/// Fix round 1: before an eviction, resident left tiles park farthest first until they hold what it would free,
+/// never every resident splat; tiles not left stay.
+#[test]
+fn left_tiles_to_park_before_an_eviction() {
+    let mut r = TileRegistry::new(params());
+    r.note_walker(Vec3::new(5.0, 0.0, 5.0));
+    r.note_walker(Vec3::new(5.0, 0.0, 45.0));
+    let mut pts = vec![[5.0, 0.0, 5.0]; 100]; // (0, 0): left, 115 m
+    pts.extend(vec![[5.0, 0.0, 45.0]; 40]); // (0, 4): left, 120 m
+    pts.extend(vec![[125.0, 0.0, 5.0]; 200]); // (12, 0): the walker's tile
+    r.note_resident(&flat(&pts), &vec![true; pts.len()], 0);
+    let c = Vec3::new(125.0, 0.0, 5.0);
+    let (near, far) = (TileKey { x: 0, z: 0 }, TileKey { x: 0, z: 4 });
+    assert_eq!(r.left_to_park(30, 340, c, 100), vec![far]);
+    assert_eq!(r.left_to_park(50, 340, c, 100), vec![far, near]);
+    assert_eq!(r.left_to_park(50, 140, c, 100), vec![far], "parking both would take every resident splat");
+}

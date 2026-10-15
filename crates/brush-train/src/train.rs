@@ -292,8 +292,10 @@ impl SplatTrainer {
     /// eviction demand), also when steps before this call trained them. They are never eviction victims either. Take
     /// and append keep the mask row-aligned (appended rows are not held); refine drops it, so the caller sets it again
     /// for the refined rows. `None` holds nothing: rows held before train from the next step on, and without the
-    /// radius and a held row step and refine are as without the mask.
+    /// radius and a held row step and refine are as without the mask. A mask of another length than the rows the
+    /// trainer tracks is an error (logged, a debug assertion) and is dropped, so every row trains.
     pub fn set_frozen_rows(&mut self, frozen: Option<Tensor<1, Bool>>) {
+        let frozen = frozen.filter(|held| Self::held_fits(held.dims()[0], self.tracked_rows()));
         if let (Some(held), Some(record)) = (&frozen, self.refine_record.as_mut()) {
             record.trained = Some(match record.trained.take() {
                 Some(trained) => trained.mask_fill(held.clone(), 0.0),
@@ -303,15 +305,47 @@ impl SplatTrainer {
         self.frozen_rows = frozen;
     }
 
-    /// The rows held by [`Self::set_frozen_rows`], row-aligned with the current splats; `None` when none are held.
+    /// Whether a held mask of `held` rows fits `rows` tracked rows (`None`: nothing to compare against); a mismatch is
+    /// logged as an error and fails a debug assertion.
+    fn held_fits(held: usize, rows: Option<usize>) -> bool {
+        let fits = rows.is_none_or(|n| n == held);
+        debug_assert!(fits, "frozen rows ({held}) out of step with the splats ({rows:?})");
+        if !fits {
+            log::error!("frozen rows ({held}) out of step with the splats ({rows:?}); every row trains");
+        }
+        fits
+    }
+
+    /// The row count the per-row state carries (refine record, life state or origin tags); `None` before any.
+    fn tracked_rows(&self) -> Option<usize> {
+        let record = self.refine_record.as_ref().map(|r| r.vis_weight.dims()[0]);
+        let life = self.evict.as_ref().and_then(|e| e.life.as_ref()).map(SplatLife::len);
+        record.or(life).or_else(|| self.origin.as_ref().map(crate::origin::SplatOrigin::len))
+    }
+
+    /// Diagnostic: the rows held by [`Self::set_frozen_rows`], row-aligned with the current splats; `None` when none
+    /// are held.
+    #[doc(hidden)]
     pub fn frozen_rows(&self) -> Option<&Tensor<1, Bool>> {
         self.frozen_rows.as_ref()
     }
 
-    /// Splats the next refine evicts for: seeds and restores the budget turned away since the last refine
-    /// ([`Self::note_seed_shortfall`]); 0 without eviction.
+    /// Diagnostic: the splats the next refine evicts for, from seeds and restores the budget turned away since the
+    /// last refine ([`Self::note_seed_shortfall`]); 0 without eviction.
+    #[doc(hidden)]
     pub fn pending_seed_shortfall(&self) -> u32 {
         self.evict.as_ref().map_or(0, |e| e.seed_shortfall)
+    }
+
+    /// How many splats the next refine evicts at least, with `current` splats, before that refine's own split and
+    /// growth demand: down to the eviction target with a seed shortfall noted, else the blocked demand of earlier
+    /// refines while keyframes still seed new cells. 0 without eviction.
+    pub fn pending_evictions(&self, current: u32) -> u32 {
+        let Some(ev) = self.evict.as_ref() else {
+            return 0;
+        };
+        let backlog = if ev.recent.active(ev.config.recent_refines) { ev.recent.backlog } else { 0 };
+        crate::evict::evict_count(current, backlog, ev.seed_shortfall, self.config.max_splats, ev.config.headroom)
     }
 
     /// Splats refine pruned for a diverged colour since training started.
@@ -936,12 +970,10 @@ impl SplatTrainer {
             )
         });
         self.last_frozen = beyond.clone();
-        if let Some(held) = &self.frozen_rows {
-            assert_eq!(
-                held.dims()[0],
-                splats.num_splats() as usize,
-                "frozen rows out of step with the splats"
-            );
+        if let Some(held) = &self.frozen_rows
+            && !Self::held_fits(held.dims()[0], Some(splats.num_splats() as usize))
+        {
+            self.frozen_rows = None;
         }
         let frozen = radius::either(beyond, self.frozen_rows.clone());
 

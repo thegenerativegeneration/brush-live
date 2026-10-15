@@ -388,10 +388,12 @@ impl LiveModel {
     }
 
     /// Refines the splats (densify, prune, evict). With area training it first notes which tiles the window's views
-    /// drew and afterwards parks the tiles the capture has left and holds the rows of left tiles still resident.
+    /// drew and parks left tiles an eviction would otherwise make room for, and afterwards parks the tiles the capture
+    /// has left and holds the rows of left tiles still resident.
     async fn refine(&mut self, splats: Splats) -> Splats {
         crate::timing::sync_splats(&splats).await;
         self.note_visibility(&splats).await;
+        let splats = self.park_left_before_eviction(splats).await;
         let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
         let t = web_time::Instant::now();
         let before = splats.num_splats();

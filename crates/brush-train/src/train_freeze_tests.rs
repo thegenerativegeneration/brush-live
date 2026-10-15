@@ -135,3 +135,38 @@ async fn cleared_rows_count_as_trained_again() {
     let trained = floats(trainer.refine_record.as_ref().unwrap().trained.clone().unwrap()).await;
     assert!(trained.iter().all(|&t| t == 1.0), "{trained:?}");
 }
+
+/// A mask of the wrong length fails open in release builds: logged, dropped, every row trains (no panic).
+#[tokio::test]
+async fn a_mask_of_the_wrong_length_is_dropped() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let (mut trainer, s) = trainer_after_one_step(0.0, 0.9).await;
+    let device = s.device();
+    trainer.set_frozen_rows(Some(far_rows_mask(NEAR + FAR, &device)));
+    assert!(trainer.frozen_rows().is_none(), "set_frozen_rows kept a short mask");
+    // A mask that fits when set but not at the step (rows changed behind the trainer's back) is dropped there.
+    trainer.frozen_rows = Some(far_rows_mask(NEAR + FAR, &device).bool_not());
+    let (before, after, _) = step(&mut trainer, s).await;
+    assert!(trainer.frozen_rows().is_none());
+    assert_ne!(before.rows(FAR_ROWS), after.rows(FAR_ROWS), "far rows did not train");
+}
+
+/// What the next refine evicts at least: down to the target with a seed shortfall, nothing without one.
+#[tokio::test]
+async fn pending_evictions_follow_the_seed_shortfall() {
+    let (mut trainer, _) = trainer_after_one_step(0.0, 0.9).await;
+    assert_eq!(trainer.pending_evictions(100), 0, "no eviction state");
+    trainer.enable_eviction(crate::evict::EvictConfig {
+        headroom: 0.1,
+        min_age: 0,
+        max_cell_fraction: 1.0,
+        recent_refines: 2,
+    });
+    trainer.config.max_splats = 100;
+    assert_eq!(trainer.pending_evictions(100), 0);
+    trainer.note_seed_shortfall(1);
+    assert_eq!(trainer.pending_evictions(100), 10);
+    assert_eq!(trainer.pending_evictions(95), 5);
+}

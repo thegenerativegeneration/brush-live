@@ -30,9 +30,9 @@ pub(crate) struct AreaState {
     pub(super) junction: Junction,
     /// Seed counts of the last keyframe that seeded again after restoring tiles its seeds hit: (before, after).
     pub(super) last_reseed: Option<(u32, u32)>,
-    /// Parked tiles in a deferral streak: deferred at the last keyframe or since, and not back. A streak logs and
-    /// notes its shortfall once.
-    pub(super) deferring: BTreeSet<TileKey>,
+    /// Parked tiles in a deferral streak (deferred at the last keyframe or since, and not back), with the streak's
+    /// deferrals so far. A streak logs once and notes its shortfall every `DEFER_RENOTE_EVERY` deferrals.
+    pub(super) deferring: BTreeMap<TileKey, u32>,
     /// Tiles deferred since the last keyframe ended; a streak whose tile is not among them ends with the keyframe.
     pub(super) deferred_now: BTreeSet<TileKey>,
     /// The left resident tiles whose rows the trainer holds ([`super::area_freeze`]).
@@ -93,7 +93,7 @@ impl AreaState {
             parking_off: false,
             junction: Junction::default(),
             last_reseed: None,
-            deferring: BTreeSet::new(),
+            deferring: BTreeMap::new(),
             deferred_now: BTreeSet::new(),
             frozen_keys: BTreeSet::new(),
             frozen_rows: 0,

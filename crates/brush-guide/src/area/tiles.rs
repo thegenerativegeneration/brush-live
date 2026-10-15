@@ -81,9 +81,11 @@ pub struct TileInfo {
 /// Parked tiles to restore from a seed batch, and which seeds survive.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SeedTriage {
-    /// Parked tiles within `radius + far_seed` that hold at least `min_seeds` seeds.
+    /// Parked tiles within `radius + far_seed` that hold at least `min_seeds` seeds and that the walker has not left.
     pub restore: Vec<TileKey>,
-    /// Per seed: false for every seed that lies in a parked tile (far, sparse, or about to be restored and reseeded).
+    /// Per seed: false for every seed that lies in a parked tile (far, sparse, or about to be restored and reseeded)
+    /// or in a tile the walker has left ([`TileRegistry::left_keys`]; resident, parked or dropped), which stays as it
+    /// was left.
     pub keep: Vec<bool>,
 }
 
@@ -144,12 +146,33 @@ impl TileRegistry {
     /// Tiles the walker has left: visited ([`Self::note_walker`]) and now beyond radius + hysteresis of `centre`.
     /// Their resident rows stay as they are until the walker returns.
     pub fn left_keys(&self, centre: Vec3) -> BTreeSet<TileKey> {
+        self.visited.iter().copied().filter(|&k| self.is_left(k, centre)).collect()
+    }
+
+    /// Whether the walker at `centre` has left tile `key` ([`Self::left_keys`]).
+    pub fn is_left(&self, key: TileKey, centre: Vec3) -> bool {
         let p = &self.params;
-        self.visited
+        self.visited.contains(&key) && key.footprint_distance(centre, p.tile_size) > p.radius + p.hysteresis
+    }
+
+    /// Resident left tiles to park before an eviction of `evict` splats bites, so it takes from the left area instead
+    /// of the live one: farthest first until they hold `evict` splats. Unseen left tiles count too (they park after
+    /// the refine anyway). Tiles restored fewer than `min_resident_keyframes` keyframes before `keyframes` are
+    /// skipped, and so is a tile whose parking would leave none of the `resident` splats.
+    pub fn left_to_park(&self, evict: u32, resident: u32, centre: Vec3, keyframes: u32) -> Vec<TileKey> {
+        let p = &self.params;
+        let mut candidates: Vec<(f32, TileKey, u32)> = self
+            .tiles
             .iter()
-            .copied()
-            .filter(|k| k.footprint_distance(centre, p.tile_size) > p.radius + p.hysteresis)
-            .collect()
+            .filter(|&(&k, t)| {
+                t.resident
+                    && self.is_left(k, centre)
+                    && t.restored_at_keyframe.is_none_or(|r| keyframes.saturating_sub(r) >= p.min_resident_keyframes)
+            })
+            .map(|(k, t)| (k.footprint_distance(centre, p.tile_size), *k, t.splats))
+            .collect();
+        candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        pick_until(candidates.into_iter().map(|(_, k, n)| (k, n)), evict, resident).0
     }
 
     pub fn params(&self) -> &AreaParams {
@@ -238,11 +261,12 @@ impl TileRegistry {
         let mut keep = Vec::with_capacity(seed_means.len() / 3);
         for s in seed_means.chunks_exact(3) {
             let key = TileKey::of(Vec3::new(s[0], s[1], s[2]), p.tile_size);
+            let left = self.is_left(key, centre);
             let parked = self.tiles.get(&key).is_some_and(|t| !t.resident);
-            if parked {
+            if parked && !left {
                 *counts.entry(key).or_default() += 1;
             }
-            keep.push(!parked);
+            keep.push(!parked && !left);
         }
         let restore = counts
             .into_iter()
@@ -288,18 +312,8 @@ impl TileRegistry {
             .filter(|(seen, d, k, _)| *d > p.radius && (!seen || left.contains(k)))
             .collect();
         candidates.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
-        let mut park_first = Vec::new();
-        let mut freed = 0u32;
-        for (_, _, key, splats) in candidates {
-            if room + freed >= restore_splats {
-                break;
-            }
-            if freed + splats >= resident {
-                continue;
-            }
-            park_first.push(key);
-            freed += splats;
-        }
+        let need = restore_splats - room;
+        let (park_first, freed) = pick_until(candidates.into_iter().map(|(.., k, n)| (k, n)), need, resident);
         let have = room + freed;
         RoomPlan { park_first, restore: have >= restore_splats, shortfall: restore_splats.saturating_sub(have) }
     }
@@ -398,6 +412,23 @@ impl TileRegistry {
             })
             .collect()
     }
+}
+
+/// Takes `(tile, splats)` candidates in order until they hold `need` splats, skipping any that would bring the total
+/// to all `resident` splats; returns the tiles and the splats they hold.
+fn pick_until(candidates: impl Iterator<Item = (TileKey, u32)>, need: u32, resident: u32) -> (Vec<TileKey>, u32) {
+    let (mut picked, mut freed) = (Vec::new(), 0u32);
+    for (key, splats) in candidates {
+        if freed >= need {
+            break;
+        }
+        if freed + splats >= resident {
+            continue;
+        }
+        picked.push(key);
+        freed += splats;
+    }
+    (picked, freed)
 }
 
 /// Row indices of the flat xyz `means` grouped by tile.

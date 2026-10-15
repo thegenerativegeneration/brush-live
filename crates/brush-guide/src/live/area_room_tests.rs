@@ -5,7 +5,7 @@
 use super::*;
 use crate::config::GuideConfig;
 use crate::live::area::tests::{add, area_config, device, tmp};
-use crate::live::area_restore::tests::{drift_rows, parked_origin, train};
+use crate::live::area_restore::tests::{drift_rows, not_left_from_6m, parked_origin, parked_origin_with, train};
 
 /// Keeps a few resident rows at (1.5, 0, 1.5), next to where the walker comes back, so parking for room never has
 /// to take every resident row.
@@ -86,7 +86,8 @@ async fn a_deferral_streak_notes_its_shortfall_once() {
     live.defer(a, 100);
     assert_eq!(pending(&live), base + 107, "both were deferred at the last keyframe: the streaks go on");
     live.end_deferral_streaks();
-    assert_eq!(live.area.as_ref().unwrap().deferring, BTreeSet::from([a]), "b was not deferred again");
+    let streaks: Vec<TileKey> = live.area.as_ref().unwrap().deferring.keys().copied().collect();
+    assert_eq!(streaks, vec![a], "b was not deferred again");
     // A keyframe at x = 20 defers nothing: a's streak ends with it.
     add(&mut live, &dir, 2, Vec3::new(20.0, 0.0, 2.0), Vec3::new(20.0, 0.0, 0.0)).await;
     assert!(live.area.as_ref().unwrap().deferring.is_empty());
@@ -98,10 +99,11 @@ async fn a_deferral_streak_notes_its_shortfall_once() {
 }
 
 /// Task 10 follow-up 1: when a seeds-pass restore drops the tile the seeds hit (its file is unreadable), the seeds
-/// are sorted again against the registry as it is now, so the keyframe's rows land in the dropped tile's ground.
+/// are sorted again against the registry as it is now, so the keyframe's rows land in the dropped tile's ground (a
+/// tile the walker has not left).
 #[tokio::test]
 async fn seeds_land_where_a_seeds_pass_restore_dropped_the_tile() {
-    let (mut live, dir) = parked_origin("seeds-resort").await;
+    let (mut live, dir) = parked_origin_with("seeds-resort", not_left_from_6m()).await;
     let tiles = dir.join("tiles");
     let parked = live.area.as_ref().unwrap().registry.parked_keys();
     for &key in &parked {
@@ -137,5 +139,21 @@ async fn a_new_restore_empties_the_junction_cache() {
     let junction = &live.area.as_ref().unwrap().junction;
     assert_eq!(junction.steps_left, 10);
     assert!(junction.cache.is_empty(), "the restarted junction kept {} decoded batches", junction.cache.len());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Fix round 1: a tile that stays deferred notes its shortfall at the first deferral and every
+/// `DEFER_RENOTE_EVERY` after, so a large tile still gets its room after a bounded number of retries.
+#[tokio::test]
+async fn a_long_deferral_streak_notes_its_shortfall_every_ten_deferrals() {
+    let (mut live, dir) = parked_origin("defer-renote").await;
+    let key = live.area.as_ref().unwrap().registry.parked_keys()[0];
+    let pending = |live: &LiveModel| live.trainer.as_ref().unwrap().pending_seed_shortfall();
+    let base = pending(&live);
+    for n in 1..=25u32 {
+        live.defer(key, 100);
+        let noted = 1 + (n - 1) / DEFER_RENOTE_EVERY;
+        assert_eq!(pending(&live), base + 100 * noted, "after {n} deferrals");
+    }
     std::fs::remove_dir_all(dir).ok();
 }

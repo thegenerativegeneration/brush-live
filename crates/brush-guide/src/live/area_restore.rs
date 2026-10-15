@@ -21,6 +21,10 @@ const JUNCTION_FAR_M: f32 = 100.0;
 /// then the importance is `+inf` (unscored) until the next refine scores it.
 const STALE_WINDOWS: u32 = 10;
 
+/// A deferral streak notes its shortfall at its first deferral and every this many after, so a tile larger than the
+/// room eviction keeps free still gets room eventually, without evicting the live area at every refine.
+pub(super) const DEFER_RENOTE_EVERY: u32 = 10;
+
 /// Why parked tiles come back; the log names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestoreReason {
@@ -187,15 +191,19 @@ impl LiveModel {
         (splats, Restore::Restored { splats: n, spread })
     }
 
-    /// Defers the restore of `key`, `shortfall` splats over the budget. The first deferral of a streak is logged and
-    /// notes the shortfall, so the next refine evicts for it; later ones in the streak only count, so a tile that
-    /// stays deferred does not evict the live area at every refine.
+    /// Defers the restore of `key`, `shortfall` splats over the budget. The first deferral of a streak is logged;
+    /// it and every [`DEFER_RENOTE_EVERY`]th after it note the shortfall, so the next refine evicts for it. The ones
+    /// between only count, so a tile that stays deferred does not evict the live area at every refine.
     pub(super) fn defer(&mut self, key: TileKey, shortfall: u32) {
         let area = self.area.as_mut().expect("area training is on");
         area.counters.deferrals += 1;
         area.deferred_now.insert(key);
-        if area.deferring.insert(key) {
+        let streak = area.deferring.entry(key).or_insert(0);
+        *streak += 1;
+        if *streak == 1 {
             log::info!("area: restore of tile {} deferred, {shortfall} splats over the budget", key.stem());
+        }
+        if (*streak - 1).is_multiple_of(DEFER_RENOTE_EVERY) {
             let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
             trainer.note_seed_shortfall(shortfall);
         }
@@ -206,7 +214,7 @@ impl LiveModel {
     pub(super) fn end_deferral_streaks(&mut self) {
         if let Some(area) = self.area.as_mut() {
             let now = std::mem::take(&mut area.deferred_now);
-            area.deferring.retain(|k| now.contains(k));
+            area.deferring.retain(|k, _| now.contains(k));
         }
     }
 

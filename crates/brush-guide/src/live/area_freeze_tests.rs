@@ -6,6 +6,7 @@ use crate::area::TileKey;
 use crate::config::GuideConfig;
 use crate::live::area::tests::{add, area_config, device, tmp};
 use crate::live::area_restore::tests::{add_seeing, drift_rows, parked_origin, train};
+use crate::live::area::tests::add_at;
 use brush_train::rows::SplatRows;
 
 /// The trainer's rows whose mean satisfies `keep`, in trainer order.
@@ -164,6 +165,8 @@ async fn eviction_at_the_cap_never_takes_held_rows() {
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
     train(&mut live, 5).await;
+    // With parking on, the refine would park the left tiles first (`left_tiles_park_before_an_eviction_bites`).
+    live.area.as_mut().unwrap().parking_off = true;
     let (pos, away) = (Vec3::new(6.0, 0.0, 2.0), Vec3::new(6.0, 0.0, 10.0));
     add_seeing(&mut live, &dir, 1, pos, away, &[away]).await;
     let held = live.area_report().unwrap().frozen_rows;
@@ -228,5 +231,71 @@ async fn the_mask_follows_parks_restores_appends_and_refines() {
     assert_holds_only_left_rows(&live).await;
     train(&mut live, 5).await;
     assert_holds_left_rows(&live).await;
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Fix round 1: the seeds of a keyframe 6 m from the left origin tiles neither bring them back nor land in them.
+#[tokio::test]
+async fn seeds_on_a_left_tile_neither_restore_it_nor_land() {
+    let (mut live, dir) = parked_origin("freeze-seeds-left").await;
+    let pos = Vec3::new(0.0, 0.0, 6.0);
+    add(&mut live, &dir, 2, pos, Vec3::ZERO).await;
+    let r = live.area_report().unwrap();
+    assert_eq!(r.counters.restores, 0, "{r:?}");
+    let left = live.area.as_ref().unwrap().registry.left_keys(pos);
+    let rows = live.trainer.as_ref().unwrap().read_rows(live.splats.as_ref().unwrap()).await;
+    let kf2: Vec<usize> = (0..rows.len()).filter(|&i| rows.origin[i] == Some(2)).collect();
+    assert!(kf2.iter().all(|&i| !left.contains(&TileKey::of(rows.mean(i), 1.0))), "a seed landed in a left tile");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Fix round 1: seeds on ground the walker never stood near still land, however far.
+#[tokio::test]
+async fn seeds_on_unvisited_far_ground_still_land() {
+    let dir = tmp("freeze-seeds-far");
+    let mut live = LiveModel::new(area_config(2.0), device().await);
+    live.enable_area(dir.join("tiles"));
+    add_at(&mut live, &dir, 0, &[0.0]).await;
+    train(&mut live, 5).await;
+    // Turned sideways, away from the origin rows, toward ground 8 m off.
+    add(&mut live, &dir, 1, Vec3::new(0.3, 0.0, 2.0), Vec3::new(-8.0, 0.0, 2.0)).await;
+    let rows = live.trainer.as_ref().unwrap().read_rows(live.splats.as_ref().unwrap()).await;
+    let far = (0..rows.len()).filter(|&i| rows.origin[i] == Some(1) && rows.mean(i).x < -5.0).count();
+    assert!(far > 0, "no seed of keyframe 1 landed 8 m away");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Fix round 1: at the cap, with the left origin tiles held and in view, a refine about to evict parks them first
+/// instead of evicting rows of the live area.
+#[tokio::test]
+async fn left_tiles_park_before_an_eviction_bites() {
+    let dir = tmp("freeze-park-before-evict");
+    let config = GuideConfig {
+        max_splats: 60,
+        seed_view_fraction: 1.0,
+        evict_min_age: 0,
+        evict_max_cell_fraction: 1.0,
+        area_seen_window_steps: 1000,
+        ..area_config(2.0)
+    };
+    let mut live = LiveModel::new(config, device().await);
+    live.enable_area(dir.join("tiles"));
+    add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
+    train(&mut live, 5).await;
+    // Keyframe 1 looks back at the origin (left, held, in view); its seeds overrun the budget.
+    add(&mut live, &dir, 1, Vec3::new(6.0, 0.0, 2.0), Vec3::ZERO).await;
+    assert!(live.area_report().unwrap().frozen_rows > 10);
+    // 20 scored rows of the live area, behind keyframe 1 (out of its protected cone): what an eviction would take.
+    let live_rows = |p: Vec3| p.x > 6.0 && p.z > 2.5;
+    drift_rows(&mut live, (0..20).flat_map(|i| [6.1 + 0.04 * i as f32, 0.0, 2.8]).collect()).await;
+    let before = rows_where(&live, live_rows).await;
+    assert_eq!(before.len(), 20);
+    assert!(live.trainer.as_ref().unwrap().pending_evictions(live.splats().unwrap().num_splats()) > 0);
+    let evicted = live.num_evicted();
+    train(&mut live, 5).await;
+    let r = live.area_report().unwrap();
+    assert!(r.counters.parks >= 1, "{r:?}");
+    assert_eq!(live.num_evicted(), evicted, "the eviction still took splats: {r:?}");
+    assert_eq!(rows_where(&live, live_rows).await.len(), 20, "live-area rows went");
     std::fs::remove_dir_all(dir).ok();
 }

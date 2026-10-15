@@ -25,15 +25,44 @@ impl LiveModel {
     }
 
     /// At a keyframe whose camera stands at `centre`, before its restores and seeds: marks the tiles around it as
-    /// visited and, when the left resident tiles differ from those the mask holds, holds the new set (the walker left
-    /// a tile, or came back to one). No-op without area training.
+    /// visited and, when the left resident tiles differ from the resident ones the mask holds, holds the new set (the
+    /// walker left a tile, or came back to one). A held tile parked since (its rows left with it) is no change.
+    /// No-op without area training.
     pub(super) async fn hold_left_rows_at_keyframe(&mut self, splats: &Splats, centre: Vec3) {
         let Some(keys) = self.left_resident_keys(centre) else {
             return;
         };
-        if self.area.as_ref().is_some_and(|a| a.frozen_keys != keys) {
+        let changed = self.area.as_ref().is_some_and(|a| {
+            let resident = |k: &&TileKey| a.registry.get(**k).is_some_and(|t| t.resident);
+            !a.frozen_keys.iter().filter(resident).eq(keys.iter())
+        });
+        if changed {
             self.hold_rows(splats, keys).await;
         }
+    }
+
+    /// Right before a refine that will evict (a seed shortfall noted, or blocked growth backlog while keyframes seed
+    /// new cells, [`brush_train::train::SplatTrainer::pending_evictions`]): parks resident left tiles, farthest first,
+    /// holding as many splats as the eviction would free ([`crate::area::TileRegistry::left_to_park`]), so the
+    /// eviction takes from the area the walker left instead of the live one. Needs the registry as the visibility
+    /// readback just left it. No-op without area training, with parking off, or when nothing would be evicted.
+    pub(super) async fn park_left_before_eviction(&mut self, splats: Splats) -> Splats {
+        let (Some(area), Some(trainer), Some(&(centre, _))) =
+            (self.area.as_ref(), self.trainer.as_ref(), self.view_cams.last())
+        else {
+            return splats;
+        };
+        let current = splats.num_splats();
+        let evict = trainer.pending_evictions(current);
+        if area.parking_off || evict == 0 {
+            return splats;
+        }
+        let keys = area.registry.left_to_park(evict, current, centre, self.views.len() as u32);
+        if keys.is_empty() {
+            return splats;
+        }
+        log::info!("area: park {} left tiles before evicting {evict} splats", keys.len());
+        self.park_tiles(splats, &keys).await
     }
 
     /// Notes the walker at `centre` and returns the resident tiles it has left; `None` without area training.
