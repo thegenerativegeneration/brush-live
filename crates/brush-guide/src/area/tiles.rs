@@ -286,6 +286,17 @@ impl TileRegistry {
         }
     }
 
+    /// Records that rows were merged into parked tile `key`'s file, which now holds `splats` rows (a new version).
+    /// It stays parked from the same step. `key` must be a parked tile of the registry.
+    pub fn note_merged(&mut self, key: TileKey, splats: u32) {
+        let t = self.tiles.get_mut(&key);
+        debug_assert!(t.as_ref().is_some_and(|t| !t.resident), "note_merged: no parked tile {key:?}");
+        if let Some(t) = t {
+            t.splats = splats;
+            t.version += 1;
+        }
+    }
+
     pub fn drop_tile(&mut self, key: TileKey) {
         self.tiles.remove(&key);
     }

@@ -304,7 +304,7 @@ async fn enable_area_wipes_stale_tiles_and_reset_wipes_again() {
 /// boxes and views.
 #[test]
 fn a_junction_draws_every_other_step_and_clears_when_done() {
-    let mut j = Junction { boxes: vec![(Vec3::ZERO, Vec3::ONE)], views: vec![3, 7], steps_left: 4, flip: false };
+    let mut j = Junction { boxes: vec![(Vec3::ZERO, Vec3::ONE)], views: vec![3, 7], steps_left: 4, flip: false, cache: Vec::new() };
     let picks: Vec<Option<usize>> = (0..6).map(|_| j.pick()).collect();
     let mut drawn: Vec<usize> = picks.iter().flatten().copied().collect();
     drawn.sort_unstable();

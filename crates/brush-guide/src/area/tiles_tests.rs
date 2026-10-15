@@ -207,3 +207,15 @@ fn z_exactly_on_a_tile_edge_belongs_to_the_upper_tile() {
     assert_eq!(TileKey::of(Vec3::new(0.0, 0.0, 10.0), 10.0), TileKey { x: 0, z: 1 });
     assert_eq!(TileKey::of(Vec3::new(0.0, 0.0, 9.999), 10.0), TileKey { x: 0, z: 0 });
 }
+
+/// Rows merged into a parked tile's file raise its count and version; it stays parked from the same step.
+#[test]
+fn a_merge_keeps_a_tile_parked_with_more_rows() {
+    let mut r = TileRegistry::new(params());
+    let key = TileKey { x: 0, z: 0 };
+    r.note_resident(&flat(&[[1.0, 0.0, 1.0]]), &[], 0);
+    r.mark_parked(key, 10, 7);
+    r.note_merged(key, 13);
+    let t = r.get(key).unwrap();
+    assert_eq!((t.resident, t.splats, t.version, t.parked_at_step), (false, 13, 2, 7));
+}

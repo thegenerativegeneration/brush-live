@@ -190,3 +190,35 @@ async fn area_off_parks_nothing() {
     assert_eq!(live.eval_splats().await.unwrap().num_splats(), live.splats().unwrap().num_splats());
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Review I4: rows that drift into a parked tile beyond radius + hysteresis join its file instead of bringing it
+/// back; the tile stays parked. Its old rows take the pose correction made while it was parked once, in the file,
+/// whose slots then record the current poses, so a later load moves nothing again.
+#[tokio::test]
+async fn resident_rows_in_a_far_parked_tile_join_its_file() {
+    use crate::live::area_restore::tests::{assert_no_resident_row_in_parked_tiles, correction, drift_rows, parked_origin};
+    let (mut live, dir) = parked_origin("merge-far").await;
+    let tiles = dir.join("tiles");
+    let key = live.area.as_ref().unwrap().registry.parked_keys()[0];
+    let old = read_tile(&tiles, key).unwrap();
+    live.update_poses(&[correction(0, Vec3::new(0.1, 0.0, 2.0), Vec3::new(0.1, 0.0, 0.0))]);
+    let corner = key.min_xz(1.0);
+    drift_rows(&mut live, (0..3).flat_map(|i| [corner.x + 0.2 + 0.1 * i as f32, 0.0, corner.y + 0.5]).collect()).await;
+    train(&mut live, 5).await;
+    let r = live.area_report().unwrap();
+    assert_eq!(r.counters.restores, 0, "{r:?}");
+    assert!(live.area.as_ref().unwrap().registry.parked_keys().contains(&key));
+    let file = read_tile(&tiles, key).unwrap();
+    let n = old.rows.len();
+    assert_eq!(file.rows.len(), n + 3);
+    assert_eq!(file.version, old.version + 1);
+    assert_eq!(live.area.as_ref().unwrap().registry.get(key).unwrap().splats as usize, n + 3);
+    for i in (0..n).filter(|&i| old.rows.origin[i] == Some(0)) {
+        let d = file.rows.mean(i) - old.rows.mean(i);
+        assert!((d - Vec3::new(0.1, 0.0, 0.0)).length() < 1e-4, "row {i} moved by {d}");
+    }
+    assert!((n..n + 3).all(|i| TileKey::of(file.rows.mean(i), 1.0) == key));
+    assert_eq!(live.load_parked(key).unwrap(), file.rows, "the file's slots record the current poses");
+    assert_no_resident_row_in_parked_tiles(&live).await;
+    std::fs::remove_dir_all(dir).ok();
+}

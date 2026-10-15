@@ -3,11 +3,12 @@
 //! when it returns ([`super::area_restore`]), and the eval model loads them back.
 
 use super::LiveModel;
+use brush_dataset::scene::SceneBatch;
 use crate::area::{AreaCounters, AreaParams, AreaReport, TileKey, TileRegistry, area_views};
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
 use burn::tensor::{Tensor, s};
 use glam::Vec3;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// Area training's state: the tile registry, the views that train, and what parking did.
@@ -28,6 +29,8 @@ pub(crate) struct AreaState {
     pub(super) junction: Junction,
     /// Seed counts of the last keyframe that seeded again after restoring tiles its seeds hit: (before, after).
     pub(super) last_reseed: Option<(u32, u32)>,
+    /// Parked tiles whose restore was deferred and has not come back since (their deferral is logged once).
+    pub(super) deferring: BTreeSet<TileKey>,
 }
 
 /// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
@@ -41,12 +44,17 @@ pub(super) struct Junction {
     pub(super) steps_left: u32,
     /// Whether the last call drew a junction view.
     pub(super) flip: bool,
+    /// Decoded batches of the junction views drawn so far, at most [`JUNCTION_CACHE`].
+    pub(super) cache: Vec<(usize, SceneBatch)>,
 }
+
+/// Junction views kept decoded; the junction usually has fewer.
+const JUNCTION_CACHE: usize = 16;
 
 impl Junction {
     /// Counts one training step while the junction lasts and returns the view it draws: every other step one of
     /// `views` in turn, `None` on the steps between, without views, or once the junction is over. The step that ends
-    /// the junction clears `boxes` and `views`.
+    /// the junction clears `boxes`, `views` and the decoded batches.
     pub(super) fn pick(&mut self) -> Option<usize> {
         if self.steps_left == 0 {
             return None;
@@ -58,6 +66,7 @@ impl Junction {
         if self.steps_left == 0 {
             self.boxes.clear();
             self.views.clear();
+            self.cache.clear();
             self.flip = false;
         }
         pick
@@ -76,6 +85,7 @@ impl AreaState {
             parking_off: false,
             junction: Junction::default(),
             last_reseed: None,
+            deferring: BTreeSet::new(),
         }
     }
 }
@@ -155,6 +165,21 @@ impl LiveModel {
             tiles: area.registry.tile_states(centre),
             parking_off: area.parking_off,
         })
+    }
+
+    /// The training batch of junction view `i`: decoded once and kept while the junction lasts (up to
+    /// [`JUNCTION_CACHE`] views), with the view's current camera.
+    pub(super) async fn junction_batch(&mut self, i: usize) -> SceneBatch {
+        let camera = self.views[i].camera;
+        let cached = self.area.as_ref().and_then(|a| a.junction.cache.iter().find(|(v, _)| *v == i));
+        if let Some((_, batch)) = cached {
+            return SceneBatch { camera, ..batch.clone() };
+        }
+        let batch = super::draw::load_batch(&self.views[i]).await;
+        if let Some(a) = self.area.as_mut().filter(|a| a.junction.cache.len() < JUNCTION_CACHE) {
+            a.junction.cache.push((i, batch.clone()));
+        }
+        batch
     }
 
     /// Junction steps still to come after the last restore; 0 with area training off.

@@ -1,13 +1,15 @@
 //! Restoring: a parked tile comes back into the trainer when the capture returns within the radius, when enough of a
 //! new keyframe's seeds land in it nearby, or when resident rows drift into it. Its rows move by the pose corrections
 //! their seeding views had while it was parked; a tile whose views disagree about where it is gets dropped and
-//! retrains from its keyframes. A restore stays within the splat budget and starts a junction refresh.
+//! retrains from its keyframes. A restore stays within the splat budget and starts a junction refresh. (Rows that
+//! drift into a parked tile far from the walker join its file instead: [`super::area_park`].)
 
 use super::LiveModel;
-use crate::area::{TileKey, apply_moves, junction_views, move_spread, read_tile, remove_tile_files, slot_moves};
+use crate::area::{TileKey, apply_moves, junction_views, move_spread, remove_tile_files};
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use brush_train::rows::SplatRows;
+use burn::tensor::s;
 use glam::Vec3;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -30,6 +32,13 @@ pub(crate) enum RestoreReason {
     Rows,
 }
 
+/// What [`LiveModel::restore_one`] did with a tile.
+enum Restore {
+    Restored { splats: u32, spread: f32 },
+    Deferred,
+    Dropped,
+}
+
 impl std::fmt::Display for RestoreReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -41,16 +50,10 @@ impl std::fmt::Display for RestoreReason {
 }
 
 impl LiveModel {
-    /// Brings the parked tiles among `keys` back into the trainer, nearest to `centre` first; keys that are not
-    /// parked are skipped. Per tile: its file is read (a tile that cannot be read, or holds another SH degree, is
-    /// dropped); the pose corrections of its seeding views since the park are worked out, and a tile those views
-    /// carry more than `area_restore_inconsistency_m` apart is dropped (file removed, registry entry gone, so its
-    /// area reseeds). Room within `max_splats` comes from parking unseen tiles beyond the radius, farthest first;
-    /// without enough room the restore is deferred (the tile stays parked and the shortfall raises the next refine's
-    /// eviction). Otherwise the moved rows are appended (zero Adam moments, their floor, age and importance kept; the
-    /// importance is reset to unscored after a long park), the file removed, and the rows' box joins the junction.
-    /// Logs one line per tile and one for the whole call, whose time includes reads, drops and parking for room.
-    /// When a tile came back, the junction refresh starts over.
+    /// Brings the parked tiles among `keys` back into the trainer, nearest to `centre` first ([`Self::restore_one`]);
+    /// keys that are not parked are skipped. Logs one line per tile and one for the whole call, whose time (GPU
+    /// synced before and after) includes reads, drops, parking for room and row appends. When a tile came back, the
+    /// junction refresh starts over.
     pub(super) async fn restore_tiles(
         &mut self,
         mut splats: Splats,
@@ -76,76 +79,24 @@ impl LiveModel {
                 .then(a.cmp(b))
         });
         keys.dedup();
+        sync(&splats).await;
         let t = web_time::Instant::now();
         let (mut tiles, mut restored) = (0u32, 0u32);
         for key in keys {
             let tile_t = web_time::Instant::now();
-            let mut tile = match read_tile(&dir, key) {
-                Ok(tile) => tile,
-                Err(e) => {
-                    log::warn!("area: drop unreadable tile {}: {e}", key.stem());
-                    self.drop_parked(&dir, key);
-                    continue;
-                }
-            };
-            let coeffs = splats.sh_coeffs.dims()[1] as u32;
-            if tile.rows.sh_coeffs_per_channel != coeffs {
-                log::warn!(
-                    "area: drop tile {}: {} SH coefficients, the model has {coeffs}",
-                    key.stem(),
-                    tile.rows.sh_coeffs_per_channel
-                );
-                self.drop_parked(&dir, key);
-                continue;
-            }
-            let current = |slot: u32| self.views.get(slot as usize).map(|v| (v.camera.position, v.camera.rotation));
-            let moves = slot_moves(&tile.slot_poses, &current);
-            let spread = move_spread(&tile.rows, &moves);
-            let limit = self.config.area_restore_inconsistency_m;
-            if spread > limit {
+            let outcome;
+            (splats, outcome) = self.restore_one(splats, &dir, key, centre).await;
+            if let Restore::Restored { splats: n, spread } = outcome {
+                tiles += 1;
+                restored += n;
                 log::info!(
-                    "area: drop inconsistent tile {} (views disagree by {spread:.2} m, limit {limit:.2} m)",
-                    key.stem()
+                    "area: restore tile {} ({n} splats, {reason}) in {:.1} ms, spread {spread:.2} m",
+                    key.stem(),
+                    tile_t.elapsed().as_secs_f64() * 1e3
                 );
-                self.drop_parked(&dir, key);
-                continue;
             }
-            let n = tile.rows.len() as u32;
-            let max_splats = self.config.max_splats;
-            let keyframes = self.views.len() as u32;
-            let registry = &self.area.as_ref().expect("area training is on").registry;
-            let plan = registry.plan_room(n, splats.num_splats(), max_splats, centre, self.iter, keyframes);
-            splats = self.park_tiles(splats, &plan.park_first).await;
-            // Parking can fall short of the plan (parking off, a skipped park): the budget decides.
-            let over = (splats.num_splats() + n).saturating_sub(max_splats);
-            let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
-            let area = self.area.as_mut().expect("area training is on");
-            if !plan.restore || over > 0 {
-                let shortfall = plan.shortfall.max(over);
-                trainer.note_seed_shortfall(shortfall);
-                area.counters.deferrals += 1;
-                log::info!("area: restore of tile {} deferred, {shortfall} splats over the budget", key.stem());
-                continue;
-            }
-            apply_moves(&mut tile.rows, &moves);
-            let parked_at = area.registry.get(key).map_or(self.iter, |t| t.parked_at_step);
-            if self.iter.saturating_sub(parked_at) > STALE_WINDOWS * area.registry.params().seen_window {
-                tile.rows.importance.fill(f32::INFINITY);
-            }
-            splats = trainer.append_rows(splats, &tile.rows);
-            area.registry.mark_restored(key, keyframes, self.iter);
-            remove_tile_files(&dir, key);
-            area.file_bytes.remove(&key);
-            area.junction.boxes.extend(rows_box(&tile.rows));
-            area.counters.restores += 1;
-            tiles += 1;
-            restored += n;
-            log::info!(
-                "area: restore tile {} ({n} splats, {reason}) in {:.1} ms, spread {spread:.2} m",
-                key.stem(),
-                tile_t.elapsed().as_secs_f64() * 1e3
-            );
         }
+        sync(&splats).await;
         let junction_steps = self.config.area_junction_steps;
         let area = self.area.as_mut().expect("area training is on");
         area.counters.tile_bytes = area.file_bytes.values().sum();
@@ -160,13 +111,99 @@ impl LiveModel {
         splats
     }
 
+    /// Restores parked tile `key`, or defers or drops it:
+    /// 1. Its recorded splat count must fit within `max_splats` next to the resident splats, with room made by
+    ///    parking unseen tiles beyond the radius ([`crate::area::TileRegistry::plan_room`]); otherwise the restore is
+    ///    deferred before the file is read and before anything parks (the shortfall raises the next refine's
+    ///    eviction).
+    /// 2. A file that cannot be read, holds another SH degree, or whose seeding views carry the tile more than
+    ///    `area_restore_inconsistency_m` apart is dropped ([`Self::drop_parked`]).
+    /// 3. The planned tiles park; if that fell short (parking off, a skipped park), the restore is deferred.
+    /// 4. The rows, moved by their views' pose corrections since the park, are appended (zero Adam moments; their
+    ///    floor, age and importance kept, the importance unscored after more than `STALE_WINDOWS` seen windows), the
+    ///    file goes, and the rows' box joins the junction.
+    async fn restore_one(&mut self, splats: Splats, dir: &Path, key: TileKey, centre: Vec3) -> (Splats, Restore) {
+        let max_splats = self.config.max_splats;
+        let keyframes = self.views.len() as u32;
+        let registry = &self.area.as_ref().expect("area training is on").registry;
+        let recorded = registry.get(key).map_or(0, |t| t.splats);
+        let plan = registry.plan_room(recorded, splats.num_splats(), max_splats, centre, self.iter, keyframes);
+        if !plan.restore {
+            self.defer(key, plan.shortfall);
+            return (splats, Restore::Deferred);
+        }
+        let (mut tile, moves) = match self.parked_with_moves(key) {
+            Ok(read) => read,
+            Err(e) => {
+                log::warn!("area: drop unreadable tile {}: {e}", key.stem());
+                self.drop_parked(dir, key);
+                return (splats, Restore::Dropped);
+            }
+        };
+        let coeffs = splats.sh_coeffs.dims()[1] as u32;
+        if tile.rows.sh_coeffs_per_channel != coeffs {
+            log::warn!(
+                "area: drop tile {} of another SH degree: {} coefficients, the model has {coeffs}",
+                key.stem(),
+                tile.rows.sh_coeffs_per_channel
+            );
+            self.drop_parked(dir, key);
+            return (splats, Restore::Dropped);
+        }
+        let spread = move_spread(&tile.rows, &moves);
+        let limit = self.config.area_restore_inconsistency_m;
+        if spread > limit {
+            log::info!(
+                "area: drop inconsistent tile {} (views disagree by {spread:.2} m, limit {limit:.2} m)",
+                key.stem()
+            );
+            self.drop_parked(dir, key);
+            return (splats, Restore::Dropped);
+        }
+        let splats = self.park_tiles(splats, &plan.park_first).await;
+        let n = tile.rows.len() as u32;
+        let over = (splats.num_splats() + n).saturating_sub(max_splats);
+        if over > 0 {
+            self.defer(key, over);
+            return (splats, Restore::Deferred);
+        }
+        apply_moves(&mut tile.rows, &moves);
+        let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
+        let area = self.area.as_mut().expect("area training is on");
+        let parked_at = area.registry.get(key).map_or(self.iter, |t| t.parked_at_step);
+        if self.iter.saturating_sub(parked_at) > STALE_WINDOWS * area.registry.params().seen_window {
+            tile.rows.importance.fill(f32::INFINITY);
+        }
+        let splats = trainer.append_rows(splats, &tile.rows);
+        area.registry.mark_restored(key, keyframes, self.iter);
+        remove_tile_files(dir, key);
+        area.file_bytes.remove(&key);
+        area.deferring.remove(&key);
+        area.junction.boxes.extend(rows_box(&tile.rows));
+        area.counters.restores += 1;
+        (splats, Restore::Restored { splats: n, spread })
+    }
+
+    /// Defers the restore of `key`, `shortfall` splats over the budget: the next refine evicts for it. Logged once
+    /// per streak of deferrals of the tile; every deferral counts.
+    fn defer(&mut self, key: TileKey, shortfall: u32) {
+        let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
+        trainer.note_seed_shortfall(shortfall);
+        let area = self.area.as_mut().expect("area training is on");
+        area.counters.deferrals += 1;
+        if area.deferring.insert(key) {
+            log::info!("area: restore of tile {} deferred, {shortfall} splats over the budget", key.stem());
+        }
+    }
+
     /// Forgets parked tile `key`: its files go, the registry drops it (so seeds may land there again) and it counts
     /// as a drop.
-    fn drop_parked(&mut self, dir: &Path, key: TileKey) {
+    pub(super) fn drop_parked(&mut self, dir: &Path, key: TileKey) {
         remove_tile_files(dir, key);
         let area = self.area.as_mut().expect("area training is on");
         area.registry.drop_tile(key);
         area.file_bytes.remove(&key);
+        area.deferring.remove(&key);
         area.counters.drops += 1;
     }
 
@@ -192,6 +229,13 @@ impl LiveModel {
     }
 }
 
+/// Waits for the GPU work queued on `splats`, so a restore event's time holds the work it queued and none before it.
+async fn sync(splats: &Splats) {
+    if splats.num_splats() > 0 {
+        let _ = splats.means().slice(s![0..1, ..]).into_data_async().await;
+    }
+}
+
 /// The bounding box (min, max) of the rows' means; `None` without rows.
 fn rows_box(rows: &SplatRows) -> Option<(Vec3, Vec3)> {
     (!rows.is_empty()).then(|| {
@@ -204,4 +248,4 @@ fn rows_box(rows: &SplatRows) -> Option<(Vec3, Vec3)> {
 
 #[cfg(test)]
 #[path = "area_restore_tests.rs"]
-mod tests;
+pub(in crate::live) mod tests;

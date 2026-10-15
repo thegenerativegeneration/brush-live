@@ -5,11 +5,15 @@
 
 use super::LiveModel;
 use super::area_restore::RestoreReason;
-use crate::area::{ParkedTile, SlotPose, TileKey, apply_moves, group_rows, read_tile, rows_in, slot_moves, write_tile};
+use crate::area::{
+    ParkedTile, SlotPose, TileKey, apply_moves, group_rows, move_spread, read_tile, rows_in, slot_moves, write_tile,
+};
 use brush_render::gaussian_splats::Splats;
 use brush_train::rows::SplatRows;
 use burn::tensor::Transaction;
+use glam::Affine3A;
 use std::collections::BTreeSet;
+use std::path::Path;
 
 impl LiveModel {
     /// Records per resident tile whether a training step since the last refine drew one of its splats (the refine
@@ -60,9 +64,11 @@ impl LiveModel {
         }
     }
 
-    /// After a refine: restores the parked tiles that resident rows drifted into ([`RestoreReason::Rows`]), then parks
-    /// the tiles [`crate::area::TileRegistry::to_park`] names ([`Self::park_tiles`]). No-op without area training or
-    /// views; with parking off only the restore runs.
+    /// After a refine: parked tiles that resident rows drifted into come back ([`RestoreReason::Rows`]) when they lie
+    /// within radius + hysteresis of the newest view; farther ones take the rows into their file
+    /// ([`Self::merge_into_parked`]), so a walker's drifting splats do not pull a far area back. Then the tiles
+    /// [`crate::area::TileRegistry::to_park`] names park ([`Self::park_tiles`]). No-op without area training or
+    /// views; with parking off every such tile comes back and nothing parks.
     pub(super) async fn park_after_refine(&mut self, splats: Splats) -> Splats {
         let Some(centre) = self.view_cams.last().map(|(p, _)| *p) else {
             return splats;
@@ -70,12 +76,13 @@ impl LiveModel {
         let Some(area) = self.area.as_mut() else {
             return splats;
         };
-        let conflicts = area.conflicts.clone();
-        let splats = if conflicts.is_empty() {
-            splats
-        } else {
-            self.restore_tiles(splats, &conflicts, RestoreReason::Rows, centre).await
-        };
+        let p = *area.registry.params();
+        let near = |k: &TileKey| k.footprint_distance(centre, p.tile_size) <= p.radius + p.hysteresis;
+        // With parking off a far tile's file cannot take the rows: the tile comes back instead.
+        let (back, far): (Vec<TileKey>, Vec<TileKey>) =
+            area.conflicts.iter().partition(|k| near(k) || area.parking_off);
+        let splats = self.restore_tiles(splats, &back, RestoreReason::Rows, centre).await;
+        let splats = self.merge_into_parked(splats, &far).await;
         let Some(area) = self.area.as_mut().filter(|a| !a.parking_off) else {
             return splats;
         };
@@ -141,6 +148,114 @@ impl LiveModel {
         splats
     }
 
+    /// Moves the resident rows lying in the far parked tiles `keys` into their files: per tile, the file's rows take
+    /// the pose corrections since the park (as a restore would), the drifted rows join them, every slot records its
+    /// current pose, and the file is written as the next version; the tile stays parked and gets no junction. A tile
+    /// whose views disagree (as on restore) is dropped and the drifted rows stay resident; a file that cannot be read
+    /// or written keeps its rows out too (a failed write turns parking off). Rows kept out go back to the trainer.
+    /// Logged per tile and as one park event. No-op when every resident row would go.
+    async fn merge_into_parked(&mut self, splats: Splats, keys: &[TileKey]) -> Splats {
+        let (Some(area), Some(dir)) = (self.area.as_ref(), self.tiles_dir.clone()) else {
+            return splats;
+        };
+        if keys.is_empty() {
+            return splats;
+        }
+        let t = web_time::Instant::now();
+        let tile_size = area.registry.params().tile_size;
+        let means: Vec<f32> = splats
+            .means()
+            .into_data_async()
+            .await
+            .expect("means readback")
+            .convert::<f32>()
+            .try_into_vec()
+            .expect("f32 means");
+        let take = rows_in(keys, &means, tile_size);
+        let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
+        let (splats, rows) = trainer.take_rows(splats, &take).await;
+        let Some(rows) = rows else {
+            return splats;
+        };
+        let (mut merged, mut tiles) = (BTreeSet::new(), 0u32);
+        for (key, idx) in group_rows(&rows.means, tile_size) {
+            let tile_t = web_time::Instant::now();
+            let Some((total, version, bytes)) = self.merge_tile(&dir, key, rows.select(&idx)) else {
+                continue;
+            };
+            log::info!(
+                "area: merge {} drifted splats into parked tile {} (now {total}, v{version}) in {:.1} ms, file {bytes} B",
+                idx.len(),
+                key.stem(),
+                tile_t.elapsed().as_secs_f64() * 1e3
+            );
+            merged.extend(idx);
+            tiles += 1;
+        }
+        let splats = if merged.len() < rows.len() {
+            let back: Vec<usize> = (0..rows.len()).filter(|i| !merged.contains(i)).collect();
+            let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
+            trainer.append_rows(splats, &rows.select(&back))
+        } else {
+            splats
+        };
+        let area = self.area.as_mut().expect("area training is on");
+        area.counters.tile_bytes = area.file_bytes.values().sum();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        area.counters.park_ms += ms;
+        area.counters.max_park_ms = area.counters.max_park_ms.max(ms);
+        log::info!("area: park event {tiles} tiles, {} splats in {ms:.1} ms", merged.len());
+        splats
+    }
+
+    /// Writes parked tile `key` again with `new` rows added (see [`Self::merge_into_parked`]); returns its row count,
+    /// version and file size, or `None` when the rows stay out.
+    fn merge_tile(&mut self, dir: &Path, key: TileKey, new: SplatRows) -> Option<(u32, u32, u64)> {
+        if self.area.as_ref().is_none_or(|a| a.parking_off) {
+            return None;
+        }
+        let (tile, moves) = match self.parked_with_moves(key) {
+            Ok(read) => read,
+            Err(e) => {
+                log::warn!("area: rows drifted into tile {} stay resident, its file cannot be read: {e}", key.stem());
+                return None;
+            }
+        };
+        if tile.rows.sh_coeffs_per_channel != new.sh_coeffs_per_channel {
+            log::warn!("area: rows drifted into tile {} stay resident, its file holds another SH degree", key.stem());
+            return None;
+        }
+        let spread = move_spread(&tile.rows, &moves);
+        let limit = self.config.area_restore_inconsistency_m;
+        if spread > limit {
+            log::info!(
+                "area: drop inconsistent tile {} (views disagree by {spread:.2} m, limit {limit:.2} m)",
+                key.stem()
+            );
+            self.drop_parked(dir, key);
+            return None;
+        }
+        let mut old = tile.rows;
+        apply_moves(&mut old, &moves);
+        let rows = SplatRows::concat(&[old, new]);
+        let slot_poses = self.slot_poses(&rows);
+        let area = self.area.as_mut().expect("area training is on");
+        let version = area.registry.get(key)?.version + 1;
+        let total = rows.len() as u32;
+        match write_tile(dir, &ParkedTile { key, version, slot_poses, rows }) {
+            Ok(bytes) => {
+                area.registry.note_merged(key, total);
+                area.file_bytes.insert(key, bytes);
+                Some((total, version, bytes))
+            }
+            Err(e) => {
+                log::warn!("area: parking off until reset, tile {} cannot be written: {e}", key.stem());
+                area.parking_off = true;
+                None
+            }
+        }
+    }
+
     /// Writes one tile file per tile of the taken `rows` and marks it parked; returns the indices (into `rows`) of
     /// the rows parked and the number of tiles they make. A tile the registry does not know, or whose file cannot be
     /// written, stays out; the first write failure turns parking off until the next reset, so the tiles after it
@@ -203,6 +318,15 @@ impl LiveModel {
     /// The rows of parked tile `key` from its file, moved by the pose corrections their seeding views had since the
     /// park ([`slot_moves`]).
     pub(super) fn load_parked(&self, key: TileKey) -> std::io::Result<SplatRows> {
+        let (tile, moves) = self.parked_with_moves(key)?;
+        let mut rows = tile.rows;
+        apply_moves(&mut rows, &moves);
+        Ok(rows)
+    }
+
+    /// Parked tile `key` as its file holds it, and the rigid move per seeding view slot from its recorded pose to
+    /// its current one ([`slot_moves`]).
+    pub(super) fn parked_with_moves(&self, key: TileKey) -> std::io::Result<(ParkedTile, Vec<(u32, Affine3A)>)> {
         let dir = self
             .tiles_dir
             .as_deref()
@@ -210,9 +334,7 @@ impl LiveModel {
         let tile = read_tile(dir, key)?;
         let current = |slot: u32| self.views.get(slot as usize).map(|v| (v.camera.position, v.camera.rotation));
         let moves = slot_moves(&tile.slot_poses, &current);
-        let mut rows = tile.rows;
-        apply_moves(&mut rows, &moves);
-        Ok(rows)
+        Ok((tile, moves))
     }
 }
 

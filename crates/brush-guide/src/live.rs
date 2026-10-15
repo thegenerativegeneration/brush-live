@@ -313,14 +313,14 @@ impl LiveModel {
     /// the batch comes from the recent window (with probability `recent_fraction`) or else from all training views
     /// (see [`choose_draw`]). No-op without views.
     pub async fn train_step(&mut self) {
-        let pending = self.pending_views();
-        let (Some(splats), Some(trainer)) = (self.splats.take(), self.trainer.as_mut()) else {
+        if self.splats.is_none() || self.trainer.is_none() {
             return;
-        };
+        }
+        let pending = self.pending_views();
         let junction = self.area.as_mut().and_then(|a| a.junction.pick());
         let t_batch = web_time::Instant::now();
         let batch = if let Some(i) = junction {
-            load_batch(&self.views[i]).await
+            self.junction_batch(i).await
         } else {
             let draw = choose_draw(
                 &mut self.rng,
@@ -346,6 +346,9 @@ impl LiveModel {
         if self.profiling {
             self.batch_s += t_batch.elapsed().as_secs_f64();
         }
+        let (Some(splats), Some(trainer)) = (self.splats.take(), self.trainer.as_mut()) else {
+            return;
+        };
         let position_scale = trainer.bounds().median_size();
         let (stepped, stats) = trainer.step(batch, splats.train()).await;
         self.last_step_lr = StepLr {
