@@ -402,3 +402,71 @@ async fn poses_while_paused_apply_after_held_keyframes() {
     );
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// The vertex count a PLY header declares.
+fn ply_vertices(ply: &[u8]) -> u64 {
+    let header = String::from_utf8_lossy(&ply[..ply.len().min(4096)]).into_owned();
+    let line = header.lines().find(|l| l.starts_with("element vertex ")).expect("a vertex element");
+    line["element vertex ".len()..].parse().unwrap()
+}
+
+/// With area training on a walk that parks the origin, Stop's `splat.ply` holds the parked splats besides the
+/// resident ones, and the export command returns the same bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finish_writes_parked_tiles_into_the_ply() {
+    let device = test_scene::device().await.autodiff();
+    let dir = std::env::temp_dir().join(format!("brush-guide-session-final-{}", std::process::id()));
+    let config = GuideConfig {
+        refine_every: 5,
+        max_train_steps: Some(40),
+        area_radius_m: 2.0,
+        area_tile_size_m: 1.0,
+        area_hysteresis_m: 0.0,
+        area_seen_window_steps: 0,
+        area_min_resident_keyframes: 0,
+        ..GuideConfig::default()
+    };
+    let session = GuideSession::start(config, device, dir.clone());
+    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+    session.push_keyframe(h, p).await.unwrap();
+    let iters = async |n: u64| {
+        let status = session.status();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while status.borrow().train_iters < n {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("training reaches the step");
+    };
+    iters(10).await;
+    // Keyframe 1 stands 20 m off and looks away from the origin, at its own points.
+    let (mut h, p) = test_scene::keyframe(1, Vec3::new(0.0, 0.0, 2.0));
+    let at = Vec3::new(20.0, 0.0, 2.0);
+    h.pose = glam::Mat4::look_at_rh(at, Vec3::new(20.0, 0.0, 0.0), Vec3::Y).inverse().to_cols_array();
+    let mut payload = p[..h.jpeg_len as usize].to_vec();
+    for q in p[h.jpeg_len as usize..].chunks_exact(12) {
+        let x = f32::from_le_bytes(q[..4].try_into().unwrap()) + 20.0;
+        payload.extend_from_slice(&x.to_le_bytes());
+        payload.extend_from_slice(&q[4..]);
+    }
+    session.push_keyframe(h, payload).await.unwrap();
+    // The export holds more splats than the trainer once the origin parked (by the step cap at the latest).
+    let status = session.status();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while ply_vertices(&session.export_splat().await.unwrap()) <= u64::from(status.borrow().num_splats) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the export holds parked tiles");
+    let ply = dir.join("out/splat.ply");
+    let len = session.finish(&ply).await.unwrap();
+    let bytes = std::fs::read(&ply).unwrap();
+    assert_eq!(bytes.len() as u64, len);
+    let resident = u64::from(session.status().borrow().num_splats);
+    let vertices = ply_vertices(&bytes);
+    assert!(vertices > resident, "{vertices} vertices, {resident} resident: no parked tile in the file");
+    assert_eq!(session.export_splat().await.unwrap(), bytes);
+    std::fs::remove_dir_all(dir).ok();
+}

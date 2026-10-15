@@ -328,8 +328,12 @@ impl Worker {
                 publish_counts(&self.channels.status, &self.live);
                 let _ = reply.send(result);
             }
-            Command::Export(finish, reply) => {
-                let result = self.export(finish).await;
+            Command::Export(reply) => {
+                let result = self.live.final_ply().await.map(|(bytes, _)| bytes).map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
+            Command::Finish(path, reply) => {
+                let result = self.finish(&path).await;
                 let _ = reply.send(result);
             }
             Command::SetPreview(interval) => self.preview.set(interval),
@@ -459,15 +463,17 @@ impl Worker {
         true
     }
 
-    /// The splats as PLY; `finish` also pauses training.
-    async fn export(&mut self, finish: bool) -> Result<Vec<u8>, String> {
-        let result = match self.live.splats() {
-            Some(s) => brush_serde::splat_to_ply(s.clone(), None)
-                .await
-                .map_err(|e| e.to_string()),
-            None => Err("no splats yet".to_owned()),
-        };
-        if finish && result.is_ok() {
+    /// Writes the whole model to `path` ([`LiveModel::write_final`]), then runs the finish eval (and with
+    /// `finish_fisher` the Fisher pass and a last round) and pauses training; returns the file size.
+    async fn finish(&mut self, path: &Path) -> Result<u64, String> {
+        if self.live.splats().is_none() {
+            return Err("no splats yet".to_owned());
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let result = self.live.write_final(path).await.map(|e| e.ply_bytes).map_err(|e| e.to_string());
+        if result.is_ok() {
             self.eval_holdout(true, true).await;
             if self.config.finish_fisher {
                 let t = Instant::now();

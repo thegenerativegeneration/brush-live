@@ -2,10 +2,12 @@
 //! and restored when it comes back (spec `docs/superpowers/specs/2026-10-14-area-training-design.md`).
 
 pub mod park_file;
+pub mod ply_stream;
 pub mod pose_replay;
 pub mod tiles;
 pub mod views;
 
+pub use ply_stream::PlyStreamWriter;
 pub use park_file::{
     ParkedTile, SlotPose, TILE_FILE_VERSION, decode_tile, encode_tile, read_tile, read_tile_count, remove_tile_files,
     tile_path, write_tile,

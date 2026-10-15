@@ -125,8 +125,12 @@ enum Command {
         Vec<ViewPose>,
         oneshot::Sender<Result<PoseUpdateStats, String>>,
     ),
-    /// Export the splats; `true` also pauses training until the next new keyframe.
-    Export(bool, oneshot::Sender<Result<Vec<u8>, String>>),
+    /// The whole model as PLY bytes (resident and parked splats, [`crate::live::LiveModel::final_ply`]); training
+    /// goes on.
+    Export(oneshot::Sender<Result<Vec<u8>, String>>),
+    /// Write the whole model to the path as PLY ([`crate::live::LiveModel::write_final`]) and reply with its size;
+    /// training pauses until the next new keyframe.
+    Finish(PathBuf, oneshot::Sender<Result<u64, String>>),
     /// Clear the session; later preview snapshots carry the generation.
     Reset(u64, oneshot::Sender<()>),
     /// `true` stops training, rounds and keyframe decoding until `false`.
@@ -271,26 +275,25 @@ impl GuideSession {
         let _ = self.tx.send(Command::SetPreview(interval)).await;
     }
 
-    /// The current splats as PLY bytes.
+    /// The whole model as PLY bytes: the resident splats and every parked tile, as [`Self::finish`] writes them.
     pub async fn export_splat(&self) -> Result<Vec<u8>, SessionError> {
-        self.export(false).await
-    }
-
-    /// Writes the current splats as PLY to `path` and returns its size. The
-    /// worker stops training until a new keyframe arrives or the session resets.
-    pub async fn finish(&self, path: &Path) -> Result<u64, SessionError> {
-        let ply = self.export(true).await?;
-        if let Some(dir) = path.parent() {
-            tokio::fs::create_dir_all(dir).await?;
-        }
-        tokio::fs::write(path, &ply).await?;
-        Ok(ply.len() as u64)
-    }
-
-    async fn export(&self, finish: bool) -> Result<Vec<u8>, SessionError> {
         let (tx, rx) = oneshot::channel();
         self.tx
-            .send(Command::Export(finish, tx))
+            .send(Command::Export(tx))
+            .await
+            .map_err(|_closed| SessionError::Stopped)?;
+        rx.await
+            .map_err(|_closed| SessionError::Stopped)?
+            .map_err(SessionError::Rejected)
+    }
+
+    /// Writes the whole model (the resident splats and every parked tile, streamed tile by tile) as PLY to `path`,
+    /// creating its directory, and returns its size. The worker stops training until a new keyframe arrives or the
+    /// session resets.
+    pub async fn finish(&self, path: &Path) -> Result<u64, SessionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::Finish(path.to_path_buf(), tx))
             .await
             .map_err(|_closed| SessionError::Stopped)?;
         rx.await

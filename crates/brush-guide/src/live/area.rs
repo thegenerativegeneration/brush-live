@@ -207,8 +207,8 @@ impl LiveModel {
 
     /// The splats a held-out eval renders: the trainer's, and with parked tiles the full model, the resident splats
     /// and every parked tile (read from its file and moved by the pose corrections made since it was parked), each
-    /// with its Mip floor baked in. A tile file that cannot be read, or holds another SH degree, is left out with a
-    /// warning. Loading the tiles is logged with its time.
+    /// with its Mip floor baked in. A tile file that cannot be read, holds another SH degree or rows out of shape
+    /// ([`Self::full_model_rows`]) is left out with a warning. Loading the tiles is logged with its time.
     pub async fn eval_splats(&self) -> Option<Splats> {
         let resident = self.splats.clone()?;
         let keys = self.area.as_ref().map(|a| a.registry.parked_keys()).unwrap_or_default();
@@ -222,12 +222,7 @@ impl LiveModel {
         let mut parts = vec![resident.bake_min_scale()];
         let (mut tiles, mut rows) = (0u32, 0usize);
         for key in keys {
-            match self.load_parked(key) {
-                Ok(r) if r.sh_coeffs_per_channel != coeffs => log::warn!(
-                    "area: eval leaves out parked tile {}: {} SH coefficients, the model has {coeffs}",
-                    key.stem(),
-                    r.sh_coeffs_per_channel
-                ),
+            match self.full_model_rows(key, coeffs) {
                 Ok(r) if r.is_empty() => {}
                 Ok(r) => {
                     tiles += 1;

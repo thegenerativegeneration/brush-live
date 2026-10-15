@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 mod area;
+mod area_export;
 mod area_freeze;
 mod area_park;
 mod area_restore;
@@ -26,6 +27,7 @@ mod poses;
 mod seed;
 use area_restore::RestoreReason;
 use draw::{Draw, choose_draw, load_batch};
+pub use area_export::FinalExport;
 pub use poses::{PoseUpdateStats, ViewPose};
 
 #[cfg(test)]
