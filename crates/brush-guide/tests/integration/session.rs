@@ -9,7 +9,7 @@ use brush_guide::session::{GuideSession, Pushed};
 use glam::Vec3;
 use std::time::Duration;
 
-/// Score sets decode, and a reset clears the session.
+/// Score sets decode, area training is on with the session's tiles directory, and a reset clears the session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scores_arrive_after_keyframes() {
     let device = test_scene::device().await.autodiff();
@@ -50,6 +50,7 @@ async fn scores_arrive_after_keyframes() {
     assert!((voxel_size - 0.1).abs() < 1e-6);
 
     assert_eq!(session.status().borrow().num_keyframes, 3);
+    assert!(dir.join("tiles").is_dir(), "the session turns area training on with its tiles directory");
     let ply = session.export_splat().await.unwrap();
     assert!(ply.starts_with(b"ply"));
 

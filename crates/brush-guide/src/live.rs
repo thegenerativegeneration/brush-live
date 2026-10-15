@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 mod area;
+mod area_park;
 mod draw;
 mod loaders;
 mod poses;
@@ -215,11 +216,6 @@ impl LiveModel {
     /// Refines and their seconds since the last call.
     pub fn take_refine_stats(&mut self) -> (u32, f64) {
         std::mem::take(&mut self.refine_stats)
-    }
-
-    /// The splats a held-out eval or an export renders: today the trainer's splats.
-    pub async fn eval_splats(&self) -> Option<Splats> {
-        self.splats.clone()
     }
 
     /// Milliseconds spent in refine since the model started.
@@ -532,27 +528,35 @@ impl LiveModel {
             );
         }
         if self.iter.is_multiple_of(self.config.refine_every) {
-            crate::timing::sync_splats(&splats).await;
-            let t = web_time::Instant::now();
-            let before = splats.num_splats();
-            let (refined, stats) = trainer.refine(self.iter, splats).await;
-            splats = refined;
-            crate::timing::sync_splats(&splats).await;
-            let dt = t.elapsed().as_secs_f64();
-            self.refine_stats.0 += 1;
-            self.refine_stats.1 += dt;
-            self.refine_total_s += dt;
-            log::debug!(
-                target: crate::timing::TARGET,
-                "refine at iter {}: {:.0} ms, splats {before} -> {}, {} evicted",
-                self.iter,
-                dt * 1e3,
-                splats.num_splats(),
-                stats.num_evicted
-            );
-            self.num_evicted += u64::from(stats.num_evicted);
+            splats = self.refine(splats).await;
         }
         self.splats = Some(splats);
+    }
+
+    /// Refines the splats (densify, prune, evict). With area training it first notes which tiles the window's views
+    /// drew and afterwards parks the tiles the capture has left.
+    async fn refine(&mut self, splats: Splats) -> Splats {
+        crate::timing::sync_splats(&splats).await;
+        self.note_visibility(&splats).await;
+        let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
+        let t = web_time::Instant::now();
+        let before = splats.num_splats();
+        let (splats, stats) = trainer.refine(self.iter, splats).await;
+        crate::timing::sync_splats(&splats).await;
+        let dt = t.elapsed().as_secs_f64();
+        self.refine_stats.0 += 1;
+        self.refine_stats.1 += dt;
+        self.refine_total_s += dt;
+        log::debug!(
+            target: crate::timing::TARGET,
+            "refine at iter {}: {:.0} ms, splats {before} -> {}, {} evicted",
+            self.iter,
+            dt * 1e3,
+            splats.num_splats(),
+            stats.num_evicted
+        );
+        self.num_evicted += u64::from(stats.num_evicted);
+        self.park_after_refine(splats).await
     }
 }
 

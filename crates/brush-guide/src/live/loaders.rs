@@ -56,6 +56,14 @@ impl LiveModel {
         }
     }
 
+    /// Rebuilds the all-views loader when it holds views that left the area, which the count rule in
+    /// [`Self::rebuild_loaders`] tolerates; after a park, so no such view keeps training toward the tiles it saw.
+    pub(super) fn drop_departed_views(&mut self) {
+        if membership_additions(&self.training_views(), &self.all_members) > 0 {
+            self.build_all_loader(u64::from(self.iter) << 32);
+        }
+    }
+
     /// The recent-window loader over the newest `recent_window` training views; `salt` 0 gives the usual seed.
     fn build_recent_loader(&mut self, salt: u64) {
         let n = self.views.len();

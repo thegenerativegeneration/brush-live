@@ -55,6 +55,13 @@ pub(super) struct EvalRecord {
     /// Views in the training area (camera within `area_radius_m` of the newest keyframe's, horizontally); `None`
     /// with area training off.
     pub area_views: Option<u32>,
+    /// Milliseconds the full model took to assemble (resident splats plus every parked tile read from disk) with
+    /// area training on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parked_load_ms: Option<f64>,
+    /// Area training's tile counts, counters and tile states; absent with area training off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub area: Option<crate::area::AreaReport>,
     /// The eval carried the extras (LPIPS, seam split, saved renders).
     pub extras: bool,
     pub views: Vec<ViewScore>,
@@ -94,9 +101,29 @@ mod tests {
             adam_clamped: 0,
             masked_by_radius: Some(120),
             area_views: Some(42),
+            area: None,
+            parked_load_ms: None,
             extras: false,
             views: vec![ViewScore { id: 9, psnr: 21.5, ssim: 0.7, lpips: None, psnr_band: Some(20.0), psnr_interior: None }],
         }
+    }
+
+    #[test]
+    fn area_report_is_flat_and_absent_without_area_training() {
+        let mut r = record(1);
+        let none = serde_json::to_value(&r).unwrap();
+        assert!(none.get("area").is_none());
+        assert!(none.get("parked_load_ms").is_none());
+        r.area = Some(crate::area::AreaReport {
+            summary: crate::area::AreaSummary { resident_tiles: 3, ..Default::default() },
+            counters: crate::area::AreaCounters { parks: 2, ..Default::default() },
+            tiles: vec![[0, 0, 0]],
+        });
+        r.parked_load_ms = Some(4.5);
+        let some = serde_json::to_value(&r).unwrap();
+        assert_eq!((some["area"]["resident_tiles"].as_u64(), some["area"]["parks"].as_u64()), (Some(3), Some(2)));
+        assert_eq!(some["area"]["tiles"][0][2].as_i64(), Some(0));
+        assert_eq!(some["parked_load_ms"].as_f64(), Some(4.5));
     }
 
     #[test]

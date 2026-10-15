@@ -1,6 +1,7 @@
 //! Which views train in area training, and which cameras see a tile.
 
 use brush_render::camera::Camera;
+use brush_render::kernels::camera_model::CameraModel;
 use glam::Vec3;
 
 /// Distance from a camera below which a box counts as behind it.
@@ -24,9 +25,13 @@ pub fn membership_additions(old: &[usize], new: &[usize]) -> usize {
 
 /// Whether any part of the box `min`..`max` may lie in the camera's view frustum up to `far`. Conservative: false
 /// only when all eight corners lie beyond one frustum plane, so a box that misses the frustum near a frustum edge can
-/// still count as seen. The side planes follow the principal point; a field of view of 180° or more sees everything.
+/// still count as seen. The side planes follow the principal point. The planes are a pinhole's: a camera of any other
+/// model (whose distortion can bend rays past them) or with a field of view of 180° or more sees every box.
 pub fn camera_sees_box(camera: &Camera, min: Vec3, max: Vec3, far: f32) -> bool {
-    if camera.fov_x >= std::f64::consts::PI || camera.fov_y >= std::f64::consts::PI {
+    if camera.camera_model != CameraModel::Pinhole
+        || camera.fov_x >= std::f64::consts::PI
+        || camera.fov_y >= std::f64::consts::PI
+    {
         return true;
     }
     // Image extents as x/z and y/z: the full width spans 2·tan(fov/2), split at the principal point.
@@ -68,7 +73,6 @@ pub fn junction_views(cameras: &[(usize, Camera)], tile_min: Vec3, tile_max: Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brush_render::kernels::camera_model::CameraModel;
     use glam::Quat;
 
     #[test]
@@ -104,6 +108,15 @@ mod tests {
         let far_away = Camera { position: Vec3::new(0.0, 0.0, 500.0), ..camera() };
         let cams = [(4, camera()), (9, far_away)];
         assert_eq!(junction_views(&cams, Vec3::new(-1.0, -1.0, 4.0), Vec3::new(1.0, 1.0, 6.0), 100.0), vec![4]);
+    }
+
+    /// The planes are those of a pinhole: any other camera model (a fisheye bends rays past them) sees every box.
+    #[test]
+    fn frustum_box_test_keeps_every_box_for_other_camera_models() {
+        use brush_render::kernels::camera_model::kannala_brandt_4::KannalaBrandt4Params;
+        let c = Camera { camera_model: CameraModel::KannalaBrandt4(KannalaBrandt4Params::default()), ..camera() };
+        assert!(camera_sees_box(&c, Vec3::new(-1.0, -1.0, -6.0), Vec3::new(1.0, 1.0, -4.0), 100.0), "behind");
+        assert!(camera_sees_box(&c, Vec3::new(10.0, -1.0, 1.0), Vec3::new(12.0, 1.0, 2.0), 100.0), "outside the fov");
     }
 
     /// An off-centre principal point widens the frustum on one side: a box only that side sees is kept.

@@ -13,3 +13,38 @@ pub use park_file::{
 pub use pose_replay::{CameraPose, MIN_SLOT_SHARE, apply_moves, move_spread, slot_moves};
 pub use tiles::{AreaParams, AreaSummary, TileInfo, TileKey, TileRegistry, group_rows, rows_in};
 pub use views::{area_views, camera_sees_box, junction_views, membership_additions};
+
+use serde::Serialize;
+
+/// What area training did since the model started (or since the last reset).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct AreaCounters {
+    /// Tiles parked.
+    pub parks: u32,
+    /// Parks left out because they would have taken every resident splat.
+    pub parks_skipped: u32,
+    pub restores: u32,
+    /// Restores put off because the splat budget had no room.
+    pub deferrals: u32,
+    /// Parked tiles dropped instead of restored.
+    pub drops: u32,
+    /// Milliseconds spent parking (row readback, file writes), in total.
+    pub park_ms: f64,
+    /// The longest single park (one refine's parked tiles together).
+    pub max_park_ms: f64,
+    pub restore_ms: f64,
+    pub max_restore_ms: f64,
+    /// Bytes of the tile files on disk.
+    pub tile_bytes: u64,
+}
+
+/// Area training's state for the eval log: tile and splat counts, counters, and every tile's state.
+#[derive(Clone, Debug, Serialize)]
+pub struct AreaReport {
+    #[serde(flatten)]
+    pub summary: AreaSummary,
+    #[serde(flatten)]
+    pub counters: AreaCounters,
+    /// `[x, z, state]` per tile ([`TileRegistry::tile_states`]).
+    pub tiles: Vec<[i32; 3]>,
+}

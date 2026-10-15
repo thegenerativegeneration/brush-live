@@ -236,7 +236,8 @@ fn eval_schedule_of(config: &GuideConfig) -> EvalSchedule {
 impl Worker {
     fn new(config: GuideConfig, device: Device, session_dir: PathBuf, channels: Channels) -> Self {
         let clock = Instant::now();
-        let live = LiveModel::new(config.clone(), device.clone());
+        let mut live = LiveModel::new(config.clone(), device.clone());
+        live.enable_area(session_dir.join("tiles"));
         let holdout = Holdout::from_config(&config);
         let eval_schedule = eval_schedule_of(&config);
         let mut voxels = VoxelAggregator::new(
@@ -394,9 +395,11 @@ impl Worker {
             &self.session_dir,
             self.live.iter(),
         );
+        let t_load = Instant::now();
         let Some(splats) = self.live.eval_splats().await else {
             return false;
         };
+        let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
         let Some(r) = self.holdout.eval(&splats, now, &eval_extras).await else {
             return false;
         };
@@ -439,6 +442,8 @@ impl Worker {
             adam_clamped: self.live.adam_clamped(),
             masked_by_radius: self.live.masked_by_radius().await,
             area_views: self.live.area_view_count(),
+            parked_load_ms: self.live.area_view_count().map(|_| load_ms),
+            area: self.live.area_report(),
             extras,
             views: r.per_view.clone(),
         };

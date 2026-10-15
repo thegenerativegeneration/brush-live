@@ -5,13 +5,13 @@ use crate::live::ViewPose;
 use crate::protocol::KeyframeHeader;
 use glam::{Mat4, Vec3};
 
-pub(super) fn tmp(name: &str) -> std::path::PathBuf {
+pub(in crate::live) fn tmp(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("live-area-{name}-{}", std::process::id()))
 }
 
 /// A 64×48 keyframe at `pos` looking at `target` (y up, f = 50 px) with a 5×5 grid of feature points 0.25 m apart
 /// around `target`, so its seeds land at `target`.
-pub(super) fn keyframe_toward(id: u64, pos: Vec3, target: Vec3) -> (KeyframeHeader, Vec<u8>) {
+pub(in crate::live) fn keyframe_toward(id: u64, pos: Vec3, target: Vec3) -> (KeyframeHeader, Vec<u8>) {
     let (w, h) = (64u32, 48u32);
     let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, ((x ^ y) * 8) as u8]));
     let mut jpeg = Vec::new();
@@ -51,7 +51,7 @@ pub(super) fn keyframe_toward(id: u64, pos: Vec3, target: Vec3) -> (KeyframeHead
 
 /// Small tiles and radius, no hysteresis or windows, a refine every 5 steps, and the all-views loader rebuilt on
 /// every added area view (the default waits for 10).
-pub(super) fn area_config(radius: f32) -> GuideConfig {
+pub(in crate::live) fn area_config(radius: f32) -> GuideConfig {
     GuideConfig {
         refine_every: 5,
         all_loader_rebuild_every: 1,
@@ -66,17 +66,17 @@ pub(super) fn area_config(radius: f32) -> GuideConfig {
     }
 }
 
-pub(super) async fn add(live: &mut LiveModel, dir: &std::path::Path, id: u64, pos: Vec3, target: Vec3) {
+pub(in crate::live) async fn add(live: &mut LiveModel, dir: &std::path::Path, id: u64, pos: Vec3, target: Vec3) {
     let (h, p) = keyframe_toward(id, pos, target);
     assert!(live.add_keyframe(decode_keyframe(&h, &p, dir).await.unwrap()).await);
 }
 
-async fn device() -> burn::tensor::Device {
+pub(in crate::live) async fn device() -> burn::tensor::Device {
     burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff()
 }
 
 /// Adds keyframes at `(x, 0, 2)` looking at `(x, 0, 0)`, ids from `first_id`.
-async fn add_at(live: &mut LiveModel, dir: &std::path::Path, first_id: u64, xs: &[f32]) {
+pub(in crate::live) async fn add_at(live: &mut LiveModel, dir: &std::path::Path, first_id: u64, xs: &[f32]) {
     for (i, x) in xs.iter().enumerate() {
         add(live, dir, first_id + i as u64, Vec3::new(*x, 0.0, 2.0), Vec3::new(*x, 0.0, 0.0)).await;
     }
@@ -249,5 +249,56 @@ async fn training_steps_run_in_the_area() {
     }
     assert_eq!(live.iter(), 12);
     assert_eq!(live.area_view_count(), Some(2));
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Views leaving the all-views loader's area below `all_loader_rebuild_every` do not rebuild it: it keeps its
+/// members until enough left (or a park, see `area_park`).
+#[tokio::test]
+async fn departures_below_the_threshold_do_not_rebuild() {
+    let dir = tmp("below-threshold");
+    let config = GuideConfig { all_loader_rebuild_every: 3, ..area_config(1.0) };
+    let mut live = LiveModel::new(config, device().await);
+    live.enable_area(dir.join("tiles"));
+    // Built at view 0 and again at view 3, when three views have joined.
+    add_at(&mut live, &dir, 0, &[0.0, 0.1, 0.2, 0.3]).await;
+    assert_eq!(live.all_members, vec![0, 1, 2, 3]);
+    // Views 0 and 1 leave and view 4 joins: two departures, one addition.
+    add_at(&mut live, &dir, 4, &[1.15]).await;
+    assert_eq!(live.training_views(), vec![2, 3, 4]);
+    assert_eq!(live.all_members, vec![0, 1, 2, 3], "the all-views loader was rebuilt");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A newest view whose camera position is not finite still trains: the area never comes out empty, so the loaders
+/// always get a view.
+#[tokio::test]
+async fn the_area_always_holds_the_newest_view() {
+    let dir = tmp("never-empty");
+    let mut live = LiveModel::new(area_config(1.0), device().await);
+    live.enable_area(dir.join("tiles"));
+    add_at(&mut live, &dir, 0, &[0.0, 0.2]).await;
+    live.view_cams[1].0 = Vec3::NAN;
+    live.refresh_area_views();
+    assert_eq!(live.training_views(), vec![1]);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Review Focus 1: a tile file left from an earlier capture in a reused session directory is wiped, and so is
+/// everything on reset.
+#[tokio::test]
+async fn enable_area_wipes_stale_tiles_and_reset_wipes_again() {
+    let device = burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let dir = tmp("wipe-stale");
+    let tiles = dir.join("tiles");
+    std::fs::create_dir_all(&tiles).unwrap();
+    std::fs::write(tiles.join("0_0.bin"), b"stale").unwrap();
+    let mut live = LiveModel::new(area_config(2.0), device);
+    live.enable_area(tiles.clone());
+    assert_eq!(std::fs::read_dir(&tiles).unwrap().count(), 0);
+    std::fs::write(tiles.join("1_1.bin"), b"from this session").unwrap();
+    live.reset();
+    assert!(live.area.is_some(), "reset keeps area training on");
+    assert_eq!(std::fs::read_dir(&tiles).unwrap().count(), 0);
     std::fs::remove_dir_all(dir).ok();
 }
