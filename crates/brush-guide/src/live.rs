@@ -23,6 +23,7 @@ mod draw;
 mod poses;
 use draw::{Draw, NearCache, choose_draw, load_batch, near_views};
 pub use poses::{PoseUpdateStats, ViewPose};
+pub(crate) use poses::same_pose;
 
 #[cfg(test)]
 mod near_tests;

@@ -39,9 +39,16 @@ impl ViewPose {
 
     /// Whether `camera` already sits at this pose.
     pub fn matches(&self, camera: &Camera) -> bool {
-        camera.position.distance(self.position) < SAME_POSITION_M
-            && camera.rotation.dot(self.rotation).abs() > SAME_ROTATION_DOT
+        same_pose(
+            (camera.position, camera.rotation),
+            (self.position, self.rotation),
+        )
     }
+}
+
+/// Whether two camera poses (position, rotation) count as the same: a resent correction moves nothing.
+pub(crate) fn same_pose(a: (Vec3, Quat), b: (Vec3, Quat)) -> bool {
+    a.0.distance(b.0) < SAME_POSITION_M && a.1.dot(b.1).abs() > SAME_ROTATION_DOT
 }
 
 /// What one [`LiveModel::update_poses`] call did.
