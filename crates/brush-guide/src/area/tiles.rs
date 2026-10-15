@@ -1,0 +1,535 @@
+//! Tile keys and the tile registry: which tiles are resident, which are parked, and the rules that move them.
+
+use crate::config::GuideConfig;
+use glam::{Vec2, Vec3};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A square column of ground in x and z, `tile_size` metres on a side; height is unbounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TileKey {
+    pub x: i32,
+    pub z: i32,
+}
+
+impl TileKey {
+    /// The tile of a point: floor of x and z over the tile size.
+    pub fn of(p: Vec3, tile_size: f32) -> Self {
+        Self { x: (p.x / tile_size).floor() as i32, z: (p.z / tile_size).floor() as i32 }
+    }
+
+    /// The tile's corner with the smallest x and z.
+    pub fn min_xz(self, tile_size: f32) -> Vec2 {
+        Vec2::new(self.x as f32, self.z as f32) * tile_size
+    }
+
+    /// Horizontal distance from `centre` to the tile's square; 0 inside.
+    pub fn footprint_distance(self, centre: Vec3, tile_size: f32) -> f32 {
+        let lo = self.min_xz(tile_size);
+        let c = Vec2::new(centre.x, centre.z);
+        (c.clamp(lo, lo + Vec2::splat(tile_size)) - c).length()
+    }
+
+    /// File-name stem, e.g. `-1_3`.
+    pub fn stem(self) -> String {
+        format!("{}_{}", self.x, self.z)
+    }
+}
+
+/// The area-training knobs the registry needs, taken from [`GuideConfig`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AreaParams {
+    pub tile_size: f32,
+    pub radius: f32,
+    pub hysteresis: f32,
+    pub seen_window: u32,
+    pub min_resident_keyframes: u32,
+    pub far_seed: f32,
+}
+
+impl AreaParams {
+    /// `None` when area training is off (`area_radius_m <= 0`).
+    pub fn from_config(c: &GuideConfig) -> Option<AreaParams> {
+        (c.area_radius_m > 0.0).then_some(AreaParams {
+            tile_size: c.area_tile_size_m,
+            radius: c.area_radius_m,
+            hysteresis: c.area_hysteresis_m,
+            seen_window: c.area_seen_window_steps,
+            min_resident_keyframes: c.area_min_resident_keyframes,
+            far_seed: c.area_far_seed_m,
+        })
+    }
+}
+
+/// What the registry knows about one tile.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TileInfo {
+    /// In the live engine (true) or parked on disk (false).
+    pub resident: bool,
+    pub splats: u32,
+    pub y_min: f32,
+    pub y_max: f32,
+    /// Training step at which a view last drew a splat of this tile.
+    pub last_seen_step: u32,
+    /// Keyframe count at the last restore, if the tile was ever restored.
+    pub restored_at_keyframe: Option<u32>,
+    pub parked_at_step: u32,
+    /// Counts the parkings of this tile.
+    pub version: u32,
+}
+
+/// Parked tiles to restore from a seed batch, and which seeds survive.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SeedTriage {
+    /// Parked tiles within `radius + far_seed` that hold at least `min_seeds` seeds.
+    pub restore: Vec<TileKey>,
+    /// Per seed: false for every seed that lies in a parked tile (far, sparse, or about to be restored and reseeded).
+    pub keep: Vec<bool>,
+}
+
+/// How to make room for a restore.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoomPlan {
+    /// Resident tiles to park before restoring, farthest first.
+    pub park_first: Vec<TileKey>,
+    /// Whether the restore fits once `park_first` is parked.
+    pub restore: bool,
+    /// Splats still missing when every candidate is not enough (the candidates are parked anyway).
+    pub shortfall: u32,
+}
+
+/// Tile counts and splat counts by state; sight tiles are resident tiles beyond the radius, kept by visibility.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct AreaSummary {
+    pub resident_tiles: u32,
+    pub sight_tiles: u32,
+    pub parked_tiles: u32,
+    pub resident_splats: u32,
+    pub sight_splats: u32,
+    pub parked_splats: u32,
+}
+
+/// Which tiles are resident or parked, and the pure rules that decide parking and restoring.
+pub struct TileRegistry {
+    params: AreaParams,
+    tiles: BTreeMap<TileKey, TileInfo>,
+}
+
+impl TileRegistry {
+    pub fn new(params: AreaParams) -> Self {
+        Self { params, tiles: BTreeMap::new() }
+    }
+
+    pub fn params(&self) -> &AreaParams {
+        &self.params
+    }
+
+    pub fn get(&self, key: TileKey) -> Option<&TileInfo> {
+        self.tiles.get(&key)
+    }
+
+    /// Rebuilds every resident tile from a readback of all resident splats (flat xyz `means`, `seen` per row or
+    /// empty for none): counts, height range, and `last_seen_step = step` for tiles with a seen row or new tiles.
+    /// Resident tiles without rows are dropped. Returns parked tiles that hold resident rows; those stay parked here.
+    pub fn note_resident(&mut self, means: &[f32], seen: &[bool], step: u32) -> Vec<TileKey> {
+        let mut found: BTreeMap<TileKey, (u32, f32, f32, bool)> = BTreeMap::new();
+        for (i, p) in means.chunks_exact(3).enumerate() {
+            let p = Vec3::new(p[0], p[1], p[2]);
+            let e = found
+                .entry(TileKey::of(p, self.params.tile_size))
+                .or_insert((0, f32::INFINITY, f32::NEG_INFINITY, false));
+            e.0 += 1;
+            e.1 = e.1.min(p.y);
+            e.2 = e.2.max(p.y);
+            e.3 |= seen.get(i).copied().unwrap_or(false);
+        }
+        self.tiles.retain(|k, t| !t.resident || found.contains_key(k));
+        let mut conflicts = Vec::new();
+        for (key, (n, lo, hi, was_seen)) in found {
+            match self.tiles.get_mut(&key) {
+                Some(t) if !t.resident => conflicts.push(key),
+                Some(t) => {
+                    (t.splats, t.y_min, t.y_max) = (n, lo, hi);
+                    if was_seen {
+                        t.last_seen_step = step;
+                    }
+                }
+                None => {
+                    self.tiles.insert(
+                        key,
+                        TileInfo {
+                            resident: true,
+                            splats: n,
+                            y_min: lo,
+                            y_max: hi,
+                            last_seen_step: step,
+                            restored_at_keyframe: None,
+                            parked_at_step: 0,
+                            version: 0,
+                        },
+                    );
+                }
+            }
+        }
+        conflicts
+    }
+
+    /// Resident tiles to park: beyond radius + hysteresis, unseen for more than the window, and not restored within
+    /// the last `min_resident_keyframes` keyframes.
+    pub fn to_park(&self, centre: Vec3, step: u32, keyframes: u32) -> Vec<TileKey> {
+        let p = &self.params;
+        self.tiles
+            .iter()
+            .filter(|(k, t)| {
+                t.resident
+                    && k.footprint_distance(centre, p.tile_size) > p.radius + p.hysteresis
+                    && step.saturating_sub(t.last_seen_step) > p.seen_window
+                    && t.restored_at_keyframe.is_none_or(|r| keyframes.saturating_sub(r) >= p.min_resident_keyframes)
+            })
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
+    /// Parked tiles whose footprint lies within the radius of `centre`.
+    pub fn parked_within_radius(&self, centre: Vec3) -> Vec<TileKey> {
+        self.tiles
+            .iter()
+            .filter(|(k, t)| !t.resident && k.footprint_distance(centre, self.params.tile_size) <= self.params.radius)
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
+    /// Sorts fresh seeds (flat xyz) against the parked tiles; see [`SeedTriage`].
+    pub fn triage_seeds(&self, seed_means: &[f32], centre: Vec3, min_seeds: usize) -> SeedTriage {
+        let p = &self.params;
+        let mut counts: BTreeMap<TileKey, usize> = BTreeMap::new();
+        let mut keep = Vec::with_capacity(seed_means.len() / 3);
+        for s in seed_means.chunks_exact(3) {
+            let key = TileKey::of(Vec3::new(s[0], s[1], s[2]), p.tile_size);
+            let parked = self.tiles.get(&key).is_some_and(|t| !t.resident);
+            if parked {
+                *counts.entry(key).or_default() += 1;
+            }
+            keep.push(!parked);
+        }
+        let restore = counts
+            .into_iter()
+            .filter(|(k, n)| *n >= min_seeds && k.footprint_distance(centre, p.tile_size) <= p.radius + p.far_seed)
+            .map(|(k, _)| k)
+            .collect();
+        SeedTriage { restore, keep }
+    }
+
+    /// Plans the parking that makes room for restoring `restore_splats` splats next to `resident` splats under a
+    /// budget of `max_splats`. Candidates are resident tiles beyond the radius and unseen within the window,
+    /// farthest first.
+    pub fn plan_room(&self, restore_splats: u32, resident: u32, max_splats: u32, centre: Vec3, step: u32) -> RoomPlan {
+        let p = &self.params;
+        let room = max_splats.saturating_sub(resident);
+        if room >= restore_splats {
+            return RoomPlan { park_first: Vec::new(), restore: true, shortfall: 0 };
+        }
+        let mut candidates: Vec<(f32, TileKey, u32)> = self
+            .tiles
+            .iter()
+            .filter(|(_, t)| t.resident && step.saturating_sub(t.last_seen_step) > p.seen_window)
+            .map(|(k, t)| (k.footprint_distance(centre, p.tile_size), *k, t.splats))
+            .filter(|(d, ..)| *d > p.radius)
+            .collect();
+        candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut park_first = Vec::new();
+        let mut freed = 0u32;
+        for (_, key, splats) in candidates {
+            if room + freed >= restore_splats {
+                break;
+            }
+            park_first.push(key);
+            freed += splats;
+        }
+        let have = room + freed;
+        RoomPlan { park_first, restore: have >= restore_splats, shortfall: restore_splats.saturating_sub(have) }
+    }
+
+    /// Records that a tile now lives on disk with `splats` splats.
+    pub fn mark_parked(&mut self, key: TileKey, splats: u32, step: u32) {
+        let t = self.tiles.entry(key).or_insert(TileInfo {
+            resident: false,
+            splats,
+            y_min: 0.0,
+            y_max: 0.0,
+            last_seen_step: step,
+            restored_at_keyframe: None,
+            parked_at_step: step,
+            version: 0,
+        });
+        t.resident = false;
+        t.splats = splats;
+        t.parked_at_step = step;
+        t.version += 1;
+    }
+
+    /// Records that a parked tile is back in the engine at keyframe count `keyframes`.
+    pub fn mark_restored(&mut self, key: TileKey, keyframes: u32, step: u32) {
+        if let Some(t) = self.tiles.get_mut(&key) {
+            t.resident = true;
+            t.restored_at_keyframe = Some(keyframes);
+            t.last_seen_step = step;
+        }
+    }
+
+    pub fn drop_tile(&mut self, key: TileKey) {
+        self.tiles.remove(&key);
+    }
+
+    pub fn parked_keys(&self) -> Vec<TileKey> {
+        self.keys_where(false)
+    }
+
+    pub fn resident_keys(&self) -> Vec<TileKey> {
+        self.keys_where(true)
+    }
+
+    fn keys_where(&self, resident: bool) -> Vec<TileKey> {
+        self.tiles.iter().filter(|(_, t)| t.resident == resident).map(|(k, _)| *k).collect()
+    }
+
+    /// The tile's bounding box (min, max) over its footprint and recorded height range.
+    pub fn tile_box(&self, key: TileKey) -> Option<(Vec3, Vec3)> {
+        let t = self.tiles.get(&key)?;
+        let lo = key.min_xz(self.params.tile_size);
+        let s = self.params.tile_size;
+        Some((Vec3::new(lo.x, t.y_min, lo.y), Vec3::new(lo.x + s, t.y_max, lo.y + s)))
+    }
+
+    /// Tile and splat counts by state around `centre`.
+    pub fn summary(&self, centre: Vec3) -> AreaSummary {
+        let mut s = AreaSummary::default();
+        for (k, t) in &self.tiles {
+            if !t.resident {
+                s.parked_tiles += 1;
+                s.parked_splats += t.splats;
+                continue;
+            }
+            s.resident_tiles += 1;
+            s.resident_splats += t.splats;
+            if k.footprint_distance(centre, self.params.tile_size) > self.params.radius {
+                s.sight_tiles += 1;
+                s.sight_splats += t.splats;
+            }
+        }
+        s
+    }
+
+    /// `[x, z, state]` per tile: 0 trained (resident within the radius), 1 sight (resident beyond it), 2 parked.
+    pub fn tile_states(&self, centre: Vec3) -> Vec<[i32; 3]> {
+        self.tiles
+            .iter()
+            .map(|(k, t)| {
+                let state = if !t.resident {
+                    2
+                } else if k.footprint_distance(centre, self.params.tile_size) > self.params.radius {
+                    1
+                } else {
+                    0
+                };
+                [k.x, k.z, state]
+            })
+            .collect()
+    }
+}
+
+/// Row indices of the flat xyz `means` grouped by tile.
+pub fn group_rows(means: &[f32], tile_size: f32) -> BTreeMap<TileKey, Vec<usize>> {
+    let mut g: BTreeMap<TileKey, Vec<usize>> = BTreeMap::new();
+    for (i, p) in means.chunks_exact(3).enumerate() {
+        g.entry(TileKey::of(Vec3::new(p[0], p[1], p[2]), tile_size)).or_default().push(i);
+    }
+    g
+}
+
+/// Per row of the flat xyz `means`: whether it lies in one of `keys`.
+pub fn rows_in(keys: &[TileKey], means: &[f32], tile_size: f32) -> Vec<bool> {
+    let set: BTreeSet<TileKey> = keys.iter().copied().collect();
+    means
+        .chunks_exact(3)
+        .map(|p| set.contains(&TileKey::of(Vec3::new(p[0], p[1], p[2]), tile_size)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> AreaParams {
+        AreaParams { tile_size: 10.0, radius: 25.0, hysteresis: 5.0, seen_window: 1000, min_resident_keyframes: 20, far_seed: 10.0 }
+    }
+
+    fn flat(points: &[[f32; 3]]) -> Vec<f32> {
+        points.iter().flatten().copied().collect()
+    }
+
+    #[test]
+    fn keys_floor_negative_coordinates_and_borders() {
+        let k = |x, z| TileKey::of(Vec3::new(x, 3.0, z), 10.0);
+        assert_eq!(k(-0.01, 9.99), TileKey { x: -1, z: 0 });
+        assert_eq!(k(0.0, -10.0), TileKey { x: 0, z: -1 });
+        assert_eq!(k(10.0, -10.001), TileKey { x: 1, z: -2 });
+        assert_eq!(k(-0.0, 0.0), TileKey { x: 0, z: 0 });
+        assert_eq!(TileKey { x: -1, z: 3 }.stem(), "-1_3");
+    }
+
+    #[test]
+    fn footprint_distance_is_zero_inside_and_horizontal_outside() {
+        let t = TileKey { x: 0, z: 0 };
+        assert_eq!(t.footprint_distance(Vec3::new(5.0, 100.0, 5.0), 10.0), 0.0);
+        assert!((t.footprint_distance(Vec3::new(15.0, 0.0, 5.0), 10.0) - 5.0).abs() < 1e-6);
+        assert!((t.footprint_distance(Vec3::new(13.0, -7.0, 14.0), 10.0) - 5.0).abs() < 1e-6);
+        assert!((TileKey { x: -2, z: 0 }.footprint_distance(Vec3::new(0.0, 0.0, 5.0), 10.0) - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn note_resident_counts_rows_tracks_height_and_seen() {
+        let mut r = TileRegistry::new(params());
+        let means = flat(&[[1.0, 0.5, 1.0], [2.0, 4.0, 3.0], [-3.0, 1.0, 1.0]]);
+        assert!(r.note_resident(&means, &[false, false, false], 100).is_empty());
+        let t = r.get(TileKey { x: 0, z: 0 }).unwrap();
+        assert_eq!((t.splats, t.y_min, t.y_max, t.last_seen_step), (2, 0.5, 4.0, 100));
+        r.note_resident(&means, &[false, true, false], 300);
+        assert_eq!(r.get(TileKey { x: 0, z: 0 }).unwrap().last_seen_step, 300);
+        assert_eq!(r.get(TileKey { x: -1, z: 0 }).unwrap().last_seen_step, 100);
+        // A resident tile without rows disappears.
+        r.note_resident(&flat(&[[1.0, 0.5, 1.0]]), &[], 400);
+        assert!(r.get(TileKey { x: -1, z: 0 }).is_none());
+    }
+
+    #[test]
+    fn park_needs_distance_beyond_hysteresis_and_an_unseen_window() {
+        let mut r = TileRegistry::new(params());
+        // Tile (0, 0); centres along x: footprint distance = centre.x − 10.
+        r.note_resident(&flat(&[[5.0, 0.0, 5.0]]), &[], 0);
+        assert!(r.to_park(Vec3::new(38.0, 0.0, 5.0), 2000, 50).is_empty(), "28 m: inside radius + hysteresis");
+        assert_eq!(r.to_park(Vec3::new(41.0, 0.0, 5.0), 2000, 50), vec![TileKey { x: 0, z: 0 }]);
+        assert!(r.to_park(Vec3::new(41.0, 0.0, 5.0), 1000, 50).is_empty(), "seen 1000 steps ago: still in window");
+    }
+
+    #[test]
+    fn a_restored_tile_stays_for_min_resident_keyframes() {
+        let mut r = TileRegistry::new(params());
+        r.note_resident(&flat(&[[5.0, 0.0, 5.0]]), &[], 0);
+        let key = TileKey { x: 0, z: 0 };
+        r.mark_parked(key, 1, 0);
+        r.mark_restored(key, 100, 0);
+        let far = Vec3::new(60.0, 0.0, 5.0);
+        assert!(r.to_park(far, 5000, 119).is_empty());
+        assert_eq!(r.to_park(far, 5000, 120), vec![key]);
+    }
+
+    #[test]
+    fn parked_tiles_come_back_by_radius() {
+        let mut r = TileRegistry::new(params());
+        r.note_resident(&flat(&[[5.0, 0.0, 5.0], [55.0, 0.0, 5.0]]), &[], 0);
+        let near = TileKey { x: 0, z: 0 };
+        r.mark_parked(near, 1, 0);
+        assert_eq!(r.parked_within_radius(Vec3::new(30.0, 0.0, 5.0)), vec![near]);
+        assert!(r.parked_within_radius(Vec3::new(36.0, 0.0, 5.0)).is_empty());
+    }
+
+    /// User decision D2 and Review Focus 2: far seeds and sparse seeds in parked tiles are dropped, dense seeds in a
+    /// parked tile within radius + 10 m restore it; seeds elsewhere are kept.
+    #[test]
+    fn seed_triage_drops_far_and_sparse_seeds_and_restores_dense_near_ones() {
+        let mut r = TileRegistry::new(params());
+        r.note_resident(&flat(&[[5.0, 0.0, 5.0], [55.0, 0.0, 5.0]]), &[], 0);
+        let parked = TileKey { x: 0, z: 0 };
+        r.mark_parked(parked, 1, 0);
+        let seeds = |n: usize, x: f32| flat(&vec![[x, 1.0, 5.0]; n]);
+        // Tile (0, 0) is 30 m from (40, 0, 5): within 25 + 10 m.
+        let near = Vec3::new(40.0, 0.0, 5.0);
+        let t = r.triage_seeds(&seeds(8, 3.0), near, 8);
+        assert_eq!((t.restore, t.keep), (vec![parked], vec![false; 8]));
+        let t = r.triage_seeds(&seeds(7, 3.0), near, 8);
+        assert_eq!((t.restore.len(), t.keep), (0, vec![false; 7]), "too few: dropped, not appended");
+        // 40 m away: beyond 25 + 10 m, so even many seeds stay out and the tile stays parked.
+        let t = r.triage_seeds(&seeds(20, 3.0), Vec3::new(50.0, 0.0, 5.0), 8);
+        assert_eq!((t.restore.len(), t.keep), (0, vec![false; 20]));
+        let mut mixed = seeds(2, 55.0);
+        mixed.extend(seeds(1, 200.0));
+        assert_eq!(r.triage_seeds(&mixed, near, 8).keep, vec![true; 3], "resident tiles and new ground keep seeds");
+    }
+
+    /// Review Focus 4: room for a restore comes from unseen tiles beyond the radius, farthest first; tiles within
+    /// the radius or seen recently are never chosen.
+    #[test]
+    fn room_plan_parks_unseen_far_tiles_or_defers() {
+        let mut r = TileRegistry::new(params());
+        let mut pts = vec![[5.0, 0.0, 5.0]; 400]; // (0, 0): within the radius of (5, 0, 5)
+        pts.extend(vec![[55.0, 0.0, 5.0]; 100]); // (5, 0): 45 m, unseen
+        pts.extend(vec![[65.0, 0.0, 5.0]; 200]); // (6, 0): 55 m, seen at step 4900
+        pts.extend(vec![[85.0, 0.0, 5.0]; 150]); // (8, 0): 75 m, unseen
+        let seen: Vec<bool> = pts.iter().map(|p| p[0] == 65.0).collect();
+        r.note_resident(&flat(&pts), &vec![false; pts.len()], 0);
+        r.note_resident(&flat(&pts), &seen, 4900);
+        let c = Vec3::new(5.0, 0.0, 5.0);
+        assert_eq!(r.plan_room(100, 850, 1000, c, 5000), RoomPlan { park_first: vec![], restore: true, shortfall: 0 });
+        // Room 150: the farthest unseen tile (150) is enough for 300.
+        assert_eq!(
+            r.plan_room(300, 850, 1000, c, 5000),
+            RoomPlan { park_first: vec![TileKey { x: 8, z: 0 }], restore: true, shortfall: 0 }
+        );
+        assert_eq!(
+            r.plan_room(350, 850, 1000, c, 5000),
+            RoomPlan { park_first: vec![TileKey { x: 8, z: 0 }, TileKey { x: 5, z: 0 }], restore: true, shortfall: 0 }
+        );
+        assert_eq!(
+            r.plan_room(600, 850, 1000, c, 5000),
+            RoomPlan { park_first: vec![TileKey { x: 8, z: 0 }, TileKey { x: 5, z: 0 }], restore: false, shortfall: 200 }
+        );
+    }
+
+    #[test]
+    fn tile_states_follow_distance_and_parking() {
+        let mut r = TileRegistry::new(params());
+        r.note_resident(&flat(&[[5.0, 0.0, 5.0], [45.0, 0.0, 5.0], [95.0, 0.0, 5.0]]), &[], 0);
+        r.mark_parked(TileKey { x: 9, z: 0 }, 1, 0);
+        assert_eq!(r.tile_states(Vec3::new(5.0, 0.0, 5.0)), vec![[0, 0, 0], [4, 0, 1], [9, 0, 2]]);
+    }
+
+    /// Review Focus 2: resident rows in a parked tile's column are reported, the parked state is kept.
+    #[test]
+    fn rows_in_a_parked_tile_are_reported_not_adopted() {
+        let mut r = TileRegistry::new(params());
+        r.note_resident(&flat(&[[5.0, 0.0, 5.0], [15.0, 0.0, 5.0]]), &[], 0);
+        let key = TileKey { x: 0, z: 0 };
+        r.mark_parked(key, 1, 0);
+        let conflicts = r.note_resident(&flat(&[[4.0, 0.0, 4.0], [15.0, 0.0, 5.0]]), &[true, true], 100);
+        assert_eq!(conflicts, vec![key]);
+        let t = r.get(key).unwrap();
+        assert!(!t.resident && t.splats == 1 && t.version == 1);
+    }
+
+    #[test]
+    fn rows_group_by_tile() {
+        let means = flat(&[[1.0, 0.0, 1.0], [-1.0, 0.0, 1.0], [2.0, 0.0, 2.0]]);
+        let g = group_rows(&means, 10.0);
+        assert_eq!(g[&TileKey { x: 0, z: 0 }], vec![0, 2]);
+        assert_eq!(rows_in(&[TileKey { x: -1, z: 0 }], &means, 10.0), vec![false, true, false]);
+    }
+
+    #[test]
+    fn summary_splits_resident_tiles_by_distance_and_sight() {
+        let mut r = TileRegistry::new(params());
+        r.note_resident(&flat(&[[5.0, 0.0, 5.0], [45.0, 0.0, 5.0], [45.0, 0.0, 6.0], [95.0, 0.0, 5.0]]), &[], 0);
+        r.mark_parked(TileKey { x: 9, z: 0 }, 1, 0);
+        let s = r.summary(Vec3::new(5.0, 0.0, 5.0));
+        assert_eq!(s, AreaSummary { resident_tiles: 2, sight_tiles: 1, parked_tiles: 1, resident_splats: 3,
+            sight_splats: 2, parked_splats: 1 });
+    }
+
+    #[test]
+    fn area_is_on_by_radius() {
+        let mut c = GuideConfig::default();
+        assert!(AreaParams::from_config(&c).is_some_and(|p| p.radius == 50.0 && p.tile_size == 10.0));
+        c.area_radius_m = 0.0;
+        assert!(AreaParams::from_config(&c).is_none());
+    }
+}

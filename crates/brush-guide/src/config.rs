@@ -128,6 +128,23 @@ pub struct GuideConfig {
     pub eval_seam_from: u32,
     /// Edge of the area-training tiles in x and z, metres; also the grid of the eval's seam band.
     pub area_tile_size_m: f32,
+    /// Area training: tiles whose footprint lies within this many metres (horizontal) of the newest keyframe train.
+    /// 0 or less: off.
+    pub area_radius_m: f32,
+    /// A resident tile is parked only beyond `area_radius_m` plus this margin, so tiles at the edge do not flap.
+    pub area_hysteresis_m: f32,
+    /// A resident tile counts as recently seen for this many training steps after a view last drew it.
+    pub area_seen_window_steps: u32,
+    /// A restored tile stays resident for at least this many keyframes before it may be parked again.
+    pub area_min_resident_keyframes: u32,
+    /// A parked tile is restored when at least this many fresh seeds fall into it.
+    pub area_restore_min_seeds: u32,
+    /// Training steps that blend a restored tile in at the junction with the live area.
+    pub area_junction_steps: u32,
+    /// Largest disagreement, metres, between a restored tile and the fresh geometry that still restores it as is.
+    pub area_restore_inconsistency_m: f32,
+    /// Seeds in a parked tile are restored only when the tile lies within `area_radius_m` plus this many metres.
+    pub area_far_seed_m: f32,
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.
     pub train_radius_m: f32,
@@ -192,6 +209,14 @@ impl Default for GuideConfig {
             eval_extras_views: Vec::new(),
             eval_seam_from: 0,
             area_tile_size_m: 10.0,
+            area_radius_m: 50.0,
+            area_hysteresis_m: 5.0,
+            area_seen_window_steps: 1000,
+            area_min_resident_keyframes: 20,
+            area_restore_min_seeds: 8,
+            area_junction_steps: 200,
+            area_restore_inconsistency_m: 1.0,
+            area_far_seed_m: 10.0,
             train_radius_m: 0.0,
             train_views_radius_m: 0.0,
         }
@@ -336,5 +361,20 @@ mod train_radius_tests {
         let cfg: GuideConfig =
             serde_json::from_str(r#"{"train_views_radius_m": 25}"#).expect("parses");
         assert_eq!(cfg.train_views_radius_m, 25.0);
+    }
+}
+
+#[cfg(test)]
+mod area_tests {
+    use super::GuideConfig;
+
+    #[test]
+    fn area_defaults_and_overrides() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!((cfg.area_radius_m, cfg.area_hysteresis_m, cfg.area_seen_window_steps), (50.0, 5.0, 1000));
+        assert_eq!((cfg.area_min_resident_keyframes, cfg.area_junction_steps, cfg.area_restore_min_seeds), (20, 200, 8));
+        assert_eq!((cfg.area_restore_inconsistency_m, cfg.area_far_seed_m), (1.0, 10.0));
+        let cfg: GuideConfig = serde_json::from_str(r#"{"area_radius_m": 25}"#).expect("parses");
+        assert_eq!(cfg.area_radius_m, 25.0);
     }
 }
