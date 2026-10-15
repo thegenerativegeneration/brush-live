@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 mod area;
+mod area_freeze;
 mod area_park;
 mod area_restore;
 mod draw;
@@ -251,6 +252,9 @@ impl LiveModel {
         let size = UVec2::new(kf.image.width(), kf.image.height());
         self.view_cams
             .push((kf.camera.position, kf.camera.focal(size).x));
+        if let Some(area) = self.area.as_mut() {
+            area.registry.note_walker(kf.camera.position);
+        }
 
         let splats = match self.splats.take() {
             None => {
@@ -281,6 +285,7 @@ impl LiveModel {
             }
             Some(current) => {
                 let pos = kf.camera.position;
+                self.hold_left_rows_at_keyframe(&current, pos).await;
                 let near = self.area.as_ref().map(|a| a.registry.parked_within_radius(pos)).unwrap_or_default();
                 let current = self.restore_tiles(current, &near, RestoreReason::Distance, pos).await;
                 let (current, new) = self.seed_from_mask(current, &kf, size).await;
@@ -306,6 +311,7 @@ impl LiveModel {
         self.refresh_area_views();
         self.refresh_junction_views();
         self.rebuild_loaders();
+        self.end_deferral_streaks();
         true
     }
 
@@ -382,7 +388,7 @@ impl LiveModel {
     }
 
     /// Refines the splats (densify, prune, evict). With area training it first notes which tiles the window's views
-    /// drew and afterwards parks the tiles the capture has left.
+    /// drew and afterwards parks the tiles the capture has left and holds the rows of left tiles still resident.
     async fn refine(&mut self, splats: Splats) -> Splats {
         crate::timing::sync_splats(&splats).await;
         self.note_visibility(&splats).await;
@@ -404,7 +410,9 @@ impl LiveModel {
             stats.num_evicted
         );
         self.num_evicted += u64::from(stats.num_evicted);
-        self.park_after_refine(splats).await
+        let splats = self.park_after_refine(splats).await;
+        self.hold_left_rows_after_refine(&splats).await;
+        splats
     }
 }
 

@@ -106,6 +106,8 @@ impl LiveModel {
         log::info!("area: restore event {tiles} tiles, {restored} splats in {ms:.1} ms ({reason})");
         if tiles > 0 {
             area.junction.steps_left = junction_steps;
+            // A running junction starts over with other views: its decoded batches would fill the cache.
+            area.junction.cache.clear();
             self.refresh_junction_views();
         }
         splats
@@ -113,9 +115,9 @@ impl LiveModel {
 
     /// Restores parked tile `key`, or defers or drops it:
     /// 1. Its recorded splat count must fit within `max_splats` next to the resident splats, with room made by
-    ///    parking unseen tiles beyond the radius ([`crate::area::TileRegistry::plan_room`]); otherwise the restore is
-    ///    deferred before the file is read and before anything parks (the shortfall raises the next refine's
-    ///    eviction).
+    ///    parking unseen tiles beyond the radius, then left tiles ([`crate::area::TileRegistry::plan_room`]);
+    ///    otherwise the restore is deferred before the file is read and before anything parks (the first deferral of
+    ///    a streak raises the next refine's eviction).
     /// 2. A file that cannot be read, holds another SH degree, or whose seeding views carry the tile more than
     ///    `area_restore_inconsistency_m` apart is dropped ([`Self::drop_parked`]).
     /// 3. The planned tiles park; if that fell short (parking off, a skipped park), the restore is deferred.
@@ -179,20 +181,32 @@ impl LiveModel {
         remove_tile_files(dir, key);
         area.file_bytes.remove(&key);
         area.deferring.remove(&key);
+        area.deferred_now.remove(&key);
         area.junction.boxes.extend(rows_box(&tile.rows));
         area.counters.restores += 1;
         (splats, Restore::Restored { splats: n, spread })
     }
 
-    /// Defers the restore of `key`, `shortfall` splats over the budget: the next refine evicts for it. Logged once
-    /// per streak of deferrals of the tile; every deferral counts.
-    fn defer(&mut self, key: TileKey, shortfall: u32) {
-        let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
-        trainer.note_seed_shortfall(shortfall);
+    /// Defers the restore of `key`, `shortfall` splats over the budget. The first deferral of a streak is logged and
+    /// notes the shortfall, so the next refine evicts for it; later ones in the streak only count, so a tile that
+    /// stays deferred does not evict the live area at every refine.
+    pub(super) fn defer(&mut self, key: TileKey, shortfall: u32) {
         let area = self.area.as_mut().expect("area training is on");
         area.counters.deferrals += 1;
+        area.deferred_now.insert(key);
         if area.deferring.insert(key) {
             log::info!("area: restore of tile {} deferred, {shortfall} splats over the budget", key.stem());
+            let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
+            trainer.note_seed_shortfall(shortfall);
+        }
+    }
+
+    /// Ends the deferral streaks of tiles not deferred again since the last keyframe ended; call at the end of each
+    /// keyframe. No-op without area training.
+    pub(super) fn end_deferral_streaks(&mut self) {
+        if let Some(area) = self.area.as_mut() {
+            let now = std::mem::take(&mut area.deferred_now);
+            area.deferring.retain(|k| now.contains(k));
         }
     }
 
@@ -204,6 +218,7 @@ impl LiveModel {
         area.registry.drop_tile(key);
         area.file_bytes.remove(&key);
         area.deferring.remove(&key);
+        area.deferred_now.remove(&key);
         area.counters.drops += 1;
     }
 
@@ -249,3 +264,7 @@ fn rows_box(rows: &SplatRows) -> Option<(Vec3, Vec3)> {
 #[cfg(test)]
 #[path = "area_restore_tests.rs"]
 pub(in crate::live) mod tests;
+
+#[cfg(test)]
+#[path = "area_room_tests.rs"]
+mod room_tests;

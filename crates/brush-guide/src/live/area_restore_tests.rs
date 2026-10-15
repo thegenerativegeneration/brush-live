@@ -356,7 +356,14 @@ fn restore_reasons_print_as_the_log_names_them() {
 }
 
 /// `keyframe_toward`'s camera with its feature points replaced by 5×5 grids 0.15 m apart (x and y) around `centres`.
-async fn add_seeing(live: &mut LiveModel, dir: &std::path::Path, id: u64, pos: Vec3, target: Vec3, centres: &[Vec3]) {
+pub(in crate::live) async fn add_seeing(
+    live: &mut LiveModel,
+    dir: &std::path::Path,
+    id: u64,
+    pos: Vec3,
+    target: Vec3,
+    centres: &[Vec3],
+) {
     let (mut h, p) = keyframe_toward(id, pos, target);
     let mut payload = p[..h.jpeg_len as usize].to_vec();
     let points: Vec<Vec3> = centres
@@ -397,10 +404,16 @@ async fn seeds_never_land_in_a_tile_parked_for_room() {
 }
 
 /// Review I3: a restore at the cap is deferred without reading the tile file, logged once per streak, and comes
-/// back within a few keyframes once a refine makes room (here by parking the area the walker left).
+/// back within a few keyframes once a refine makes room (here by parking the area the walker left). The area at x = 20
+/// counts as restored at keyframe 2, so for one keyframe it cannot be parked for room (left tiles could be, Task 10b).
 #[tokio::test]
 async fn a_deferred_restore_comes_back_once_room_is_made() {
-    let (mut live, dir) = parked_origin("restore-retry").await;
+    let config = GuideConfig { area_min_resident_keyframes: 2, ..area_config(2.0) };
+    let (mut live, dir) = parked_origin_with("restore-retry", config).await;
+    let area = live.area.as_mut().unwrap();
+    for key in area.registry.resident_keys() {
+        area.registry.mark_restored(key, 2, live.iter);
+    }
     let tiles = dir.join("tiles");
     let (pos, away) = (Vec3::new(0.3, 0.0, 2.0), Vec3::new(0.3, 0.0, -3.0));
     let registry = &live.area.as_ref().unwrap().registry;

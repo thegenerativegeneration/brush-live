@@ -148,16 +148,20 @@ impl LiveModel {
         splats
     }
 
-    /// Moves the resident rows lying in the far parked tiles `keys` into their files: per tile, the file's rows take
-    /// the pose corrections since the park (as a restore would), the drifted rows join them, every slot records its
-    /// current pose, and the file is written as the next version; the tile stays parked and gets no junction. A tile
-    /// whose views disagree (as on restore) is dropped and the drifted rows stay resident; a file that cannot be read
-    /// or written keeps its rows out too (a failed write turns parking off). Rows kept out go back to the trainer.
-    /// Logged per tile and as one park event. No-op when every resident row would go.
+    /// Moves the resident rows lying in the far parked tiles among `keys` (keys not parked are skipped) into their
+    /// files: per tile, the file's rows take the pose corrections since the park (as a restore would), the drifted
+    /// rows join them, every slot records its current pose (so the merge resets the tile's pose baseline, spec D1),
+    /// and the file is written as the next version; the tile stays parked and gets no junction. A tile whose views
+    /// disagree (as on restore), whose file cannot be read or holds another SH degree is dropped
+    /// ([`Self::drop_parked`]) and the drifted rows stay resident; a failed write keeps them out too and turns parking
+    /// off. Rows kept out go back to the trainer. Logged per tile and as one park event. No-op when every resident row
+    /// would go.
     async fn merge_into_parked(&mut self, splats: Splats, keys: &[TileKey]) -> Splats {
         let (Some(area), Some(dir)) = (self.area.as_ref(), self.tiles_dir.clone()) else {
             return splats;
         };
+        let keys: Vec<TileKey> =
+            keys.iter().copied().filter(|&k| area.registry.get(k).is_some_and(|t| !t.resident)).collect();
         if keys.is_empty() {
             return splats;
         }
@@ -171,7 +175,7 @@ impl LiveModel {
             .convert::<f32>()
             .try_into_vec()
             .expect("f32 means");
-        let take = rows_in(keys, &means, tile_size);
+        let take = rows_in(&keys, &means, tile_size);
         let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
         let (splats, rows) = trainer.take_rows(splats, &take).await;
         let Some(rows) = rows else {
@@ -217,12 +221,17 @@ impl LiveModel {
         let (tile, moves) = match self.parked_with_moves(key) {
             Ok(read) => read,
             Err(e) => {
-                log::warn!("area: rows drifted into tile {} stay resident, its file cannot be read: {e}", key.stem());
+                log::warn!("area: drop unreadable tile {}, the rows drifted into it stay resident: {e}", key.stem());
+                self.drop_parked(dir, key);
                 return None;
             }
         };
         if tile.rows.sh_coeffs_per_channel != new.sh_coeffs_per_channel {
-            log::warn!("area: rows drifted into tile {} stay resident, its file holds another SH degree", key.stem());
+            log::warn!(
+                "area: drop tile {} of another SH degree, the rows drifted into it stay resident",
+                key.stem()
+            );
+            self.drop_parked(dir, key);
             return None;
         }
         let spread = move_spread(&tile.rows, &moves);

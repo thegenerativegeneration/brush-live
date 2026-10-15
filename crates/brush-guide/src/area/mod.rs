@@ -51,4 +51,6 @@ pub struct AreaReport {
     pub tiles: Vec<[i32; 3]>,
     /// A tile file could not be written, so nothing parks until the session resets.
     pub parking_off: bool,
+    /// Rows of left tiles the trainer holds still, as of the last refine or keyframe that built the mask.
+    pub frozen_rows: u32,
 }

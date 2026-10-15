@@ -113,11 +113,43 @@ pub struct AreaSummary {
 pub struct TileRegistry {
     params: AreaParams,
     tiles: BTreeMap<TileKey, TileInfo>,
+    /// Tiles whose footprint lay within the radius of the walker at a keyframe or refine, rows or not; kept when a
+    /// tile is dropped or emptied, since the ground was walked.
+    visited: BTreeSet<TileKey>,
 }
 
 impl TileRegistry {
     pub fn new(params: AreaParams) -> Self {
-        Self { params, tiles: BTreeMap::new() }
+        Self { params, tiles: BTreeMap::new(), visited: BTreeSet::new() }
+    }
+
+    /// Marks every tile whose footprint lies within the radius of the walker at `centre` as visited. A non-finite
+    /// centre visits nothing.
+    pub fn note_walker(&mut self, centre: Vec3) {
+        if !centre.is_finite() {
+            return;
+        }
+        let (r, size) = (self.params.radius, self.params.tile_size);
+        let span = |c: f32| (((c - r) / size).floor() as i32 - 1)..=(((c + r) / size).floor() as i32 + 1);
+        for x in span(centre.x) {
+            for z in span(centre.z) {
+                let key = TileKey { x, z };
+                if key.footprint_distance(centre, size) <= r {
+                    self.visited.insert(key);
+                }
+            }
+        }
+    }
+
+    /// Tiles the walker has left: visited ([`Self::note_walker`]) and now beyond radius + hysteresis of `centre`.
+    /// Their resident rows stay as they are until the walker returns.
+    pub fn left_keys(&self, centre: Vec3) -> BTreeSet<TileKey> {
+        let p = &self.params;
+        self.visited
+            .iter()
+            .copied()
+            .filter(|k| k.footprint_distance(centre, p.tile_size) > p.radius + p.hysteresis)
+            .collect()
     }
 
     pub fn params(&self) -> &AreaParams {
@@ -221,8 +253,11 @@ impl TileRegistry {
     }
 
     /// Plans the parking that makes room for restoring `restore_splats` splats next to `resident` splats under a
-    /// budget of `max_splats`. Candidates are resident tiles beyond the radius and unseen within the window,
-    /// farthest first; tiles restored fewer than `min_resident_keyframes` keyframes before `keyframes` are skipped.
+    /// budget of `max_splats`. Candidates are resident tiles beyond the radius and unseen within the window, farthest
+    /// first, then the left tiles ([`Self::left_keys`]) views still see, farthest first (they are held still anyway,
+    /// so parking does not change them); tiles restored fewer than `min_resident_keyframes` keyframes before
+    /// `keyframes` are skipped, and so is a candidate whose parking would leave no resident splat (a park refuses
+    /// that).
     pub fn plan_room(
         &self,
         restore_splats: u32,
@@ -237,23 +272,30 @@ impl TileRegistry {
         if room >= restore_splats {
             return RoomPlan { park_first: Vec::new(), restore: true, shortfall: 0 };
         }
-        let mut candidates: Vec<(f32, TileKey, u32)> = self
+        let left = self.left_keys(centre);
+        // (seen, distance, key, splats): unseen tiles sort first.
+        let mut candidates: Vec<(bool, f32, TileKey, u32)> = self
             .tiles
             .iter()
             .filter(|(_, t)| {
                 t.resident
-                    && step.saturating_sub(t.last_seen_step) > p.seen_window
                     && t.restored_at_keyframe.is_none_or(|r| keyframes.saturating_sub(r) >= p.min_resident_keyframes)
             })
-            .map(|(k, t)| (k.footprint_distance(centre, p.tile_size), *k, t.splats))
-            .filter(|(d, ..)| *d > p.radius)
+            .map(|(k, t)| {
+                let seen = step.saturating_sub(t.last_seen_step) <= p.seen_window;
+                (seen, k.footprint_distance(centre, p.tile_size), *k, t.splats)
+            })
+            .filter(|(seen, d, k, _)| *d > p.radius && (!seen || left.contains(k)))
             .collect();
-        candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        candidates.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
         let mut park_first = Vec::new();
         let mut freed = 0u32;
-        for (_, key, splats) in candidates {
+        for (_, _, key, splats) in candidates {
             if room + freed >= restore_splats {
                 break;
+            }
+            if freed + splats >= resident {
+                continue;
             }
             park_first.push(key);
             freed += splats;

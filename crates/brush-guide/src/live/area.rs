@@ -1,6 +1,7 @@
 //! Area training in the live model: only views whose camera lies within `area_radius_m` (horizontally) of the
-//! newest keyframe's camera train; tiles the capture has left are parked on disk ([`super::area_park`]), come back
-//! when it returns ([`super::area_restore`]), and the eval model loads them back.
+//! newest keyframe's camera train; tiles the capture has left are held still while resident ([`super::area_freeze`]),
+//! parked on disk ([`super::area_park`]), come back when it returns ([`super::area_restore`]), and the eval model loads
+//! them back.
 
 use super::LiveModel;
 use brush_dataset::scene::SceneBatch;
@@ -29,8 +30,15 @@ pub(crate) struct AreaState {
     pub(super) junction: Junction,
     /// Seed counts of the last keyframe that seeded again after restoring tiles its seeds hit: (before, after).
     pub(super) last_reseed: Option<(u32, u32)>,
-    /// Parked tiles whose restore was deferred and has not come back since (their deferral is logged once).
+    /// Parked tiles in a deferral streak: deferred at the last keyframe or since, and not back. A streak logs and
+    /// notes its shortfall once.
     pub(super) deferring: BTreeSet<TileKey>,
+    /// Tiles deferred since the last keyframe ended; a streak whose tile is not among them ends with the keyframe.
+    pub(super) deferred_now: BTreeSet<TileKey>,
+    /// The left resident tiles whose rows the trainer holds ([`super::area_freeze`]).
+    pub(super) frozen_keys: BTreeSet<TileKey>,
+    /// Rows the trainer held when the mask was last built.
+    pub(super) frozen_rows: u32,
 }
 
 /// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
@@ -86,6 +94,9 @@ impl AreaState {
             junction: Junction::default(),
             last_reseed: None,
             deferring: BTreeSet::new(),
+            deferred_now: BTreeSet::new(),
+            frozen_keys: BTreeSet::new(),
+            frozen_rows: 0,
         }
     }
 }
@@ -164,6 +175,7 @@ impl LiveModel {
             counters: area.counters,
             tiles: area.registry.tile_states(centre),
             parking_off: area.parking_off,
+            frozen_rows: area.frozen_rows,
         })
     }
 

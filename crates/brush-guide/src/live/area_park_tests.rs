@@ -222,3 +222,25 @@ async fn resident_rows_in_a_far_parked_tile_join_its_file() {
     assert_no_resident_row_in_parked_tiles(&live).await;
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Task 10 follow-up 2: rows drifted into a far parked tile whose file cannot be read stay resident and the tile is
+/// dropped (its ground takes seeds again), instead of a read failing at every refine.
+#[tokio::test]
+async fn an_unreadable_far_tile_is_dropped_when_rows_drift_into_it() {
+    use crate::live::area_restore::tests::{drift_rows, parked_origin};
+    let (mut live, dir) = parked_origin("merge-unreadable").await;
+    let tiles = dir.join("tiles");
+    let key = live.area.as_ref().unwrap().registry.parked_keys()[0];
+    std::fs::write(crate::area::park_file::tile_path(&tiles, key), b"not a tile").unwrap();
+    let corner = key.min_xz(1.0);
+    drift_rows(&mut live, (0..3).flat_map(|i| [corner.x + 0.2 + 0.1 * i as f32, 0.0, corner.y + 0.5]).collect()).await;
+    train(&mut live, 5).await;
+    let r = live.area_report().unwrap();
+    assert!(r.counters.drops >= 1, "{r:?}");
+    assert!(live.area.as_ref().unwrap().registry.get(key).is_none_or(|t| t.resident), "the tile is still parked");
+    assert!(!crate::area::park_file::tile_path(&tiles, key).exists());
+    let means: Vec<f32> = live.splats().unwrap().means().into_data_async().await.unwrap().try_to_vec().unwrap();
+    let here = means.chunks(3).filter(|p| TileKey::of(Vec3::new(p[0], p[1], p[2]), 1.0) == key).count();
+    assert_eq!(here, 3, "the drifted rows stay resident");
+    std::fs::remove_dir_all(dir).ok();
+}
