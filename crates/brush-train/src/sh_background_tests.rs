@@ -253,7 +253,7 @@ async fn image_is_not_clamped_above_one() {
 
 /// A globe with every band set, so the upsampling tests see real
 /// variation across the image.
-fn varied_globe(device: &Device) -> ShBackground {
+pub(crate) fn varied_globe(device: &Device) -> ShBackground {
     let mut bg = ShBackground::new(device, 1.0);
     let coeffs: Vec<f32> = (0..27).map(|i| 0.35 * ((i as f32) * 1.7).sin()).collect();
     bg.coeffs = Tensor::<1>::from_floats(coeffs.as_slice(), device)

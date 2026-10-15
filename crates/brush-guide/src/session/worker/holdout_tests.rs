@@ -266,3 +266,13 @@ async fn seam_split_keeps_its_pixels_over_the_sh_background() {
     assert!(interior_black < 40.0 && interior > 40.0, "interior {interior_black} -> {interior}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[tokio::test]
+async fn warm_up_composites_over_a_globe_at_the_keyframe_size() {
+    let device: burn::tensor::Device = brush_cube::test_helpers::test_device().await.into();
+    let config = GuideConfig { holdout_every: 2, sh_background: true, eval_lpips: false, eval_seam_band_m: 0.0,
+        ..GuideConfig::default() };
+    let camera = Camera::new(glam::Vec3::ZERO, glam::Quat::IDENTITY, 1.0, 0.8, glam::vec2(0.5, 0.5),
+        brush_render::kernels::camera_model::CameraModel::Pinhole);
+    warm_up_eval(&config, &one_splat(&device, false), &camera, glam::uvec2(500, 375)).await;
+}

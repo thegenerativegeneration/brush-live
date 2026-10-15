@@ -113,3 +113,33 @@ async fn without_a_globe_the_render_is_the_black_background_render() {
     let reference = (img.slice(s![.., .., 0..3]) * 255.0).round() / 255.0;
     assert_eq!(floats(sample.rendered).await, floats(reference).await);
 }
+
+/// The globe as the eval composites it, at the training size (500 x 375, which the block grid doesn't divide) and
+/// an off-centre principal point: the corner pixels match the globe evaluated per pixel along `pixel_dirs`, within
+/// the block upsample's tolerance and the 8-bit roundtrip.
+#[tokio::test]
+async fn the_eval_background_matches_the_globe_per_pixel_at_the_corners() {
+    use crate::sh_background::{pixel_dirs, sh_basis};
+    let device: Device = brush_cube::test_helpers::test_device().await.into();
+    let globe = crate::sh_background::tests::varied_globe(&device.clone().autodiff());
+    let rotation = glam::Quat::from_axis_angle(Vec3::new(0.2, 1.0, 0.1).normalize(), 0.8);
+    let cam = Camera::new(Vec3::new(0.3, -0.2, 0.1), rotation, 1.3, 1.0, glam::vec2(0.42, 0.57), CameraModel::Pinhole);
+    let size = glam::uvec2(500, 375);
+    let behind = cam.position - rotation * Vec3::Z * 5.0;
+    let splats = Splats::from_raw(vec![behind.x, behind.y, behind.z], vec![1.0, 0.0, 0.0, 0.0], vec![-3.0; 3],
+        vec![0.5; 3], vec![inverse_sigmoid(0.99)], SplatRenderMode::Default, &device);
+    let gt = DynamicImage::ImageRgb8(image::RgbImage::new(size.x, size.y));
+    let sample = eval_stats_over(splats, &cam, gt, AlphaMode::Transparent, Some(&globe), &device).await.unwrap();
+    let rendered = floats(sample.rendered).await;
+    let dirs = pixel_dirs(&cam, size);
+    for (x, y) in [(0, 0), (size.x - 1, size.y - 1)] {
+        let i = (y * size.x + x) as usize;
+        let dir = Tensor::<1>::from_floats(&dirs[i * 3..i * 3 + 3], &globe.coeffs().device()).reshape([1, 3]);
+        let exact: Vec<f32> =
+            globe.image(sh_basis(dir)).into_data_async().await.unwrap().try_into_vec::<f32>().unwrap();
+        for c in 0..3 {
+            let got = rendered[i * 3 + c];
+            assert!((got - exact[c]).abs() < 4.5 / 255.0, "pixel ({x}, {y}) channel {c}: {got} vs {}", exact[c]);
+        }
+    }
+}

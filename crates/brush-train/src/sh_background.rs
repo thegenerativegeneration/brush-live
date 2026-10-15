@@ -242,6 +242,22 @@ fn globe_colour(coeffs: Tensor<2>, basis: Tensor<2>) -> Tensor<2> {
     (weighted.sum_dim(1).reshape([n, 3]) + 0.5).clamp_min(0.0)
 }
 
+/// The globe of `coeffs` (`[9, 3]`) behind a render of `camera` at `size`: its colour on the [`BG_BLOCK_PX`] block
+/// grid, `[gh, gw, 3]`, and that grid upsampled to the render, `[h, w, 3]`. `centres` are [`pixel_centres`] of
+/// [`block_grid_size`]`(size)`. Training passes the coefficients on the autodiff graph, evals off it.
+pub fn globe_background(
+    coeffs: Tensor<2>,
+    centres: Tensor<2>,
+    camera: &Camera,
+    size: UVec2,
+) -> (Tensor<3>, Tensor<3>) {
+    let grid = block_grid_size(size);
+    let low = globe_colour(coeffs, sh_basis(world_dirs(centres, camera, grid)))
+        .reshape([grid.y as usize, grid.x as usize, 3]);
+    let image = upsample_background(low.clone(), size.y as usize, size.x as usize);
+    (low, image)
+}
+
 /// The learned globe: degree-2 SH coefficients `[9, 3]`, with their own tiny
 /// Adam state (reusing `crate::adam_scaled`, the trainer's own optimizer, so
 /// the globe gets the same numerics as every other learned parameter).
@@ -294,11 +310,8 @@ impl ShBackground {
     /// upsampled. Off the autodiff graph, on the coefficients' inner device.
     pub fn render_background(&self, camera: &Camera, size: UVec2) -> Tensor<3> {
         let coeffs = self.coeffs.clone().inner();
-        let grid = block_grid_size(size);
-        let centres = pixel_centres(grid, &coeffs.device());
-        let low = globe_colour(coeffs, sh_basis(world_dirs(centres, camera, grid)))
-            .reshape([grid.y as usize, grid.x as usize, 3]);
-        upsample_background(low, size.y as usize, size.x as usize)
+        let centres = pixel_centres(block_grid_size(size), &coeffs.device());
+        globe_background(coeffs, centres, camera, size).1
     }
 
     /// The coefficients, on the autodiff graph — composite with this (not
@@ -357,4 +370,4 @@ impl ShBackground {
 
 #[cfg(test)]
 #[path = "sh_background_tests.rs"]
-mod tests;
+pub(crate) mod tests;

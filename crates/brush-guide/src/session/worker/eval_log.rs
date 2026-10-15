@@ -16,6 +16,15 @@ pub(super) struct ViewScore {
     pub psnr_interior: Option<f32>,
 }
 
+/// What an eval's renders were composited over.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum EvalBackground {
+    /// The trainer's SH environment background.
+    Sh,
+    Black,
+}
+
 /// One eval: when, on what model, and every view's scores.
 #[derive(Debug, Serialize)]
 pub(super) struct EvalRecord {
@@ -64,6 +73,7 @@ pub(super) struct EvalRecord {
     pub area: Option<crate::area::AreaReport>,
     /// The eval carried the extras (LPIPS, seam split, saved renders).
     pub extras: bool,
+    pub background: EvalBackground,
     pub views: Vec<ViewScore>,
 }
 
@@ -104,6 +114,7 @@ mod tests {
             area: None,
             parked_load_ms: None,
             extras: false,
+            background: EvalBackground::Black,
             views: vec![ViewScore { id: 9, psnr: 21.5, ssim: 0.7, lpips: None, psnr_band: Some(20.0), psnr_interior: None }],
         }
     }
@@ -156,5 +167,13 @@ mod tests {
         assert_eq!(lines[0]["area_views"].as_u64(), Some(42));
         assert_eq!((lines[0]["lpips_ms"].as_f64(), lines[0]["seam_ms"].as_f64()), (Some(12.0), Some(0.0)));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn the_background_is_named() {
+        let mut r = record(1);
+        assert_eq!(serde_json::to_value(&r).unwrap()["background"], "black");
+        r.background = EvalBackground::Sh;
+        assert_eq!(serde_json::to_value(&r).unwrap()["background"], "sh");
     }
 }

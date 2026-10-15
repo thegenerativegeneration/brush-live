@@ -10,7 +10,8 @@ use brush_render::gaussian_splats::{SplatRenderMode, Splats};
 use brush_rerun::visualize_tools::VisualizeTools;
 use brush_train::{
     RandomSplatsConfig, create_random_splats,
-    eval::eval_stats,
+    eval::eval_stats_over,
+    sh_background::ShBackground,
     lod::{compute_pup_scores, decimate_to_count},
     msg::RefineStats,
     to_init_splats,
@@ -376,6 +377,7 @@ pub(crate) async fn train_stream(
                 eval_scene,
                 save_path,
                 train_stream_config.rerun_config.rerun_max_img_size,
+                trainer.sh_background(),
             )
             .await
             .with_context(|| format!("Failed evaluation at iteration {iter}"));
@@ -561,6 +563,7 @@ async fn run_eval(
     eval_scene: &Scene,
     save_path: Option<PathBuf>,
     rerun_max_img_size: u32,
+    background: Option<&ShBackground>,
 ) -> Result<(), anyhow::Error> {
     if eval_scene.views.is_empty() {
         return Ok(());
@@ -575,11 +578,12 @@ async fn run_eval(
         brush_async::yield_now().await;
 
         let eval_img = view.image.load().await?;
-        let sample = eval_stats(
+        let sample = eval_stats_over(
             splats.clone(),
             &view.camera,
             eval_img,
             view.image.alpha_mode(),
+            background,
             device,
         )
         .await

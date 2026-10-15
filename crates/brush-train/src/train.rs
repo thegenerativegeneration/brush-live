@@ -11,8 +11,8 @@ use crate::{
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
     sh_background::{
-        ShBackground, background_match_mask, block_grid_size, block_mean, pixel_centres, sh_basis,
-        upsample_background, world_dirs,
+        ShBackground, background_match_mask, block_grid_size, block_mean, globe_background,
+        pixel_centres,
     },
     splat_init::bounds_from_pos,
     stats::{RefineRecord, trained_only},
@@ -676,23 +676,16 @@ impl SplatTrainer {
         }
     }
 
-    /// SH basis `[h*w, 9]` of `camera`'s world-space pixel directions at
-    /// `size` (the globe's block grid, not the render size).
-    fn sh_basis_for(
-        &mut self,
-        camera: &brush_render::camera::Camera,
-        size: glam::UVec2,
-        device: &Device,
-    ) -> Tensor<2> {
-        let centres = match &self.sh_pixel_centres {
-            Some((s, c)) if *s == size => c.clone(),
+    /// [`pixel_centres`] of the globe's block grid `grid`, kept while the grid stays the same size.
+    fn sh_grid_centres(&mut self, grid: glam::UVec2, device: &Device) -> Tensor<2> {
+        match &self.sh_pixel_centres {
+            Some((s, c)) if *s == grid => c.clone(),
             _ => {
-                let c = pixel_centres(size, device);
-                self.sh_pixel_centres = Some((size, c.clone()));
+                let c = pixel_centres(grid, device);
+                self.sh_pixel_centres = Some((grid, c.clone()));
                 c
             }
-        };
-        sh_basis(world_dirs(centres, camera, size))
+        }
     }
 
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
@@ -836,14 +829,9 @@ impl SplatTrainer {
                 // the alpha penalty works on the same grid.
                 let grid = block_grid_size(img_size);
                 let (grid_h, grid_w) = (grid.y as usize, grid.x as usize);
-                let basis = self.sh_basis_for(&camera, grid, &device);
-                let bg_grid = self
-                    .sh_background
-                    .as_ref()
-                    .expect("checked is_some above")
-                    .image(basis)
-                    .reshape([grid_h, grid_w, 3]);
-                let bg_image = upsample_background(bg_grid.clone(), img_h, img_w);
+                let centres = self.sh_grid_centres(grid, &device);
+                let coeffs = self.sh_background.as_ref().expect("checked is_some above").coeffs();
+                let (bg_grid, bg_image) = globe_background(coeffs, centres, &camera, img_size);
                 let rgb = pred_image.clone().slice(s![.., .., 0..3]);
                 let alpha = pred_image.clone().slice(s![.., .., 3..4]);
                 let weight = self.config.sh_background_alpha_weight;

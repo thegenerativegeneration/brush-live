@@ -49,12 +49,7 @@ pub async fn eval_stats_over(
 
     let (img, render_aux) =
         render_splats(splats, gt_cam, res, Vec3::ZERO, None, TextureMode::Float).await;
-    let render_rgb = img.clone().slice(s![.., .., 0..3]);
-    let render_rgb = match background {
-        // The render's alpha channel is its accumulated opacity, whatever its background.
-        Some(bg) => render_rgb + (1.0f32 - img.slice(s![.., .., 3..4])) * bg.render_background(gt_cam, res),
-        None => render_rgb,
-    };
+    let render_rgb = composite_over(img, background, gt_cam);
 
     // Simulate an 8-bit roundtrip for fair comparison.
     let render_rgb = (render_rgb * 255.0).round() / 255.0;
@@ -80,6 +75,21 @@ pub async fn eval_stats_over(
         rendered: render_rgb,
         render_aux,
     })
+}
+
+/// The RGB of `render` (`[h, w, 4]`, rendered on black), composited over `background` as `gt_cam` sees it:
+/// `rgb + (1 - alpha) * bg`, as a training step composites. Without a background, the render's RGB.
+pub fn composite_over(render: Tensor<3>, background: Option<&ShBackground>, gt_cam: &Camera) -> Tensor<3> {
+    let [h, w, _] = render.dims();
+    let rgb = render.clone().slice(s![.., .., 0..3]);
+    match background {
+        // The render's alpha channel is its accumulated opacity, whatever its background.
+        Some(bg) => {
+            let size = glam::uvec2(w as u32, h as u32);
+            rgb + (1.0f32 - render.slice(s![.., .., 3..4])) * bg.render_background(gt_cam, size)
+        }
+        None => rgb,
+    }
 }
 
 impl EvalSample {

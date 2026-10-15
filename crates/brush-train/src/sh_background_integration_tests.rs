@@ -3,6 +3,7 @@
 //! environment globe (`crate::sh_background`).
 
 use super::*;
+use crate::sh_background::sh_basis;
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};
 use brush_render::AlphaMode;
 use brush_render::camera::Camera;

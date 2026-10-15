@@ -8,7 +8,7 @@ use brush_render::gaussian_splats::Splats;
 use super::eval_log::ViewScore;
 use super::holdout_seam::{border_band, read_means, split_psnr, surface_points};
 use crate::config::GuideConfig;
-use brush_train::eval::{EvalSample, eval_stats_over};
+use brush_train::eval::{EvalSample, composite_over, eval_stats_over};
 use brush_train::sh_background::ShBackground;
 use burn::tensor::{Tensor, TensorData};
 use std::collections::HashSet;
@@ -333,13 +333,21 @@ async fn score_view(
     Ok((score, gt_to_save))
 }
 
-/// Compiles (and, where autotune is on, tunes) the extras' kernels at keyframe `size` before a session starts: one
-/// LPIPS forward on noise and one seam render of `splats`, as configured. Nothing without a holdout.
+/// Compiles (and, where autotune is on, tunes) the eval's kernels at keyframe `size` before a session starts: one
+/// LPIPS forward on noise, one seam render of `splats` and one composite over a fresh SH background, as configured.
+/// Nothing without a holdout.
 pub(crate) async fn warm_up_eval(config: &GuideConfig, splats: &Splats, camera: &Camera, size: glam::UVec2) {
     if config.holdout_every < 2 {
         return;
     }
     let device = splats.device();
+    if config.sh_background {
+        let globe = ShBackground::new(&device.clone().autodiff(), 1.0);
+        let render = Tensor::<3>::zeros([size.y as usize, size.x as usize, 4], &device);
+        if let Err(e) = composite_over(render, Some(&globe), camera).into_data_async().await {
+            log::warn!("warm-up: SH background composite failed: {e}");
+        }
+    }
     if config.eval_lpips {
         let model = lpips::load_vgg_lpips(&device);
         let noise = || {
