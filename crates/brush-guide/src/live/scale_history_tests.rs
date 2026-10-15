@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::keyframe::decode_keyframe;
-use crate::mono::ScaleSource;
+use crate::mono::{ScaleFit, ScaleSource};
 use crate::protocol::KeyframeHeader;
 use glam::Mat4;
 
