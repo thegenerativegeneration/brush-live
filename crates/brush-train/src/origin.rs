@@ -32,6 +32,11 @@ impl SplatOrigin {
         self.rows.dims()[0]
     }
 
+    /// The per-row tags on the device (see [`slot_of`]).
+    pub(crate) fn tags(&self) -> Tensor<1, Int> {
+        self.rows.clone()
+    }
+
     /// Each splat's seeding view slot, `None` without one; reads the tags back from the device.
     pub(crate) async fn slots(&self) -> Vec<Option<u32>> {
         let tags = self
@@ -43,9 +48,7 @@ impl SplatOrigin {
             .convert::<i32>()
             .try_into_vec::<i32>()
             .expect("int origin tags");
-        tags.into_iter()
-            .map(|t| (t > 0).then(|| t as u32 - 1))
-            .collect()
+        tags.into_iter().map(slot_of).collect()
     }
 
     /// `n` appended splats seeded by view `slot` (`None`: no origin).
@@ -119,6 +122,11 @@ impl SplatOrigin {
 /// The tag of a splat seeded by view `slot`: `slot + 1`, 0 without one.
 fn tag(slot: Option<u32>) -> usize {
     slot.map_or(0, |s| s as usize + 1)
+}
+
+/// The view slot tag `t` stands for; `None` for 0.
+pub(crate) fn slot_of(t: i32) -> Option<u32> {
+    (t > 0).then(|| t as u32 - 1)
 }
 
 /// Hamilton product `a ⊗ b` of `[N, 4]` quaternions stored `[w, x, y, z]`.

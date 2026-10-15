@@ -45,12 +45,21 @@ fn batch() -> SceneBatch {
 }
 
 /// A trainer built from `args` (after the program name) with eviction, origins and, when `view_cams`, a Mip floor,
-/// after one step and one refine.
+/// after one step and one refine on `n` splats 2 m ahead of the camera.
 async fn trained_with(n: usize, args: &[&str], view_cams: bool) -> (SplatTrainer, Splats) {
+    trained_on(|device| splats(n, 2.0, device), args, view_cams).await
+}
+
+/// [`trained_with`] on the splats `base` builds.
+async fn trained_on(
+    base: impl FnOnce(&Device) -> Splats,
+    args: &[&str],
+    view_cams: bool,
+) -> (SplatTrainer, Splats) {
     let device: Device = brush_cube::test_helpers::test_device().await.into();
     let device = device.autodiff();
     let config = TrainConfig::parse_from(std::iter::once("test").chain(args.iter().copied()));
-    let base = splats(n, 2.0, &device);
+    let base = base(&device);
     let bounds = get_splat_bounds(base.clone(), BOUND_PERCENTILE).await;
     let mut trainer = SplatTrainer::new(&config, &device, bounds);
     if view_cams {
@@ -73,17 +82,6 @@ async fn trained(n: usize) -> (SplatTrainer, Splats) {
     trained_with(n, &[], true).await
 }
 
-fn sorted_by_mean(rows: &SplatRows) -> SplatRows {
-    let mut idx: Vec<usize> = (0..rows.len()).collect();
-    idx.sort_by(|&a, &b| {
-        rows.mean(a)
-            .to_array()
-            .partial_cmp(&rows.mean(b).to_array())
-            .unwrap()
-    });
-    rows.select(&idx)
-}
-
 #[tokio::test]
 async fn take_then_append_keeps_every_row_and_training_runs() {
     let (mut trainer, s) = trained(60).await;
@@ -93,20 +91,40 @@ async fn take_then_append_keeps_every_row_and_training_runs() {
         before.len(),
         "refine attached a floor"
     );
-    let take: Vec<bool> = (0..before.len()).map(|i| i % 3 == 0).collect();
+    // A step before the take, so the Adam moments are nonzero.
+    let (s, _) = trainer.step(batch(), s.train()).await;
+    let s = s.valid();
+    let before = trainer.read_rows(&s).await;
+    let moment_before = opacity_moment(&trainer).await;
+    let n = before.len();
+    let take: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
     let (s, taken) = trainer.take_rows(s, &take).await;
     let taken = taken.expect("a third of the rows");
-    let idx: Vec<usize> = (0..before.len()).filter(|&i| take[i]).collect();
+    let (idx, kept): (Vec<usize>, Vec<usize>) = (0..n).partition(|&i| take[i]);
     assert_eq!(taken, before.select(&idx));
-    assert_eq!(s.num_splats() as usize, before.len() - idx.len());
+    assert_eq!(s.num_splats() as usize, kept.len());
     assert_eq!(
         s.min_scale.as_ref().map(|f| f.dims()[0]),
         Some(s.num_splats() as usize)
     );
     let s = trainer.append_rows(s, &taken);
+    let after = trainer.read_rows(&s).await;
+    let k = kept.len();
     assert_eq!(
-        sorted_by_mean(&trainer.read_rows(&s).await),
-        sorted_by_mean(&before)
+        after.select(&(0..k).collect::<Vec<_>>()),
+        before.select(&kept)
+    );
+    assert_eq!(after.select(&(k..n).collect::<Vec<_>>()), taken);
+    let moment_after = opacity_moment(&trainer).await;
+    let kept_moments: Vec<f32> = kept.iter().map(|&i| moment_before[i]).collect();
+    assert!(
+        kept_moments.iter().any(|&m| m != 0.0),
+        "the step left moments to keep"
+    );
+    assert_eq!(&moment_after[..k], &kept_moments[..]);
+    assert!(
+        moment_after[k..].iter().all(|&m| m == 0.0),
+        "appended rows start with zero moments"
     );
     // Moments, refine record, life and origin tags stay row-aligned: a step and a refine run on the result.
     let (s, _) = trainer.step(batch(), s.train()).await;
@@ -142,11 +160,27 @@ async fn take_between_steps_keeps_the_refine_record_aligned() {
     assert!(s.num_splats() > 0);
 }
 
-/// The visibility signal area training reads: splats in front of the camera contributed to the step's render.
+/// The visibility signal area training reads: splats in front of the camera contributed to the step's render, and
+/// splats behind it did not.
 #[tokio::test]
 async fn seen_counts_splats_that_contributed_to_the_render() {
-    let (mut trainer, s) = trained(40).await;
-    let (_, _) = trainer.step(batch(), s.train()).await;
+    let both_sides = |device: &Device| {
+        let n = 40;
+        Splats::from_raw(
+            (0..n)
+                .flat_map(|i| [i as f32 * 0.01, 0.0, if i % 2 == 0 { 2.0 } else { -2.0 }])
+                .collect(),
+            [1.0, 0.0, 0.0, 0.0].repeat(n),
+            vec![-3.0; n * 3],
+            vec![0.5; n * 3],
+            vec![inverse_sigmoid(0.5); n],
+            SplatRenderMode::Default,
+            device,
+        )
+    };
+    let (mut trainer, s) = trained_on(both_sides, &[], true).await;
+    let (s, _) = trainer.step(batch(), s.train()).await;
+    let rows = trainer.read_rows(&s.valid()).await;
     let seen: Vec<f32> = trainer
         .seen_since_refine()
         .unwrap()
@@ -155,9 +189,17 @@ async fn seen_counts_splats_that_contributed_to_the_render() {
         .unwrap()
         .try_to_vec()
         .unwrap();
+    assert_eq!(seen.len(), rows.len());
+    let (ahead, behind): (Vec<usize>, Vec<usize>) =
+        (0..rows.len()).partition(|&i| rows.mean(i).z > 0.0);
+    assert!(!ahead.is_empty() && !behind.is_empty());
     assert!(
-        seen.iter().any(|&v| v > 0.0),
+        ahead.iter().any(|&i| seen[i] > 0.0),
         "importance_views must count visible splats"
+    );
+    assert!(
+        behind.iter().all(|&i| seen[i] == 0.0),
+        "splats behind the camera are never seen"
     );
 }
 
@@ -263,6 +305,19 @@ async fn take_and_append_keep_rows_aligned_with_the_radius_on() {
     assert_rows_aligned(&trainer, &s);
 }
 
+/// The opacity parameter's first Adam moment, per splat.
+async fn opacity_moment(trainer: &SplatTrainer) -> Vec<f32> {
+    let optim = trainer.optim.as_ref().expect("a step ran");
+    let m = optim.opacities.momentum.as_ref().expect("a step ran");
+    m.moment_1
+        .clone()
+        .into_data_async()
+        .await
+        .unwrap()
+        .try_to_vec()
+        .unwrap()
+}
+
 /// Every per-row tensor the trainer holds is as long as `splats` (`last_frozen` aside: the last step's mask, not kept
 /// through append or refine).
 fn assert_rows_aligned(trainer: &SplatTrainer, splats: &Splats) {
@@ -340,30 +395,11 @@ async fn host_bake_matches_the_gpu_fold() {
     assert_eq!(rows.baked(), rows, "no floor: unchanged");
 }
 
-#[test]
-fn select_and_concat_keep_rows_together() {
-    let rows = SplatRows {
-        means: (0..9).map(|v| v as f32).collect(),
-        rotations: (0..12).map(|v| v as f32).collect(),
-        log_scales: (0..9).map(|v| -(v as f32)).collect(),
-        sh_coeffs: (0..9).map(|v| v as f32 * 0.1).collect(),
-        raw_opacities: vec![0.1, 0.2, 0.3],
-        min_scale: vec![],
-        origin: vec![Some(1), None, Some(3)],
-        age: vec![1.0, 2.0, 3.0],
-        importance: vec![0.5, f32::INFINITY, 0.7],
-        sh_coeffs_per_channel: 1,
-    };
-    let picked = rows.select(&[2, 0]);
-    assert_eq!(picked.means, vec![6.0, 7.0, 8.0, 0.0, 1.0, 2.0]);
-    assert_eq!(picked.origin, vec![Some(3), Some(1)]);
-    assert_eq!(picked.mean(1), glam::vec3(0.0, 1.0, 2.0));
-    let joined = SplatRows::concat(&[rows.select(&[0]), rows.select(&[1, 2])]);
-    assert_eq!(joined, rows);
-    // A part with a floor and a part without: the missing floor is a zero one (no floor).
-    let mut floored = rows.select(&[0]);
-    floored.min_scale = vec![0.02];
-    let mixed = SplatRows::concat(&[floored, rows.select(&[1, 2])]);
-    assert_eq!(mixed.min_scale, vec![0.02, 0.0, 0.0]);
-    assert!(SplatRows::concat(&[]).is_empty());
+#[tokio::test]
+#[should_panic(expected = "splat rows column importance")]
+async fn append_rows_refuses_misshapen_rows() {
+    let (mut trainer, s) = trained(10).await;
+    let mut rows = trainer.read_rows(&s).await.select(&[0, 1]);
+    rows.importance.pop();
+    let _ = trainer.append_rows(s, &rows);
 }

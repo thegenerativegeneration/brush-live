@@ -4,12 +4,13 @@
 
 use super::{SplatTrainer, map_splats_and_opt};
 use crate::evict::SplatLife;
+use crate::origin::slot_of;
 use crate::rows::SplatRows;
 use brush_render::gaussian_splats::Splats;
-use burn::tensor::{Int, Tensor, TensorData, Transaction};
+use burn::tensor::{Int, Tensor, TensorData, Transaction, kind::Basic};
 
 /// `t`'s rows at `rows`, all of them when `None`.
-fn pick<const D: usize>(t: Tensor<D>, rows: Option<&Tensor<1, Int>>) -> Tensor<D> {
+fn pick<const D: usize, K: Basic>(t: Tensor<D, K>, rows: Option<&Tensor<1, Int>>) -> Tensor<D, K> {
     match rows {
         Some(r) => t.select(0, r.clone()),
         None => t,
@@ -32,6 +33,9 @@ impl SplatTrainer {
         if let Some(life) = life {
             assert_eq!(life.len(), n, "life out of step with the splats");
         }
+        if let Some(origin) = &self.origin {
+            assert_eq!(origin.len(), n, "origin tags out of step with the splats");
+        }
 
         let mut tx = Transaction::default()
             .register(pick(splats.transforms.val().inner(), at))
@@ -45,13 +49,33 @@ impl SplatTrainer {
                 .register(pick(life.age.clone(), at))
                 .register(pick(life.importance.clone(), at));
         }
+        if let Some(origin) = &self.origin {
+            tx = tx.register(pick(origin.tags(), at));
+        }
         let mut data = tx
             .execute_async()
             .await
             .expect("splat rows readback")
-            .into_iter()
-            .map(|d| d.convert::<f32>().try_into_vec::<f32>().expect("f32 rows"));
-        let mut next = || data.next().expect("one buffer per registered tensor");
+            .into_iter();
+        let origin = match &self.origin {
+            Some(_) => data
+                .next_back()
+                .expect("origin tags readback")
+                .convert::<i32>()
+                .try_into_vec::<i32>()
+                .expect("int origin tags")
+                .into_iter()
+                .map(slot_of)
+                .collect(),
+            None => vec![None; count],
+        };
+        let mut next = || {
+            data.next()
+                .expect("one buffer per registered tensor")
+                .convert::<f32>()
+                .try_into_vec::<f32>()
+                .expect("f32 rows")
+        };
 
         let transforms = next();
         let sh_coeffs = next();
@@ -65,16 +89,6 @@ impl SplatTrainer {
             (next(), next())
         } else {
             (vec![0.0; count], vec![f32::INFINITY; count])
-        };
-        let origin = match &self.origin {
-            Some(o) => {
-                let all = o.slots().await;
-                match rows {
-                    Some(r) => r.iter().map(|&i| all[i]).collect(),
-                    None => all,
-                }
-            }
-            None => vec![None; count],
         };
 
         let mut means = Vec::with_capacity(count * 3);
@@ -156,9 +170,12 @@ impl SplatTrainer {
     /// Appends `rows` to `splats` (as between steps) with their origin tags, age and importance. Their Adam moments
     /// start at zero and the refine record counts them as never observed (and untrained with the training radius on).
     /// When `splats` carry a Mip floor the rows keep theirs (a zero one without), so they come back as they were
-    /// taken; otherwise their floor is folded into their params. Panics when the rows' SH degree differs from the
-    /// splats'.
+    /// taken; otherwise their floor is folded into their params. Panics when a column of `rows` is out of length
+    /// ([`SplatRows::check`]) or their SH degree differs from the splats'.
     pub fn append_rows(&mut self, splats: Splats, rows: &SplatRows) -> Splats {
+        if let Err(e) = rows.check() {
+            panic!("{e}");
+        }
         if rows.is_empty() {
             return splats;
         }

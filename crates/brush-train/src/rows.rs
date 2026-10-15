@@ -53,6 +53,33 @@ impl SplatRows {
         Vec3::from_slice(&self.means[i * 3..i * 3 + 3])
     }
 
+    /// `Err` naming the first column (in field order) whose length does not fit `len()` rows: `len·3` means and
+    /// log-scales, `len·4` rotations, `len·coeffs·3` SH, a floor that is empty or `len`, and `len` origins, ages and
+    /// importances.
+    pub fn check(&self) -> Result<(), String> {
+        let n = self.len();
+        let columns = [
+            ("means", self.means.len(), n * 3),
+            ("rotations", self.rotations.len(), n * 4),
+            ("log_scales", self.log_scales.len(), n * 3),
+            ("sh_coeffs", self.sh_coeffs.len(), n * self.coeff_width()),
+            (
+                "min_scale",
+                self.min_scale.len(),
+                if self.min_scale.is_empty() { 0 } else { n },
+            ),
+            ("origin", self.origin.len(), n),
+            ("age", self.age.len(), n),
+            ("importance", self.importance.len(), n),
+        ];
+        match columns.iter().find(|(_, got, want)| got != want) {
+            Some((name, got, want)) => Err(format!(
+                "splat rows column {name} has {got} values, {n} rows need {want}"
+            )),
+            None => Ok(()),
+        }
+    }
+
     fn coeff_width(&self) -> usize {
         self.sh_coeffs_per_channel as usize * 3
     }
@@ -170,3 +197,7 @@ impl SplatRows {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "rows_tests.rs"]
+mod tests;
