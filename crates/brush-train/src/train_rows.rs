@@ -115,8 +115,8 @@ impl SplatTrainer {
 
     /// Takes the rows flagged in `take` (one flag per splat) out of `splats` (as between steps) and hands them back
     /// on the host. The remaining rows keep their parameters, Adam moments, refine record, life state, origin tags,
-    /// Mip floor and last frozen flag, in order. When no row or every row is flagged, `splats` come back unchanged
-    /// with `None`.
+    /// Mip floor, last frozen flag and held flag ([`SplatTrainer::set_frozen_rows`]), in order. When no row or every
+    /// row is flagged, `splats` come back unchanged with `None`.
     pub async fn take_rows(
         &mut self,
         splats: Splats,
@@ -160,6 +160,10 @@ impl SplatTrainer {
         }
         self.last_frozen = self
             .last_frozen
+            .take()
+            .map(|f| f.select(0, keep_inner.clone()));
+        self.frozen_rows = self
+            .frozen_rows
             .take()
             .map(|f| f.select(0, keep_inner.clone()));
         self.refine_record = self.refine_record.take().map(|r| r.keep(keep_inner));

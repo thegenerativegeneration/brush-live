@@ -1,5 +1,5 @@
-//! The training radius in the trainer: which splats a step leaves alone, and how refine keeps the rows no step
-//! trained since the last refine as they were (raw params and Mip-Splatting floor).
+//! The training radius in the trainer, and rows the caller holds: which splats a step leaves alone, and how refine
+//! keeps the rows no step trained since the last refine as they were (raw params and Mip-Splatting floor).
 
 use brush_render::gaussian_splats::{Splats, fold_min_scale};
 use burn::module::Param;
@@ -16,6 +16,20 @@ pub(super) fn beyond_radius(means: Tensor<2>, center: glam::Vec3, radius: f32) -
         .sum_dim(1)
         .reshape([n])
         .greater_elem(radius * radius)
+}
+
+/// Rows either mask flags; `None` when neither is set.
+pub(super) fn either(a: Option<Tensor<1, Bool>>, b: Option<Tensor<1, Bool>>) -> Option<Tensor<1, Bool>> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.bool_or(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// `mask` with `n` unset rows appended.
+pub(super) fn pad_unset(mask: Tensor<1, Bool>, n: usize) -> Tensor<1, Bool> {
+    let device = mask.device();
+    Tensor::cat(vec![mask, Tensor::<1>::zeros([n], &device).greater_elem(0.0)], 0)
 }
 
 /// What refine works on when untrained rows keep their floor: the splats without a floor attached, the trained rows'

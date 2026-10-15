@@ -11,9 +11,9 @@ use brush_render::kernels::camera_model::CameraModel;
 use burn::module::Module;
 use clap::Parser;
 
-const NEAR: usize = 10;
-const FAR: usize = 10;
-const FAR_ROWS: std::ops::Range<usize> = NEAR..NEAR + FAR;
+pub(super) const NEAR: usize = 10;
+pub(super) const FAR: usize = 10;
+pub(super) const FAR_ROWS: std::ops::Range<usize> = NEAR..NEAR + FAR;
 /// One near splat below `MIN_OPACITY`, last so pruning it moves no other row: refine replaces it (`num_dead` > 0).
 const DEAD: usize = NEAR + FAR;
 
@@ -35,7 +35,7 @@ fn world(local: glam::Vec3) -> [f32; 3] {
 /// `NEAR` splats 2 m and `FAR` splats 20 m ahead of the camera, all in view, and the `DEAD` one 2 m ahead; SH
 /// degree 1 (rest coefficients nonzero). `far_opacity` 0.05 lets the position noise act on the far splats; 0.9 keeps
 /// it at zero.
-fn splats(far_opacity: f32, device: &Device) -> Splats {
+pub(super) fn splats(far_opacity: f32, device: &Device) -> Splats {
     let near = (0..NEAR).flat_map(|i| world(glam::vec3(i as f32 * 0.1 - 0.45, 0.0, 2.0)));
     let far = (0..FAR).flat_map(|i| world(glam::vec3(i as f32 * 1.0 - 4.5, 0.0, 20.0)));
     let dead = world(glam::vec3(0.0, 0.2, 2.0));
@@ -66,7 +66,7 @@ fn splats(far_opacity: f32, device: &Device) -> Splats {
     )
 }
 
-fn batch() -> SceneBatch {
+pub(super) fn batch() -> SceneBatch {
     let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
         32,
         32,
@@ -90,7 +90,7 @@ fn batch() -> SceneBatch {
     }
 }
 
-async fn floats<const D: usize>(t: Tensor<D>) -> Vec<f32> {
+pub(super) async fn floats<const D: usize>(t: Tensor<D>) -> Vec<f32> {
     t.into_data_async()
         .await
         .expect("readback")
@@ -99,10 +99,10 @@ async fn floats<const D: usize>(t: Tensor<D>) -> Vec<f32> {
 }
 
 /// Parameters and Adam moments of one step's outcome, each as (name, values, values per splat).
-struct State(Vec<(&'static str, Vec<f32>, usize)>);
+pub(super) struct State(Vec<(&'static str, Vec<f32>, usize)>);
 
 impl State {
-    async fn of(trainer: &SplatTrainer, splats: &Splats) -> Self {
+    pub(super) async fn of(trainer: &SplatTrainer, splats: &Splats) -> Self {
         let n = splats.num_splats() as usize;
         let optim = trainer.optim.as_ref().expect("stepped");
         let mut out = Vec::new();
@@ -126,7 +126,7 @@ impl State {
     }
 
     /// Bit patterns of `rows` of every tensor.
-    fn rows(&self, rows: std::ops::Range<usize>) -> Vec<(&'static str, Vec<u32>)> {
+    pub(super) fn rows(&self, rows: std::ops::Range<usize>) -> Vec<(&'static str, Vec<u32>)> {
         self.0
             .iter()
             .map(|(name, v, per)| {
@@ -142,7 +142,7 @@ impl State {
     }
 
     /// The far rows' SH rest coefficients (bands 1+), as bits.
-    fn far_sh_rest(&self) -> Vec<u32> {
+    pub(super) fn far_sh_rest(&self) -> Vec<u32> {
         let (_, sh, per) = &self.0[1];
         FAR_ROWS
             .flat_map(|row| {
@@ -154,7 +154,7 @@ impl State {
     }
 }
 
-fn trainer(radius: f32, device: &Device) -> SplatTrainer {
+pub(super) fn trainer(radius: f32, device: &Device) -> SplatTrainer {
     let mut config = TrainConfig::parse_from(["test"]);
     config.train_radius_m = radius;
     let (position, _) = pose();
@@ -162,13 +162,13 @@ fn trainer(radius: f32, device: &Device) -> SplatTrainer {
     SplatTrainer::new(&config, device, bounds)
 }
 
-async fn device() -> Device {
+pub(super) async fn device() -> Device {
     let device: Device = brush_cube::test_helpers::test_device().await.into();
     device.autodiff()
 }
 
 /// A trainer with `radius` after one step with the radius off (so every splat carries Adam moments).
-async fn trainer_after_one_step(radius: f32, far_opacity: f32) -> (SplatTrainer, Splats) {
+pub(super) async fn trainer_after_one_step(radius: f32, far_opacity: f32) -> (SplatTrainer, Splats) {
     let device = device().await;
     let mut trainer = trainer(0.0, &device);
     let (splats, _) = trainer
@@ -179,14 +179,14 @@ async fn trainer_after_one_step(radius: f32, far_opacity: f32) -> (SplatTrainer,
 }
 
 /// One more step of `trainer`: the state before and after.
-async fn step(trainer: &mut SplatTrainer, splats: Splats) -> (State, State, Splats) {
+pub(super) async fn step(trainer: &mut SplatTrainer, splats: Splats) -> (State, State, Splats) {
     let before = State::of(trainer, &splats).await;
     let (splats, _) = trainer.step(batch(), splats).await;
     let after = State::of(trainer, &splats).await;
     (before, after, splats)
 }
 
-async fn masked_count(trainer: &SplatTrainer) -> Option<i64> {
+pub(super) async fn masked_count(trainer: &SplatTrainer) -> Option<i64> {
     let masked = trainer.masked_by_radius()?;
     let data = masked.into_data_async().await.expect("readback");
     Some(data.convert::<i64>().try_to_vec::<i64>().expect("i64")[0])
@@ -268,27 +268,51 @@ async fn radius_off_masks_nothing_and_a_radius_holding_everything_masks_none() {
 }
 
 /// The raw opacities and transforms around one refine, and whether the refine record carried the trained column.
-struct Refined {
-    opac: Vec<f32>,
-    opac_after: Vec<f32>,
-    transforms: Vec<f32>,
-    transforms_after: Vec<f32>,
-    trained_column: bool,
-    stats: RefineStats,
+pub(super) struct Refined {
+    pub(super) opac: Vec<f32>,
+    pub(super) opac_after: Vec<f32>,
+    pub(super) transforms: Vec<f32>,
+    pub(super) transforms_after: Vec<f32>,
+    pub(super) trained_column: bool,
+    pub(super) stats: RefineStats,
+}
+
+/// `[n]` flags set on the far rows, on the inner device.
+pub(super) fn far_rows_mask(n: usize, device: &Device) -> Tensor<1, Bool> {
+    let flags: Vec<bool> = (0..n).map(|i| FAR_ROWS.contains(&i)).collect();
+    Tensor::from_data(TensorData::new(flags, [n]), &device.clone().inner())
 }
 
 const REFINE_STEPS: u32 = 3;
 
+/// When [`refine_after_steps`] holds the far rows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Hold {
+    No,
+    /// Before the first step.
+    FromStart,
+    /// After the steps, right before the refine.
+    AfterSteps,
+}
+
 /// `REFINE_STEPS` steps with `radius` from the start, then every splat's refine weight set far above the growth
 /// threshold (as if each had a large gradient) and every on-screen size above `split_at_screen_size`, and one refine
-/// growing every candidate. The `DEAD` row is pruned, so the refine also picks a replacement parent.
-async fn refine_after_steps(radius: f32) -> Refined {
+/// growing every candidate. The `DEAD` row is pruned, so the refine also picks a replacement parent. `hold` says when
+/// the far rows are held ([`SplatTrainer::set_frozen_rows`]).
+pub(super) async fn refine_after_steps(radius: f32, hold: Hold) -> Refined {
     let device = device().await;
     let mut trainer = trainer(radius, &device);
     trainer.config.growth_select_fraction = 1.0;
+    let held = || Some(far_rows_mask(NEAR + FAR + 1, &device));
+    if hold == Hold::FromStart {
+        trainer.set_frozen_rows(held());
+    }
     let mut splats = splats(0.9, &device).train();
     for _ in 0..REFINE_STEPS {
         splats = trainer.step(batch(), splats).await.0;
+    }
+    if hold == Hold::AfterSteps {
+        trainer.set_frozen_rows(held());
     }
     let record = trainer.refine_record.as_mut().expect("stepped");
     record.refine_weight_norm = record.refine_weight_norm.clone().ones_like();
@@ -308,11 +332,11 @@ async fn refine_after_steps(radius: f32) -> Refined {
     }
 }
 
-fn bits(v: &[f32]) -> Vec<u32> {
+pub(super) fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
 
-fn sigmoid(x: f32) -> f32 {
+pub(super) fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
@@ -323,7 +347,7 @@ fn split_and_decayed(raw: f32) -> f32 {
     split - config.opac_decay * (1.0 - REFINE_STEPS as f32 / config.total_train_iters as f32)
 }
 
-fn assert_split_and_decayed(r: &Refined, rows: std::ops::Range<usize>) {
+pub(super) fn assert_split_and_decayed(r: &Refined, rows: std::ops::Range<usize>) {
     for row in rows {
         let (got, want) = (sigmoid(r.opac_after[row]), split_and_decayed(r.opac[row]));
         assert!(
@@ -338,7 +362,7 @@ fn assert_split_and_decayed(r: &Refined, rows: std::ops::Range<usize>) {
 /// split and decay as without the radius.
 #[tokio::test]
 async fn untrained_rows_are_not_decayed_or_densified_at_refine() {
-    let r = refine_after_steps(5.0).await;
+    let r = refine_after_steps(5.0, Hold::No).await;
     assert!(r.trained_column);
     assert!(
         sigmoid(r.opac[DEAD]) < MIN_OPACITY,
@@ -371,7 +395,7 @@ async fn untrained_rows_are_not_decayed_or_densified_at_refine() {
 /// Radius 0: no trained column is built and every splat refines as today (all split, all decay).
 #[tokio::test]
 async fn radius_off_refines_every_row_as_today() {
-    let r = refine_after_steps(0.0).await;
+    let r = refine_after_steps(0.0, Hold::No).await;
     assert!(!r.trained_column);
     assert_eq!(r.opac_after.len(), 2 * (NEAR + FAR), "every splat splits");
     assert_split_and_decayed(&r, 0..NEAR + FAR);
@@ -382,12 +406,23 @@ async fn radius_off_refines_every_row_as_today() {
 /// values bit for bit, while trained rows get their floor baked in and a fresh one attached.
 #[tokio::test]
 async fn untrained_rows_keep_raw_params_and_floor_across_refine() {
+    assert_untrained_rows_keep_raw_params_and_floor(5.0, false).await;
+}
+
+/// The test above with `radius`; with `hold`, the far rows are held ([`SplatTrainer::set_frozen_rows`]) from the
+/// second refine's window on, as area training sets them after each refine.
+pub(super) async fn assert_untrained_rows_keep_raw_params_and_floor(radius: f32, hold: bool) {
     let device = device().await;
-    let mut trainer = trainer(5.0, &device);
+    let mut trainer = trainer(radius, &device);
     let (position, _) = pose();
     trainer.set_view_cams(vec![(position, 27.7)]);
     let mut splats = trainer.step(batch(), splats(0.9, &device).train()).await.0;
     splats = trainer.refine(1, splats.valid()).await.0.train();
+    if hold {
+        // The refine pruned the dead row and appended children: the far rows keep their indices.
+        let n = splats.num_splats() as usize;
+        trainer.set_frozen_rows(Some(far_rows_mask(n, &device)));
+    }
     for _ in 0..REFINE_STEPS {
         splats = trainer.step(batch(), splats).await.0;
     }

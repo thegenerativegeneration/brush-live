@@ -14,8 +14,8 @@ pub(crate) struct RefineRecord {
     // score above zero, per splat.
     pub importance_sum: Tensor<1>,
     pub importance_views: Tensor<1>,
-    /// 1 for splats some step since the last refine trained (within `train_radius_m` of its camera), else 0; built
-    /// only while the training radius is on.
+    /// 1 for splats some step since the last refine trained (within `train_radius_m` of its camera and not held by
+    /// the caller), else 0; built only while the training radius is on or rows are held.
     pub trained: Option<Tensor<1>>,
     /// The Mip-Splatting floor rows carried into the refine that holds this record, while untrained rows keep theirs
     /// through it (set by refine).
@@ -43,7 +43,7 @@ impl RefineRecord {
         });
     }
 
-    /// Splats no step trained since the last refine; `None` without the trained column (radius off).
+    /// Splats no step trained since the last refine; `None` without the trained column (radius off, no rows held).
     pub(crate) fn untrained(&self) -> Option<Tensor<1, Bool>> {
         self.trained.clone().map(|t| t.lower_elem(0.5))
     }

@@ -126,6 +126,8 @@ pub struct SplatTrainer {
     sh_pruned: u64,
     /// The splats the last step left alone for lying beyond `train_radius_m`; `None` with the radius off.
     last_frozen: Option<Tensor<1, Bool>>,
+    /// Rows the caller holds still until the next refine ([`Self::set_frozen_rows`]); `None` holds none.
+    frozen_rows: Option<Tensor<1, Bool>>,
 }
 
 /// `(l1, ssim)` kernel weights for `step` (1-based). The RGB loss is
@@ -254,6 +256,7 @@ impl SplatTrainer {
             adam_clamped: 0,
             sh_pruned: 0,
             last_frozen: None,
+            frozen_rows: None,
             profile: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
@@ -281,6 +284,34 @@ impl SplatTrainer {
     /// the caller); `None` with the radius off or before the first step.
     pub fn masked_by_radius(&self) -> Option<Tensor<1, Int>> {
         self.last_frozen.clone().map(|f| f.int().sum())
+    }
+
+    /// Holds the rows set in `frozen` (`[N]` over the current splats, inner device) still until the next refine, as
+    /// the training radius holds the rows beyond it: no step updates their parameters or Adam moments or adds position
+    /// noise, and refine treats them as rows no step trained (no opacity decay, Mip floor bake, split, growth or
+    /// eviction demand), also when steps before this call trained them. They are never eviction victims either. Take
+    /// and append keep the mask row-aligned (appended rows are not held); refine drops it, so the caller sets it again
+    /// for the refined rows. `None` holds nothing: rows held before train from the next step on, and without the
+    /// radius and a held row step and refine are as without the mask.
+    pub fn set_frozen_rows(&mut self, frozen: Option<Tensor<1, Bool>>) {
+        if let (Some(held), Some(record)) = (&frozen, self.refine_record.as_mut()) {
+            record.trained = Some(match record.trained.take() {
+                Some(trained) => trained.mask_fill(held.clone(), 0.0),
+                None => held.clone().bool_not().float(),
+            });
+        }
+        self.frozen_rows = frozen;
+    }
+
+    /// The rows held by [`Self::set_frozen_rows`], row-aligned with the current splats; `None` when none are held.
+    pub fn frozen_rows(&self) -> Option<&Tensor<1, Bool>> {
+        self.frozen_rows.as_ref()
+    }
+
+    /// Splats the next refine evicts for: seeds and restores the budget turned away since the last refine
+    /// ([`Self::note_seed_shortfall`]); 0 without eviction.
+    pub fn pending_seed_shortfall(&self) -> u32 {
+        self.evict.as_ref().map_or(0, |e| e.seed_shortfall)
     }
 
     /// Splats refine pruned for a diverged colour since training started.
@@ -381,7 +412,7 @@ impl SplatTrainer {
         }
     }
 
-    /// Adds this refine's evictions to the `dead` prune mask. Returns the
+    /// Adds this refine's evictions to the `dead` prune mask; rows set in `held` are no victims. Returns the
     /// mask and the number evicted.
     async fn add_evictions(
         &mut self,
@@ -389,6 +420,7 @@ impl SplatTrainer {
         splats: &Splats,
         refiner: &RefineRecord,
         dead: Tensor<1, Bool>,
+        held: Option<Tensor<1, Bool>>,
     ) -> (Tensor<1, Bool>, u32) {
         let Some(ev) = self.evict.as_mut() else {
             return (dead, 0);
@@ -470,11 +502,15 @@ impl SplatTrainer {
             Some(m) => m,
             None => read_f32(splats.means()).await,
         };
+        let exclude = match held {
+            Some(held) => dead.clone().bool_or(held),
+            None => dead.clone(),
+        };
         let (mask, count) = select_evictions(
             life,
             splats.means(),
             &means,
-            dead.clone(),
+            exclude,
             ev.protect,
             &ev.config,
             want,
@@ -581,6 +617,7 @@ impl SplatTrainer {
         if let Some(record) = self.refine_record.take() {
             self.refine_record = Some(record.pad(n));
         }
+        self.frozen_rows = self.frozen_rows.take().map(|f| radius::pad_unset(f, n));
         if let Some(life) = self.evict.as_mut().and_then(|e| e.life.as_mut()) {
             life.pad(n);
         }
@@ -891,14 +928,22 @@ impl SplatTrainer {
 
         optimizer.transforms.scaling = Some(lr_scaling);
 
-        let frozen = (self.config.train_radius_m > 0.0).then(|| {
+        let beyond = (self.config.train_radius_m > 0.0).then(|| {
             radius::beyond_radius(
                 splats.means().inner(),
                 camera.position,
                 self.config.train_radius_m,
             )
         });
-        self.last_frozen = frozen.clone();
+        self.last_frozen = beyond.clone();
+        if let Some(held) = &self.frozen_rows {
+            assert_eq!(
+                held.dims()[0],
+                splats.num_splats() as usize,
+                "frozen rows out of step with the splats"
+            );
+        }
+        let frozen = radius::either(beyond, self.frozen_rows.clone());
 
         splats = trace_span!("Optimizer step").in_scope(|| {
             splats.transforms = trace_span!("Transforms step").in_scope(|| {
@@ -950,8 +995,11 @@ impl SplatTrainer {
                 .refine_record
                 .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
             record.gather_stats(refine_weight, importance, visible.clone(), max_radius);
-            if let Some(frozen) = &frozen {
-                record.mark_trained(frozen.clone().bool_not().float());
+            match &frozen {
+                Some(frozen) => record.mark_trained(frozen.clone().bool_not().float()),
+                // Rows held earlier in the window train again.
+                None if record.trained.is_some() => record.mark_trained(visible.clone().ones_like()),
+                None => {}
             }
             if let Some(e) = self.evict.as_mut() {
                 e.life
@@ -1013,12 +1061,14 @@ impl SplatTrainer {
             .refine_record
             .take()
             .expect("Can only refine if refine stats are initialized");
+        let held = self.frozen_rows.take();
         // Refine manipulates the canonical (un-floored) params, so bake the
         // current 3D-filter floor into them first — split/clone/prune then see
         // the splat's true scales with no double-apply. A freshly recomputed
         // floor is attached at the end (below), once positions/count are known.
-        // With the training radius on, rows no step trained since the last refine stay raw and keep their floor
-        // through the refine instead, so a frozen splat does not get its floor folded in again at every refine.
+        // With the training radius on or rows held, rows no step trained since the last refine stay raw and keep
+        // their floor through the refine instead, so a frozen splat does not get its floor folded in again at every
+        // refine.
         let refresh_floor = progress < MIN_SCALE_FREEZE_FRAC
             && self.config.min_scale_factor > 0.0
             && !self.view_cams.is_empty();
@@ -1131,14 +1181,15 @@ impl SplatTrainer {
             .bool_or(sh_diverged);
 
         let (prune_mask, num_evicted) = self
-            .add_evictions(iter, &splats, &refiner, prune_mask)
+            .add_evictions(iter, &splats, &refiner, prune_mask, held)
             .await;
         let life = self.evict.as_mut().and_then(|e| e.life.as_mut());
         let origin = self.origin.as_mut();
         let (mut splats, refiner, pruned_count) =
             prune_points(splats, &mut optim, refiner, life, origin, prune_mask).await;
         let num_dead = pruned_count.saturating_sub(num_evicted);
-        // With the training radius on, splats no step trained since the last refine neither densify nor decay.
+        // With the training radius on or rows held, splats no step trained since the last refine neither densify nor
+        // decay.
         let untrained = refiner.untrained();
         let mut split_inds = HashSet::new();
         // After an eviction, the freed room goes to newly observed cells only.
@@ -1715,6 +1766,10 @@ mod radius;
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "train_radius_tests.rs"]
 mod radius_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "train_freeze_tests.rs"]
+mod freeze_tests;
 
 #[cfg(test)]
 mod loss_weight_tests {

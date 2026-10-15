@@ -432,3 +432,26 @@ async fn record_rows_stay_aligned_through_pad_and_keep() {
         vec![vec![0.0], vec![2.0], vec![1.0]]
     );
 }
+
+/// Held rows ([`SplatTrainer::set_frozen_rows`]) are never eviction victims: the six least important splats are held,
+/// so the next six go, and refine drops the mask.
+#[tokio::test]
+async fn held_rows_are_never_evicted() {
+    let (mut trainer, s) = trainer_at_budget(0).await;
+    let imp = importance();
+    record_importance(&mut trainer, &imp);
+    let held: Vec<bool> = imp.iter().map(|&v| v < 6.0).collect();
+    let device = s.device().inner();
+    trainer.set_frozen_rows(Some(Tensor::from_data(TensorData::new(held, [N]), &device)));
+    trainer.note_seed_shortfall(1);
+    let (s, stats) = trainer.refine(1, s).await;
+    assert_eq!(stats.num_evicted, 6);
+    let life = trainer.evict.as_ref().unwrap().life.as_ref().unwrap();
+    let kept: Vec<f32> = rows(life.importance.clone().unsqueeze_dim::<2>(1))
+        .await
+        .concat();
+    let want: Vec<f32> = imp.iter().copied().filter(|&v| !(6.0..12.0).contains(&v)).collect();
+    assert_eq!(kept, want, "the held splats stay, the next six least important go");
+    assert_eq!(s.num_splats() as usize, N - 6);
+    assert!(trainer.frozen_rows.is_none());
+}
