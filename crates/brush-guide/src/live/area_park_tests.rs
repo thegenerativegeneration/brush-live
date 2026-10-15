@@ -41,6 +41,7 @@ async fn tiles_left_behind_park_and_stay_in_the_eval_model() {
     assert!(report.counters.parks >= 1 && report.summary.parked_splats > 0, "{report:?}");
     let c = report.counters;
     assert!(c.max_park_ms > 0.0 && c.park_ms >= c.max_park_ms && c.tile_bytes > 0, "{c:?}");
+    assert!(!report.parking_off);
     let resident = live.splats().unwrap().clone();
     let means: Vec<f32> = resident.means().into_data_async().await.unwrap().try_to_vec().unwrap();
     assert!(means.chunks(3).all(|p| p[0] > 10.0), "origin splats left the trainer, keyframe 1's stayed");
@@ -166,6 +167,7 @@ async fn a_tile_that_cannot_be_written_stays_resident() {
     train(&mut live, 10).await;
     let r = live.area_report().unwrap();
     assert_eq!((r.counters.parks, r.summary.parked_tiles), (0, 0), "{r:?}");
+    assert!(r.parking_off, "the eval record shows that parking is off");
     let means: Vec<f32> = live.splats().unwrap().means().into_data_async().await.unwrap().try_to_vec().unwrap();
     assert!(means.chunks(3).any(|p| p[0] < 10.0), "the origin rows were lost");
     std::fs::create_dir_all(dir.join("tiles")).unwrap();

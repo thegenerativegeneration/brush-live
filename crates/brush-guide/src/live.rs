@@ -18,10 +18,12 @@ use std::path::PathBuf;
 
 mod area;
 mod area_park;
+mod area_restore;
 mod draw;
 mod loaders;
 mod poses;
 mod seed;
+use area_restore::RestoreReason;
 use draw::{Draw, choose_draw, load_batch};
 pub use poses::{PoseUpdateStats, ViewPose};
 
@@ -236,7 +238,8 @@ impl LiveModel {
         self.iter
     }
 
-    /// Adds a view and seeds splats where the current model is transparent.
+    /// Adds a view and seeds splats where the current model is transparent. With area training, parked tiles within
+    /// the radius of its camera come back first, then those its seeds hit nearby (see `seed_from_mask`).
     /// Returns false if a keyframe with this id was already added.
     pub async fn add_keyframe(&mut self, mut kf: DecodedKeyframe) -> bool {
         if self.index.contains_key(&kf.id) {
@@ -277,7 +280,10 @@ impl LiveModel {
                 init
             }
             Some(current) => {
-                let new = self.seed_from_mask(current.clone(), &kf, size).await;
+                let pos = kf.camera.position;
+                let near = self.area.as_ref().map(|a| a.registry.parked_within_radius(pos)).unwrap_or_default();
+                let current = self.restore_tiles(current, &near, RestoreReason::Distance, pos).await;
+                let (current, new) = self.seed_from_mask(current, &kf, size).await;
                 let trainer = self
                     .trainer
                     .as_mut()
@@ -298,36 +304,43 @@ impl LiveModel {
         self.views.push(kf.view);
         self.last_id = Some(kf.id);
         self.refresh_area_views();
+        self.refresh_junction_views();
         self.rebuild_loaders();
         true
     }
 
-    /// One optimisation step on a batch drawn from the recent window (with
-    /// probability `recent_fraction`) or else from all training views (see [`choose_draw`]). No-op without views.
+    /// One optimisation step. While a junction refresh lasts, every other step draws one of its views; otherwise
+    /// the batch comes from the recent window (with probability `recent_fraction`) or else from all training views
+    /// (see [`choose_draw`]). No-op without views.
     pub async fn train_step(&mut self) {
         let pending = self.pending_views();
         let (Some(splats), Some(trainer)) = (self.splats.take(), self.trainer.as_mut()) else {
             return;
         };
-        let draw = choose_draw(
-            &mut self.rng,
-            self.config.recent_fraction,
-            self.recent_members.len(),
-            &pending,
-        );
+        let junction = self.area.as_mut().and_then(|a| a.junction.pick());
         let t_batch = web_time::Instant::now();
-        let batch = match draw {
-            Draw::Pending(i) => load_batch(&self.views[i]).await,
-            Draw::RecentLoader | Draw::AllLoader => {
-                let loader = if draw == Draw::RecentLoader {
-                    self.recent.as_mut()
-                } else {
-                    self.all.as_mut()
-                };
-                loader
-                    .expect("loaders exist once views exist")
-                    .next_batch()
-                    .await
+        let batch = if let Some(i) = junction {
+            load_batch(&self.views[i]).await
+        } else {
+            let draw = choose_draw(
+                &mut self.rng,
+                self.config.recent_fraction,
+                self.recent_members.len(),
+                &pending,
+            );
+            match draw {
+                Draw::Pending(i) => load_batch(&self.views[i]).await,
+                Draw::RecentLoader | Draw::AllLoader => {
+                    let loader = if draw == Draw::RecentLoader {
+                        self.recent.as_mut()
+                    } else {
+                        self.all.as_mut()
+                    };
+                    loader
+                        .expect("loaders exist once views exist")
+                        .next_batch()
+                        .await
+                }
             }
         };
         if self.profiling {

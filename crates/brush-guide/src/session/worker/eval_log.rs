@@ -118,12 +118,14 @@ mod tests {
             summary: crate::area::AreaSummary { resident_tiles: 3, ..Default::default() },
             counters: crate::area::AreaCounters { parks: 2, ..Default::default() },
             tiles: vec![[0, 0, 0]],
+            parking_off: true,
         });
         r.parked_load_ms = Some(4.5);
         let some = serde_json::to_value(&r).unwrap();
         assert_eq!((some["area"]["resident_tiles"].as_u64(), some["area"]["parks"].as_u64()), (Some(3), Some(2)));
         assert_eq!(some["area"]["tiles"][0][2].as_i64(), Some(0));
         assert_eq!(some["parked_load_ms"].as_f64(), Some(4.5));
+        assert_eq!(some["area"]["parking_off"].as_bool(), Some(true));
     }
 
     #[test]

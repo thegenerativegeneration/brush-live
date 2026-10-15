@@ -1,7 +1,10 @@
 //! Seeding: splats for a new keyframe where the current model is transparent, from its depth, mono depth and
-//! feature points, within the splat budget.
+//! feature points, within the splat budget. With area training, seeds that land in parked tiles bring nearby tiles
+//! back first or are dropped.
 
 use super::LiveModel;
+use super::area_restore::RestoreReason;
+use crate::area::TileKey;
 use crate::keyframe::DecodedKeyframe;
 use crate::mono::{MonoSeed, ScaleFit, mono_seed_for};
 use crate::seed::{SeedInput, Seeds, seed_points, stride_for};
@@ -11,6 +14,7 @@ use brush_serde::SplatData;
 use brush_train::{RandomSplatsConfig, create_random_splats, to_init_splats};
 use burn::tensor::s;
 use glam::{UVec2, Vec3};
+use std::collections::BTreeSet;
 
 impl LiveModel {
     /// Keeps a seeded random subset of `seeds` that fits under `max_splats`
@@ -112,16 +116,46 @@ impl LiveModel {
         splats.with_sh_degree(self.config.sh_degree)
     }
 
+    /// Seeds the keyframe where `splats` render transparent. With area training, parked tiles its seeds hit come
+    /// back first ([`Self::triage_parked`]), so the returned splats may hold restored rows; the new splats come
+    /// second, `None` with fewer than 3 seeds.
     pub(super) async fn seed_from_mask(
         &mut self,
         splats: Splats,
         kf: &DecodedKeyframe,
         size: UVec2,
-    ) -> Option<Splats> {
-        let current = splats.num_splats();
+    ) -> (Splats, Option<Splats>) {
+        let (mono, fit) = self.mono_input(kf, size);
+        let seeds = self.seeds_over(&splats, kf, size, mono).await;
+        log::debug!(
+            target: crate::timing::TARGET,
+            "keyframe {}: {} seeds (depth {}, mono {fit}, {} mono seeds) onto {} splats",
+            kf.id,
+            seeds.colors.len(),
+            kf.depth.is_some(),
+            seeds.mono,
+            splats.num_splats()
+        );
+        let (splats, seeds) = self.triage_parked(splats, seeds, kf, size, mono).await;
+        let seeds = self.cap_seeds(seeds, splats.num_splats());
+        let new = (seeds.colors.len() >= 3).then(|| {
+            self.seeds_to_splats(seeds.means, &seeds.colors)
+                .with_sh_degree(self.config.sh_degree)
+        });
+        (splats, new)
+    }
+
+    /// The keyframe's seeds where `splats` render transparent at a quarter of its size.
+    async fn seeds_over(
+        &self,
+        splats: &Splats,
+        kf: &DecodedKeyframe,
+        size: UVec2,
+        mono: Option<MonoSeed<'_>>,
+    ) -> Seeds {
         let small = (size / 4).max(UVec2::ONE);
         let (img, _) = render_splats(
-            splats,
+            splats.clone(),
             &kf.camera,
             small,
             Vec3::ZERO,
@@ -136,8 +170,7 @@ impl LiveModel {
             .expect("alpha readback")
             .try_to_vec::<f32>()
             .expect("f32 alpha");
-        let (mono, fit) = self.mono_input(kf, size);
-        let seeds = seed_points(&SeedInput {
+        seed_points(&SeedInput {
             camera: &kf.camera,
             alpha: &alpha,
             alpha_size: small,
@@ -147,20 +180,53 @@ impl LiveModel {
             stride: (self.seed_stride(size) / 4).max(1),
             alpha_threshold: self.config.seed_alpha_threshold,
             mono,
-        });
-        log::debug!(
-            target: crate::timing::TARGET,
-            "keyframe {}: {} seeds (depth {}, mono {fit}, {} mono seeds) onto {current} splats",
-            kf.id,
-            seeds.colors.len(),
-            kf.depth.is_some(),
-            seeds.mono
-        );
-        let seeds = self.cap_seeds(seeds, current);
-        (seeds.colors.len() >= 3).then(|| {
-            self.seeds_to_splats(seeds.means, &seeds.colors)
-                .with_sh_degree(self.config.sh_degree)
         })
+    }
+
+    /// With area training, sorts the keyframe's seeds against the parked tiles: tiles beyond the radius (the tiles
+    /// within it were already tried by distance) that at least `area_restore_min_seeds` seeds hit within the radius
+    /// plus `area_far_seed_m` come back ([`RestoreReason::Seeds`]), and when one did the keyframe seeds again over
+    /// them. Seeds that still land in a parked tile are dropped. Without area training the seeds pass unchanged.
+    async fn triage_parked(
+        &mut self,
+        splats: Splats,
+        seeds: Seeds,
+        kf: &DecodedKeyframe,
+        size: UVec2,
+        mono: Option<MonoSeed<'_>>,
+    ) -> (Splats, Seeds) {
+        let Some(area) = self.area.as_ref() else {
+            return (splats, seeds);
+        };
+        let pos = kf.camera.position;
+        let min_seeds = self.config.area_restore_min_seeds as usize;
+        let mut triage = area.registry.triage_seeds(&seeds.means, pos, min_seeds);
+        let tried: BTreeSet<TileKey> = area.registry.parked_within_radius(pos).into_iter().collect();
+        triage.restore.retain(|k| !tried.contains(k));
+        let restores = area.counters.restores;
+        let (splats, seeds) = if triage.restore.is_empty() {
+            (splats, seeds)
+        } else {
+            let splats = self.restore_tiles(splats, &triage.restore, RestoreReason::Seeds, pos).await;
+            let area = self.area.as_ref().expect("area training is on");
+            if area.counters.restores == restores {
+                (splats, seeds)
+            } else {
+                let second = self.seeds_over(&splats, kf, size, mono).await;
+                let counts = (seeds.colors.len() as u32, second.colors.len() as u32);
+                log::info!("area: reseed {} -> {} seeds", counts.0, counts.1);
+                let area = self.area.as_mut().expect("area training is on");
+                area.last_reseed = Some(counts);
+                triage = area.registry.triage_seeds(&second.means, pos, usize::MAX);
+                (splats, second)
+            }
+        };
+        let kept = keep_seeds(seeds, &triage.keep);
+        let dropped = triage.keep.len() - kept.colors.len();
+        if dropped > 0 {
+            log::info!("area: dropped {dropped} seeds in parked tiles");
+        }
+        (splats, kept)
     }
 
     fn seeds_to_splats(&self, means: Vec<f32>, colors: &[Vec3]) -> Splats {
@@ -177,4 +243,18 @@ impl LiveModel {
         };
         to_init_splats(data, SplatRenderMode::Default, &self.device.clone().inner())
     }
+}
+
+/// The seeds `keep` flags; the mono count is clamped to what is left, since which seeds came from mono depth is not
+/// recorded.
+fn keep_seeds(seeds: Seeds, keep: &[bool]) -> Seeds {
+    let means: Vec<f32> = seeds
+        .means
+        .chunks_exact(3)
+        .zip(keep)
+        .filter(|(_, k)| **k)
+        .flat_map(|(m, _)| m.iter().copied())
+        .collect();
+    let colors: Vec<Vec3> = seeds.colors.iter().zip(keep).filter(|(_, k)| **k).map(|(c, _)| *c).collect();
+    Seeds { mono: seeds.mono.min(colors.len()), means, colors }
 }

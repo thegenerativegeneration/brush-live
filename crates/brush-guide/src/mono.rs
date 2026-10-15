@@ -232,6 +232,7 @@ pub const MONO_MAX_DEPTH_M: f32 = 100.0;
 
 /// Mono depth ready for seeding: the map, its fitted scale and the nearest
 /// depth it may seed.
+#[derive(Clone, Copy)]
 pub struct MonoSeed<'a> {
     pub depth: &'a DepthMap,
     pub scale: f32,

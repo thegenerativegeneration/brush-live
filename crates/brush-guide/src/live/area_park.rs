@@ -4,6 +4,7 @@
 //! until they are restored.
 
 use super::LiveModel;
+use super::area_restore::RestoreReason;
 use crate::area::{ParkedTile, SlotPose, TileKey, apply_moves, group_rows, read_tile, rows_in, slot_moves, write_tile};
 use brush_render::gaussian_splats::Splats;
 use brush_train::rows::SplatRows;
@@ -59,14 +60,21 @@ impl LiveModel {
         }
     }
 
-    /// Parks the tiles [`crate::area::TileRegistry::to_park`] names: their rows leave the trainer and go to one tile
-    /// file each, with the pose of every view that seeded them. A park that would take every resident row is
-    /// skipped (counted). The rows of a tile whose file cannot be written go back to the trainer (with zero Adam
-    /// moments) and parking stays off until the next reset. Each park logs one line per tile and one for the whole
-    /// event, whose time includes the row readback. After a park the all-views loader drops views that left the area.
+    /// After a refine: restores the parked tiles that resident rows drifted into ([`RestoreReason::Rows`]), then parks
+    /// the tiles [`crate::area::TileRegistry::to_park`] names ([`Self::park_tiles`]). No-op without area training or
+    /// views; with parking off only the restore runs.
     pub(super) async fn park_after_refine(&mut self, splats: Splats) -> Splats {
         let Some(centre) = self.view_cams.last().map(|(p, _)| *p) else {
             return splats;
+        };
+        let Some(area) = self.area.as_mut() else {
+            return splats;
+        };
+        let conflicts = area.conflicts.clone();
+        let splats = if conflicts.is_empty() {
+            splats
+        } else {
+            self.restore_tiles(splats, &conflicts, RestoreReason::Rows, centre).await
         };
         let Some(area) = self.area.as_mut().filter(|a| !a.parking_off) else {
             return splats;
@@ -76,6 +84,18 @@ impl LiveModel {
             area.skipping = false;
             return splats;
         }
+        self.park_tiles(splats, &keys).await
+    }
+
+    /// Parks the resident tiles `keys`: their rows leave the trainer and go to one tile file each, with the pose of
+    /// every view that seeded them. A park that would take every resident row is skipped (counted). The rows of a
+    /// tile whose file cannot be written go back to the trainer (with zero Adam moments) and parking stays off until
+    /// the next reset. Each park logs one line per tile and one for the whole event, whose time includes the row
+    /// readback. After a park the all-views loader drops views that left the area. No-op with parking off.
+    pub(super) async fn park_tiles(&mut self, splats: Splats, keys: &[TileKey]) -> Splats {
+        let Some(area) = self.area.as_mut().filter(|a| !a.parking_off && !keys.is_empty()) else {
+            return splats;
+        };
         let t = web_time::Instant::now();
         let tile_size = area.registry.params().tile_size;
         let means: Vec<f32> = splats
@@ -86,7 +106,7 @@ impl LiveModel {
             .convert::<f32>()
             .try_into_vec()
             .expect("f32 means");
-        let take = rows_in(&keys, &means, tile_size);
+        let take = rows_in(keys, &means, tile_size);
         let taken = take.iter().filter(|&&t| t).count();
         let skip = taken == take.len() && taken > 0;
         if skip {

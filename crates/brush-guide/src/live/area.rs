@@ -1,6 +1,6 @@
 //! Area training in the live model: only views whose camera lies within `area_radius_m` (horizontally) of the
-//! newest keyframe's camera train; tiles the capture has left are parked on disk ([`super::area_park`]) and the eval
-//! model loads them back.
+//! newest keyframe's camera train; tiles the capture has left are parked on disk ([`super::area_park`]), come back
+//! when it returns ([`super::area_restore`]), and the eval model loads them back.
 
 use super::LiveModel;
 use crate::area::{AreaCounters, AreaParams, AreaReport, TileKey, TileRegistry, area_views};
@@ -14,9 +14,9 @@ use std::path::PathBuf;
 pub(crate) struct AreaState {
     pub(super) registry: TileRegistry,
     /// Views within the radius of the newest view, ascending; refreshed on every keyframe and pose update.
-    views: Vec<usize>,
+    pub(super) views: Vec<usize>,
     pub(super) counters: AreaCounters,
-    /// Parked tiles that resident rows lay in at the last visibility readback (restored from Task 10 on).
+    /// Parked tiles that resident rows lay in at the last visibility readback; the refine's park step restores them.
     pub(super) conflicts: Vec<TileKey>,
     /// File size of every parked tile.
     pub(super) file_bytes: BTreeMap<TileKey, u64>,
@@ -24,6 +24,44 @@ pub(crate) struct AreaState {
     pub(super) skipping: bool,
     /// A tile file could not be written: no parking until the next reset.
     pub(super) parking_off: bool,
+    /// Training on the views that see tiles just restored.
+    pub(super) junction: Junction,
+    /// Seed counts of the last keyframe that seeded again after restoring tiles its seeds hit: (before, after).
+    pub(super) last_reseed: Option<(u32, u32)>,
+}
+
+/// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
+/// views that see a restored tile's box, so the restored tiles and the live area train together at their seam.
+#[derive(Debug, Default)]
+pub(super) struct Junction {
+    /// Bounding boxes (min, max) of the restored rows the junction blends in.
+    pub(super) boxes: Vec<(Vec3, Vec3)>,
+    /// Views that see one of `boxes`, ascending.
+    pub(super) views: Vec<usize>,
+    pub(super) steps_left: u32,
+    /// Whether the last call drew a junction view.
+    pub(super) flip: bool,
+}
+
+impl Junction {
+    /// Counts one training step while the junction lasts and returns the view it draws: every other step one of
+    /// `views` in turn, `None` on the steps between, without views, or once the junction is over. The step that ends
+    /// the junction clears `boxes` and `views`.
+    pub(super) fn pick(&mut self) -> Option<usize> {
+        if self.steps_left == 0 {
+            return None;
+        }
+        self.steps_left -= 1;
+        self.flip = !self.flip;
+        let pick = (self.flip && !self.views.is_empty())
+            .then(|| self.views[(self.steps_left / 2) as usize % self.views.len()]);
+        if self.steps_left == 0 {
+            self.boxes.clear();
+            self.views.clear();
+            self.flip = false;
+        }
+        pick
+    }
 }
 
 impl AreaState {
@@ -36,6 +74,8 @@ impl AreaState {
             file_bytes: BTreeMap::new(),
             skipping: false,
             parking_off: false,
+            junction: Junction::default(),
+            last_reseed: None,
         }
     }
 }
@@ -113,7 +153,19 @@ impl LiveModel {
             summary: area.registry.summary(centre),
             counters: area.counters,
             tiles: area.registry.tile_states(centre),
+            parking_off: area.parking_off,
         })
+    }
+
+    /// Junction steps still to come after the last restore; 0 with area training off.
+    pub fn junction_steps_left(&self) -> u32 {
+        self.area.as_ref().map_or(0, |a| a.junction.steps_left)
+    }
+
+    /// The seed counts (before, after) of the last keyframe that seeded again once the tiles its seeds hit were
+    /// restored; `None` before any such keyframe or with area training off.
+    pub fn last_reseed(&self) -> Option<(u32, u32)> {
+        self.area.as_ref()?.last_reseed
     }
 
     /// The splats a held-out eval renders: the trainer's, and with parked tiles the full model, the resident splats

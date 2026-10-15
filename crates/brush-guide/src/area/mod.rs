@@ -32,7 +32,9 @@ pub struct AreaCounters {
     pub park_ms: f64,
     /// The longest single park (one refine's parked tiles together).
     pub max_park_ms: f64,
+    /// Milliseconds spent restoring (file reads, room made by parking, row appends), in total.
     pub restore_ms: f64,
+    /// The longest single restore event (one call's tiles together, room made by parking included).
     pub max_restore_ms: f64,
     /// Bytes of the tile files on disk.
     pub tile_bytes: u64,
@@ -47,4 +49,6 @@ pub struct AreaReport {
     pub counters: AreaCounters,
     /// `[x, z, state]` per tile ([`TileRegistry::tile_states`]).
     pub tiles: Vec<[i32; 3]>,
+    /// A tile file could not be written, so nothing parks until the session resets.
+    pub parking_off: bool,
 }

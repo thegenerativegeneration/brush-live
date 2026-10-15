@@ -299,3 +299,17 @@ async fn enable_area_wipes_stale_tiles_and_reset_wipes_again() {
     assert_eq!(std::fs::read_dir(&tiles).unwrap().count(), 0);
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// A junction draws on every other call until its steps run out, cycling through its views, and then forgets its
+/// boxes and views.
+#[test]
+fn a_junction_draws_every_other_step_and_clears_when_done() {
+    let mut j = Junction { boxes: vec![(Vec3::ZERO, Vec3::ONE)], views: vec![3, 7], steps_left: 4, flip: false };
+    let picks: Vec<Option<usize>> = (0..6).map(|_| j.pick()).collect();
+    let mut drawn: Vec<usize> = picks.iter().flatten().copied().collect();
+    drawn.sort_unstable();
+    assert_eq!(drawn, vec![3, 7], "{picks:?}");
+    assert!(picks[0].is_some() && picks[1].is_none() && picks[4..].iter().all(Option::is_none), "{picks:?}");
+    assert_eq!(j.steps_left, 0);
+    assert!(j.boxes.is_empty() && j.views.is_empty());
+}
