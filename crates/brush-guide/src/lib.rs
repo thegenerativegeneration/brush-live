@@ -6,6 +6,7 @@ pub mod config;
 pub mod keyframe;
 pub mod live;
 pub mod mono;
+mod pose_eq;
 pub mod protocol;
 pub mod schedule;
 pub mod seed;

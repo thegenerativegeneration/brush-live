@@ -82,14 +82,27 @@ fn normalised(q: &[f32]) -> [f32; 4] {
     [q[0] * s, q[1] * s, q[2] * s, q[3] * s]
 }
 
-/// The file bytes of `t`. Panics when `t.rows` fails [`SplatRows::check`], has more than `u32::MAX` rows, or names
-/// slot `u32::MAX` as an origin: none of these can be written in this layout.
+/// `Err` when `rows` cannot be written in this layout: they fail [`SplatRows::check`], hold more than `u32::MAX`
+/// rows, or name slot `u32::MAX` (which has no tag) as an origin.
+fn writable(rows: &SplatRows) -> Result<(), String> {
+    rows.check()?;
+    if u32::try_from(rows.len()).is_err() {
+        return Err(format!("{} rows do not fit a tile file", rows.len()));
+    }
+    if rows.origin.contains(&Some(u32::MAX)) {
+        return Err("origin slot u32::MAX has no tag".to_owned());
+    }
+    Ok(())
+}
+
+/// The file bytes of `t`. Panics when `t.rows` cannot be written in this layout (see [`write_tile`], which returns
+/// an error instead).
 pub fn encode_tile(t: &ParkedTile) -> Vec<u8> {
     let r = &t.rows;
-    if let Err(e) = r.check() {
+    if let Err(e) = writable(r) {
         panic!("encode_tile: {e}");
     }
-    let n = u32::try_from(r.len()).expect("a tile holds at most u32::MAX rows");
+    let n = r.len() as u32;
     let floor = !r.min_scale.is_empty();
     // Header, poses, then per row: means, rotations, log-scales, opacity, floor, origin, age, importance; and SH.
     let row_bytes = 12 + 8 + 6 + 2 + 2 + 4 + 4 + 4;
@@ -120,9 +133,7 @@ pub fn encode_tile(t: &ParkedTile) -> Vec<u8> {
     put_f16s(&mut out, r.sh_coeffs.iter().copied());
     put_f16s(&mut out, r.min_scale.iter().copied());
     for o in &r.origin {
-        let tag = o.map_or(0, |s| {
-            s.checked_add(1).expect("origin slot u32::MAX has no tag")
-        });
+        let tag = o.map_or(0, |s| s + 1);
         put_u32(&mut out, tag);
     }
     put_f32s(&mut out, &r.age);
@@ -291,12 +302,16 @@ pub fn decode_tile(bytes: &[u8]) -> io::Result<ParkedTile> {
 }
 
 /// Writes `t` to [`tile_path`] through a temporary file and a rename, so a reader never sees a half-written tile.
-/// Returns the file's size in bytes. The file is not synced: a tile only has to outlive the session that parked it.
+/// Returns the file's size in bytes. `InvalidInput` for rows this layout cannot hold (nothing is written); on any
+/// other failure the temporary file is removed. The file is not synced: a tile only has to outlive the session
+/// that parked it.
 pub fn write_tile(dir: &Path, t: &ParkedTile) -> io::Result<u64> {
+    writable(&t.rows).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let bytes = encode_tile(t);
     let tmp = temp_path(dir, t.key);
-    std::fs::write(&tmp, &bytes)?;
-    if let Err(e) = std::fs::rename(&tmp, tile_path(dir, t.key)) {
+    let written =
+        std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, tile_path(dir, t.key)));
+    if let Err(e) = written {
         std::fs::remove_file(&tmp).ok();
         return Err(e);
     }

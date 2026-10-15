@@ -5,7 +5,6 @@
 //! compose, so several corrections while parked land where resident splats landed, each applied once.
 
 use super::park_file::SlotPose;
-use crate::live::same_pose;
 use brush_train::rows::SplatRows;
 use glam::{Affine3A, Quat, Vec3};
 use std::collections::HashMap;
@@ -13,13 +12,15 @@ use std::collections::HashMap;
 /// A camera pose: position and rotation, as `Camera::local_to_world` reads them.
 pub type CameraPose = (Vec3, Quat);
 
-/// The share of a tile's rows a view group needs before [`move_spread`] counts it (user decision D1).
+/// The share of a tile's rows [`move_spread`] may leave out: its smallest view groups, together at most this share,
+/// do not decide (user decision D1).
 pub const MIN_SLOT_SHARE: f32 = 0.05;
 
 /// Per recorded slot with a current pose: the world transform taking the camera at park time onto the current
 /// camera, as `LiveModel::update_poses` builds for resident splats (`new.local_to_world() * old.world_to_local()`).
-/// A slot whose current pose is still its recorded one, within the tolerance `update_poses` skips a resent pose
-/// by, yields no move, so its rows come back bit for bit.
+/// A slot whose current pose equals its recorded one exactly yields no move, so its rows come back bit for bit:
+/// `update_poses` stores a received pose exactly and leaves the camera untouched for a resent one, so any
+/// difference, however small, is a correction the resident splats followed.
 pub fn slot_moves(
     recorded: &[SlotPose],
     current: &dyn Fn(u32) -> Option<CameraPose>,
@@ -28,7 +29,7 @@ pub fn slot_moves(
         .iter()
         .filter_map(|r| {
             let (p, q) = current(r.slot)?;
-            if same_pose((r.position, r.rotation), (p, q)) {
+            if (p, q) == (r.position, r.rotation) {
                 return None;
             }
             let old = Affine3A::from_rotation_translation(r.rotation, r.position);
@@ -51,9 +52,11 @@ fn parts(moves: &[(u32, Affine3A)]) -> HashMap<u32, (Quat, Vec3)> {
         .collect()
 }
 
-/// How far apart the tile's views carry it (user decision D1): the tile's centroid moved by each view group that
-/// holds at least [`MIN_SLOT_SHARE`] of the rows, rows without an origin or whose slot has no move counting as one
-/// unmoved group; the largest distance between two moved centroids; 0 with fewer than two groups.
+/// How far apart the tile's views carry it (user decision D1): the tile's centroid moved by each view group (one per
+/// moved slot; rows without an origin or whose slot has no move form one unmoved group), the largest distance
+/// between two moved centroids, 0 with fewer than two groups. The smallest groups are left out while together they
+/// hold at most [`MIN_SLOT_SHARE`] of the rows, so a few stray rows do not decide but many small groups that
+/// disagree still do.
 pub fn move_spread(rows: &SplatRows, moves: &[(u32, Affine3A)]) -> f32 {
     let n = rows.len();
     if n == 0 {
@@ -68,11 +71,20 @@ pub fn move_spread(rows: &SplatRows, moves: &[(u32, Affine3A)]) -> f32 {
             .entry(o.filter(|s| parts.contains_key(s)))
             .or_default() += 1;
     }
-    let min_rows = MIN_SLOT_SHARE * n as f32;
-    let centres: Vec<Vec3> = counts
-        .into_iter()
-        .filter(|&(_, count)| count as f32 >= min_rows)
-        .map(|(slot, _)| match slot.and_then(|s| parts.get(&s)) {
+    let mut groups: Vec<(usize, Option<u32>)> =
+        counts.into_iter().map(|(slot, c)| (c, slot)).collect();
+    groups.sort_unstable();
+    let may_drop = MIN_SLOT_SHARE * n as f32;
+    let mut dropped = 0usize;
+    let kept = groups.iter().skip_while(|&&(count, _)| {
+        let drop = (dropped + count) as f32 <= may_drop;
+        if drop {
+            dropped += count;
+        }
+        drop
+    });
+    let centres: Vec<Vec3> = kept
+        .map(|&(_, slot)| match slot.and_then(|s| parts.get(&s)) {
             Some(&(q, t)) => q * centroid + t,
             None => centroid,
         })

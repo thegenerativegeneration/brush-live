@@ -239,3 +239,30 @@ fn a_file_holding_another_tile_is_an_error() {
     );
     std::fs::remove_dir_all(dir).ok();
 }
+
+/// Rows whose columns do not fit their row count are refused before anything is written.
+#[test]
+fn writing_inconsistent_rows_is_an_invalid_input_error() {
+    let dir = scratch("invalid");
+    let mut r = rows(4, Vec3::ZERO);
+    r.age.pop();
+    let err = write_tile(&dir, &tile(r)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        std::fs::read_dir(&dir).unwrap().count(),
+        0,
+        "nothing written"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A failed rename (the tile path is taken by a directory) leaves no temporary file behind.
+#[test]
+fn a_failed_write_leaves_no_temporary_file() {
+    let dir = scratch("failed-rename");
+    let t = tile(rows(4, Vec3::ZERO));
+    std::fs::create_dir_all(tile_path(&dir, t.key).join("blocker")).unwrap();
+    assert!(write_tile(&dir, &t).is_err());
+    assert!(!dir.join("-3_12.bin.tmp").exists());
+    std::fs::remove_dir_all(dir).ok();
+}
