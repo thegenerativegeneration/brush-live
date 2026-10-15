@@ -198,13 +198,13 @@ fn load_mono_rejects_out_of_range_sides() {
 #[test]
 fn keyframe_payload_puts_the_mono_block_last_and_leaves_frames_without_it_unchanged() {
     let points = [glam::Vec3::new(0.1, 0.2, 0.3)];
-    let plain = super::keyframe_payload(b"jpg".to_vec(), None, &points, None);
+    let plain = crate::prepare::keyframe_payload(b"jpg".to_vec(), None, &points, None);
     let mut expected = b"jpg".to_vec();
     for v in [0.1f32, 0.2, 0.3] {
         expected.extend_from_slice(&v.to_le_bytes());
     }
     assert_eq!(plain, expected);
-    let with = super::keyframe_payload(b"jpg".to_vec(), None, &points, Some(&[9, 8]));
+    let with = crate::prepare::keyframe_payload(b"jpg".to_vec(), None, &points, Some(&[9, 8]));
     assert_eq!(&with[..plain.len()], &plain[..]);
     assert_eq!(&with[plain.len()..], &[9, 8]);
 }
@@ -296,7 +296,7 @@ fn live_capture_keeps_feature_points_on_the_live_poses() {
     };
     let live_header = header(capture.poses[0]);
     assert_eq!(
-        super::visible_points(&live_header, &capture.points, 10).unwrap(),
+        crate::prepare::visible_points(&live_header, &capture.points, 10).unwrap(),
         vec![surface]
     );
     let size = glam::UVec2::new(live_header.width, live_header.height);
@@ -321,7 +321,10 @@ fn live_capture_keeps_feature_points_on_the_live_poses() {
 fn send_order_walks_back_without_the_last_frame_and_skips_forward_held_frames() {
     use crate::order::send_order;
     let none = HashSet::new();
-    assert_eq!(send_order(3, 1, false, None, &none), vec![(0, 0), (1, 1), (2, 2)]);
+    assert_eq!(
+        send_order(3, 1, false, None, &none),
+        vec![(0, 0), (1, 1), (2, 2)]
+    );
     assert_eq!(
         send_order(5, 1, true, None, &none),
         vec![
@@ -361,7 +364,17 @@ fn dropped_frames_are_never_sent_and_held_frames_follow_the_send_count() {
     // holdout_every 2), so the walk back leaves them out along with the dropped ones.
     assert_eq!(
         order,
-        vec![(0, 0), (1, 1), (4, 4), (5, 5), (6, 6), (7, 7), (8, 6), (10, 4), (14, 0)]
+        vec![
+            (0, 0),
+            (1, 1),
+            (4, 4),
+            (5, 5),
+            (6, 6),
+            (7, 7),
+            (8, 6),
+            (10, 4),
+            (14, 0)
+        ]
     );
 }
 

@@ -145,6 +145,8 @@ pub struct GuideSession {
     scores: watch::Receiver<Option<Arc<ScoreSetMsg>>>,
     status: watch::Receiver<StatusMsg>,
     preview: watch::Receiver<Option<Arc<PreviewSnapshot>>>,
+    /// [`GuideConfig::status_every_step`]: [`forward_frames`] sends status on every change, not once a second.
+    status_every_step: bool,
     /// The worker runs pinned to this actor's thread: GPU streams are keyed on
     /// the OS thread, so the worker must not migrate between tokio workers.
     _actor: Actor,
@@ -166,6 +168,7 @@ impl GuideSession {
         ready: Option<watch::Receiver<bool>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(64);
+        let status_every_step = config.status_every_step;
         let (scores_tx, scores) = watch::channel(None);
         let (status_tx, status) = watch::channel(StatusMsg::default());
         let (preview_tx, preview) = watch::channel(None);
@@ -183,6 +186,7 @@ impl GuideSession {
             scores,
             status,
             preview,
+            status_every_step,
             _actor: actor,
         }
     }
@@ -260,6 +264,11 @@ impl GuideSession {
 
     pub fn status(&self) -> watch::Receiver<StatusMsg> {
         self.status.clone()
+    }
+
+    /// Whether status goes out after every training step ([`GuideConfig::status_every_step`]).
+    pub fn status_every_step(&self) -> bool {
+        self.status_every_step
     }
 
     /// Newest preview snapshot; `None` until the first one.

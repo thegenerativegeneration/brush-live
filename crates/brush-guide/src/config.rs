@@ -33,6 +33,9 @@ pub struct GuideConfig {
     /// Training iterations per second at most (0: uncapped). The worker sleeps
     /// between steps, which saves power on the phone.
     pub max_iters_per_s: f32,
+    /// Send a status frame after every training step, not only once a second, so a client sees `train_iters`
+    /// within a step (lockstep replays send the next keyframe on it). Off on the phone.
+    pub status_every_step: bool,
     /// Long side of the keyframes the client sends, in pixels. Sizes the
     /// warm-up so GPU autotuning covers the session's image size.
     pub keyframe_long_side: u32,
@@ -173,6 +176,7 @@ impl Default for GuideConfig {
             all_loader_rebuild_every: 10,
             loader_cache_bytes: 1 << 30,
             max_iters_per_s: 0.0,
+            status_every_step: false,
             keyframe_long_side: 960,
             score_budget: 0.25,
             min_score_interval_s: 2.0,

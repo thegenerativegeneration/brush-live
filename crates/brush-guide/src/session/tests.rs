@@ -19,6 +19,7 @@ async fn is_alive_reflects_worker_channel() {
         scores,
         status,
         preview,
+        status_every_step: false,
         _actor: Actor::new("test"),
     };
     assert!(session.is_alive());

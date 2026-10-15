@@ -251,3 +251,76 @@ async fn poses_are_applied_silently_and_bad_ones_rejected() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// Train iterations of the next `n` status frames that report training, with when each arrived after `start`.
+async fn training_status<S>(
+    ws: &mut S,
+    n: usize,
+    start: tokio::time::Instant,
+) -> Vec<(u64, Duration)>
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let mut out = Vec::new();
+    while out.len() < n {
+        if let ServerHeader::Status { train_iters, .. } = next_header(ws).await
+            && train_iters > 0
+        {
+            out.push((train_iters, start.elapsed()));
+        }
+    }
+    out
+}
+
+/// With `status_every_step` a status frame follows every training step (lockstep replays gate on its
+/// `train_iters`); without it status stays at one frame a second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_every_step_pushes_the_step_count_promptly() {
+    let device =
+        burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
+    let root = std::env::temp_dir().join(format!("brush-guide-ws-steps-{}", std::process::id()));
+    for every_step in [true, false] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = GuideConfig {
+            status_every_step: every_step,
+            ..GuideConfig::default()
+        };
+        tokio::spawn(brush_guide_server::server::serve(
+            listener,
+            config,
+            device.clone(),
+            root.clone(),
+        ));
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        ws.send(hello(if every_step { "steps-on" } else { "steps-off" }))
+            .await
+            .unwrap();
+        ws.send(Message::binary(keyframe(0, Vec3::new(0.0, 0.0, 2.0))))
+            .await
+            .unwrap();
+        let start = tokio::time::Instant::now();
+        let got = training_status(&mut ws, 4, start).await;
+        let iters: Vec<u64> = got.iter().map(|(i, _)| *i).collect();
+        assert!(iters.windows(2).all(|w| w[0] <= w[1]), "{iters:?}");
+        let span = got[3].1 - got[0].1;
+        if every_step {
+            assert!(
+                span < Duration::from_millis(900),
+                "4 frames over {span:?}: {got:?}"
+            );
+            assert!(
+                iters[3] - iters[0] <= 6,
+                "one frame per step or so: {iters:?}"
+            );
+        } else {
+            assert!(
+                span >= Duration::from_millis(2500),
+                "4 frames over {span:?}: {got:?}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).ok();
+}

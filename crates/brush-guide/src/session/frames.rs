@@ -1,5 +1,6 @@
 //! The frames a session sends to its client, in the order the server sends
-//! them: each score set, and a status frame once a second.
+//! them: each score set, and a status frame once a second (after every
+//! training step with `status_every_step`).
 
 use super::GuideSession;
 use std::future::Future;
@@ -13,10 +14,16 @@ where
     Fut: Future<Output = bool>,
 {
     let mut scores = session.scores();
-    let status = session.status();
+    let mut status = session.status();
+    let every_step = session.status_every_step();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
+            changed = status.changed(), if every_step => {
+                if changed.is_err() { break; }
+                let frame = status.borrow_and_update().to_frame();
+                if !send(frame).await { break; }
+            }
             changed = scores.changed() => {
                 if changed.is_err() { break; }
                 let frame = scores.borrow_and_update().as_ref().map(|s| s.to_frame());

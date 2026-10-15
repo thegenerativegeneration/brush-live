@@ -654,10 +654,12 @@ fn voxel_cadence(config: &GuideConfig) -> Cadence {
     Cadence::new(config.score_budget, config.min_score_interval_s)
 }
 
+/// Keyframe, splat and step counts into the status; the rate and times stay at their last once-a-second value.
 fn publish_counts(status_tx: &watch::Sender<StatusMsg>, live: &LiveModel) {
     status_tx.send_modify(|s| {
         s.num_keyframes = live.views().len() as u32;
         s.num_splats = live.splats().map_or(0, |s| s.num_splats());
+        s.train_iters = u64::from(live.iter());
     });
 }
 

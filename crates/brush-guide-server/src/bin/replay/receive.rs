@@ -25,7 +25,15 @@ pub(crate) struct Receiver {
     /// The newest score set `dump_every_s` skipped, written at `splat` so the
     /// dump ends with the set the server published before it.
     pub(crate) skipped: Option<(u64, f32, Vec<Cell>)>,
+    /// Gets each status frame's `train_iters` (lockstep replays send on it).
+    pub(crate) steps: Option<tokio::sync::watch::Sender<u64>>,
+    /// When the last `status:` line went to stderr; a server with `status_every_step` sends status after every
+    /// step, and the log keeps about one line a second.
+    pub(crate) last_status_print: Option<std::time::Instant>,
 }
+
+/// Least time between two `status:` lines on stderr.
+const STATUS_PRINT_EVERY: std::time::Duration = std::time::Duration::from_millis(900);
 
 impl Receiver {
     /// Handles binary frames until the connection ends, or until `LINGER`
@@ -64,10 +72,7 @@ impl Receiver {
         let Ok((header, payload)) = decode_frame::<ServerHeader>(bytes) else {
             return false;
         };
-        if matches!(
-            header,
-            ServerHeader::ScoreSet { .. } | ServerHeader::Status { .. }
-        ) {
+        if matches!(header, ServerHeader::ScoreSet { .. }) {
             eprint!("[{:8.2} s] ", self.started.elapsed().as_secs_f64());
         }
         match header {
@@ -84,10 +89,22 @@ impl Receiver {
                 last_score_ms,
                 adam_clamped,
                 sh_pruned,
+                train_iters,
                 ..
             } => {
+                if let Some(steps) = &self.steps {
+                    steps.send_replace(train_iters);
+                }
+                if self
+                    .last_status_print
+                    .is_some_and(|t| t.elapsed() < STATUS_PRINT_EVERY)
+                {
+                    return false;
+                }
+                self.last_status_print = Some(std::time::Instant::now());
                 eprintln!(
-                    "status: {num_keyframes} keyframes, {num_splats} splats, {train_iters_per_s:.1} it/s, score {last_score_ms} ms, adam clamped {adam_clamped}, sh pruned {sh_pruned}"
+                    "[{:8.2} s] status: {num_keyframes} keyframes, {num_splats} splats, {train_iters_per_s:.1} it/s, score {last_score_ms} ms, adam clamped {adam_clamped}, sh pruned {sh_pruned}, {train_iters} steps",
+                    self.started.elapsed().as_secs_f64()
                 );
                 log_status(&self.rec, num_splats, train_iters_per_s, last_score_ms);
             }

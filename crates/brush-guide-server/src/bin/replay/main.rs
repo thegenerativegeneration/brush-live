@@ -5,25 +5,32 @@ mod correct;
 mod dataset;
 mod dump;
 mod order;
+mod pace;
+mod prepare;
 mod receive;
 #[cfg(test)]
 mod tests;
 mod viz;
 
-use brush_guide::protocol::{ClientHeader, KeyframeHeader, encode_frame};
-use brush_guide::seed::project;
+use brush_guide::protocol::{ClientHeader, encode_frame};
 use clap::Parser;
-use dataset::{
-    Depth, DepthMode, Frame, MonoMode, Transforms, feature_points, load_depth, load_mono,
-};
+use dataset::{DepthMode, MonoMode, Transforms, feature_points};
 use dump::ScoreDump;
 use futures_util::{Sink, SinkExt, StreamExt};
-use glam::{Mat4, UVec2, Vec3};
+use glam::Mat4;
+use pace::{Lockstep, Pace, Paced};
+use prepare::{PrepOptions, Source, spawn_prepare};
 use receive::Receiver;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 use viz::{AGREEMENT_LEGEND, Mode};
+
+/// Keyframes prepared ahead of the one waiting to go out.
+const PREPARE_AHEAD: usize = 4;
+/// A lockstep replay gives up when the server's step count stands still this long.
+const LOCKSTEP_STALL: Duration = Duration::from_secs(300);
 
 #[derive(Parser)]
 struct Args {
@@ -96,6 +103,22 @@ struct Args {
     /// comma-separated or repeated. The other frames keep their ids.
     #[arg(long, value_delimiter = ',', value_parser = order::parse_frame_range)]
     drop_frames: Vec<std::ops::RangeInclusive<usize>>,
+    /// Lockstep: send the k-th keyframe (0-based, in send order) only once the server has trained round(k · K)
+    /// steps, K = this value, instead of on the --rate schedule. The steps per keyframe then no longer depend on
+    /// how fast the machine trains. The server must run with `status_every_step` (status after every step).
+    #[arg(long, value_parser = positive_f32)]
+    steps_per_keyframe: Option<f32>,
+    /// With --steps-per-keyframe: send `finish` once the server has trained this many steps beyond the last
+    /// keyframe's target plus K (n · K + N for n keyframes), wait for the server's `splat` reply and exit.
+    #[arg(long, requires = "steps_per_keyframe", conflicts_with_all = ["tail", "finish_after"])]
+    tail_steps: Option<u64>,
+}
+
+fn positive_f32(s: &str) -> Result<f32, String> {
+    match s.parse::<f32>() {
+        Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
+        _ => Err(format!("{s}: expected a number above 0")),
+    }
 }
 
 #[tokio::main]
@@ -141,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
             &rerun::TextDocument::from_markdown(AGREEMENT_LEGEND),
         )?;
     }
+    let (steps_tx, steps_rx) = tokio::sync::watch::channel(0u64);
     let receiver = Receiver {
         rec: rec.clone(),
         mode: args.mode,
@@ -149,31 +173,52 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .map(|p| ScoreDump::open(p, started.into_std()))
             .transpose()?,
-        stop_on_splat: args.finish_after.is_some() || args.tail.is_some(),
+        stop_on_splat: args.finish_after.is_some()
+            || args.tail.is_some()
+            || args.tail_steps.is_some(),
         dump_every_s: args.dump_every,
         started: started.into_std(),
         last_dump: None,
         skipped: None,
+        steps: args.steps_per_keyframe.map(|_| steps_tx),
+        last_status_print: None,
     };
     let receiver = tokio::spawn(receiver.run(source));
 
-    send_keyframes(
-        &args,
-        &t,
-        live_poses.as_deref(),
-        &points,
-        &mut sink,
-        &rec,
-        started,
-    )
-    .await?;
+    let pace = match args.steps_per_keyframe {
+        Some(k) => Pace::Lockstep(Lockstep::new(steps_rx, k, LOCKSTEP_STALL)),
+        None => Pace::Wall {
+            started,
+            rate: args.rate,
+        },
+    };
+    let source = Arc::new(Source {
+        t,
+        live_poses,
+        points,
+    });
+    let (sent, mut pace) = send_keyframes(&args, &source, pace, &mut sink, &rec).await?;
     let finish_at = match (args.tail, args.finish_after) {
         (Some(tail), _) => Some(tokio::time::Instant::now() + Duration::from_secs_f32(tail)),
         (None, Some(after)) => Some(started + Duration::from_secs_f32(after)),
         (None, None) => None,
     };
-    if let Some(at) = finish_at {
-        tokio::time::sleep_until(at).await;
+    let finish = match (&mut pace, args.tail_steps) {
+        (Pace::Lockstep(lock), Some(tail)) => {
+            let target = pace::step_target(sent, lock.per_keyframe()) + tail;
+            let at = lock.wait_for(target).await?;
+            println!("tail: finish at {at} steps (target {target})");
+            true
+        }
+        _ => match finish_at {
+            Some(at) => {
+                tokio::time::sleep_until(at).await;
+                true
+            }
+            None => false,
+        },
+    };
+    if finish {
         sink.send(Message::binary(encode_frame(&ClientHeader::Finish, &[])))
             .await?;
         println!(
@@ -189,25 +234,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Sends the frames in [`order::send_order`] (the export `args.loops` times, then the walk back with `--return`,
-/// without `--drop-frames`) at
-/// `args.rate`, keyframe k at [`order::send_time`] after `started`, and logs the camera path. With `live_poses`, each keyframe carries its frame's live pose instead of
-/// the refined one.
+/// without `--drop-frames`), each when `pace` lets it go, and logs the camera path. Keyframes are prepared on
+/// another thread up to [`PREPARE_AHEAD`] ahead. Returns how many went out; a lockstep replay prints how many steps
+/// the server trained per keyframe.
 async fn send_keyframes<S>(
     args: &Args,
-    t: &Transforms,
-    live_poses: Option<&[[f32; 16]]>,
-    points: &[Vec3],
+    source: &Arc<Source>,
+    pace: Pace,
     sink: &mut S,
     rec: &rerun::RecordingStream,
-    started: tokio::time::Instant,
-) -> anyhow::Result<()>
+) -> anyhow::Result<(usize, Pace)>
 where
     S: Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
-    let mut path_points = Vec::new();
-    let mut warned_missing_conf = false;
-    let mut mono_frames = 0usize;
+    let t = &source.t;
     let dropped: std::collections::HashSet<usize> =
         args.drop_frames.iter().cloned().flatten().collect();
     if !dropped.is_empty() {
@@ -229,65 +270,30 @@ where
         args.return_skip_every,
         &dropped,
     );
-    for (k, (id, frame)) in order.into_iter().enumerate() {
-        tokio::time::sleep_until(started + order::send_time(k, args.rate)).await;
-        let f = &t.frames[frame];
-        let (header, jpeg) = keyframe_header(args, t, f, id, k)?;
-        let header = match live_poses {
-            Some(poses) => KeyframeHeader {
-                pose: poses[frame],
-                ..header
-            },
-            None => header,
-        };
-        let depth = load_depth(&args.dataset, f, args.depth)?;
-        if let Some((_, confidence, _)) = &depth {
-            if args.depth == DepthMode::High && confidence.is_none() && !warned_missing_conf {
-                eprintln!(
-                    "warning: {}: no .conf file; sending depth without confidence (like --depth all)",
-                    f.file_path
-                );
-                warned_missing_conf = true;
-            }
-        }
-        let header = KeyframeHeader {
-            depth_size: depth.as_ref().map(|(_, _, size)| *size),
-            depth_confidence: depth.as_ref().is_some_and(|(_, c, _)| c.is_some()),
-            ..header
-        };
-
-        let visible = visible_points(&header, points, args.points_per_frame)?;
-        let mono = match args.mono {
-            MonoMode::Off => None,
-            MonoMode::On => load_mono(&args.dataset, f).unwrap_or_else(|e| {
-                eprintln!("warning: {}: mono depth skipped: {e}", f.file_path);
-                None
-            }),
-        };
-        mono_frames += usize::from(mono.is_some());
-        let header = KeyframeHeader {
-            num_points: visible.len() as u32,
-            mono_depth_size: mono.as_ref().map(|(size, _)| *size),
-            ..header
-        };
-        let payload = keyframe_payload(
-            jpeg,
-            depth.as_ref(),
-            &visible,
-            mono.as_ref().map(|(_, block)| block.as_slice()),
-        );
-        sink.send(Message::binary(encode_frame(
-            &ClientHeader::Keyframe(header),
-            &payload,
-        )))
-        .await?;
-        if args.correct_after == Some(k + 1) {
-            sink.send(Message::binary(correct::correction_frame(t, k + 1)))
+    let opts = PrepOptions {
+        dataset: args.dataset.clone(),
+        long_side: args.long_side,
+        rate: args.rate,
+        depth: args.depth,
+        mono: args.mono,
+        points_per_frame: args.points_per_frame,
+    };
+    let mut paced = Paced::new(
+        spawn_prepare(opts, source.clone(), order, PREPARE_AHEAD),
+        pace,
+    );
+    let mut path_points = Vec::new();
+    let mut mono_frames = 0usize;
+    while let Some(kf) = paced.next().await {
+        let kf = kf??;
+        mono_frames += usize::from(kf.carried_mono);
+        sink.send(Message::binary(kf.bytes)).await?;
+        if args.correct_after == Some(paced.sent()) {
+            sink.send(Message::binary(correct::correction_frame(t, paced.sent())))
                 .await?;
-            println!("poses sent for {} keyframes", k + 1);
+            println!("poses sent for {} keyframes", paced.sent());
         }
-
-        let c2w = Mat4::from_cols_array_2d(&f.transform_matrix).transpose();
+        let c2w = Mat4::from_cols_array_2d(&t.frames[kf.frame].transform_matrix).transpose();
         path_points.push(c2w.w_axis.truncate().to_array());
         rec.log(
             "camera_path",
@@ -297,104 +303,24 @@ where
     if args.mono == MonoMode::On {
         println!("{mono_frames} keyframes carried the phone's mono depth");
     }
-    Ok(())
-}
-
-/// Emulates ARKit feature points: up to `max` of `points` that the keyframe's camera (its header pose) sees.
-fn visible_points(
-    header: &KeyframeHeader,
-    points: &[Vec3],
-    max: usize,
-) -> anyhow::Result<Vec<Vec3>> {
-    let camera = brush_guide::keyframe::arkit_to_camera(header)?;
-    let size = UVec2::new(header.width, header.height);
-    Ok(points
-        .iter()
-        .filter(|p| project(&camera, size, **p).is_some())
-        .take(max)
-        .copied()
-        .collect())
-}
-
-/// Frame `f`'s image as JPEG, scaled to `args.long_side`, and its header (keyframe `id`, the `send_index`-th
-/// keyframe sent) without depth or points.
-fn keyframe_header(
-    args: &Args,
-    t: &Transforms,
-    f: &Frame,
-    id: u64,
-    send_index: usize,
-) -> anyhow::Result<(KeyframeHeader, Vec<u8>)> {
-    let img = image::open(args.dataset.join(&f.file_path))?.into_rgb8();
-    let (w0, h0) = (
-        f.w.or(t.w).unwrap_or(img.width()),
-        f.h.or(t.h).unwrap_or(img.height()),
-    );
-    let scale = args.long_side as f32 / w0.max(h0) as f32;
-    let (w, h) = (
-        ((w0 as f32) * scale).round() as u32,
-        ((h0 as f32) * scale).round() as u32,
-    );
-    let img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
-    let mut jpeg = Vec::new();
-    image::DynamicImage::ImageRgb8(img).write_to(
-        &mut std::io::Cursor::new(&mut jpeg),
-        image::ImageFormat::Jpeg,
-    )?;
-
-    let c2w = Mat4::from_cols_array_2d(&f.transform_matrix).transpose();
-    let fl_x = f.fl_x.or(t.fl_x).ok_or_else(|| {
-        anyhow::anyhow!(
-            "frame {}: no fl_x in the frame or transforms.json",
-            f.file_path
-        )
-    })?;
-    let (fx, fy) = (fl_x * scale, f.fl_y.or(t.fl_y).unwrap_or(fl_x) * scale);
-    let (cx, cy) = (
-        f.cx.or(t.cx).unwrap_or(w0 as f32 / 2.0) * scale,
-        f.cy.or(t.cy).unwrap_or(h0 as f32 / 2.0) * scale,
-    );
-    let header = KeyframeHeader {
-        id,
-        timestamp: send_index as f64 / args.rate as f64,
-        pose: c2w.to_cols_array(),
-        fx,
-        fy,
-        cx,
-        cy,
-        width: w,
-        height: h,
-        jpeg_len: jpeg.len() as u32,
-        depth_size: None,
-        depth_confidence: false,
-        num_points: 0,
-        mono_depth_size: None,
-    };
-    Ok((header, jpeg))
-}
-
-/// JPEG, then depth and confidence if any, then the points as f32 xyz, then
-/// the mono-depth block if any.
-fn keyframe_payload(
-    jpeg: Vec<u8>,
-    depth: Option<&Depth>,
-    points: &[Vec3],
-    mono: Option<&[u8]>,
-) -> Vec<u8> {
-    let mut payload = jpeg;
-    if let Some((depth_bytes, confidence, _)) = depth {
-        payload.extend_from_slice(depth_bytes);
-        if let Some(confidence) = confidence {
-            payload.extend_from_slice(confidence);
+    let sent = paced.sent();
+    let pace = paced.into_pace();
+    if let Pace::Lockstep(lock) = &pace {
+        let s = lock.summary();
+        println!(
+            "lockstep: {} keyframes at {} steps each: {:.2} steps per keyframe (min {}, max {}), {} late",
+            s.keyframes,
+            lock.per_keyframe(),
+            s.mean,
+            s.min,
+            s.max,
+            s.late
+        );
+        if s.late * 10 > s.keyframes {
+            eprintln!(
+                "warning: over a tenth of the keyframes went out late; does the server run with status_every_step?"
+            );
         }
     }
-    for p in points {
-        for v in p.to_array() {
-            payload.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    if let Some(mono) = mono {
-        payload.extend_from_slice(mono);
-    }
-    payload
+    Ok((sent, pace))
 }
