@@ -386,6 +386,10 @@ impl Worker {
     /// saved renders as configured ([`EvalExtras::for_eval`]), `finish` marks the finish eval. Whether any view
     /// was scored (not without splats or renderable views).
     async fn eval_holdout(&mut self, extras: bool, finish: bool) -> bool {
+        // Nothing to score: skip the full model, which loads every parked tile.
+        if !self.holdout.has_views() {
+            return false;
+        }
         let now = self.clock.elapsed().as_secs_f64();
         let eval_extras = EvalExtras::for_eval(
             &self.config,
@@ -400,10 +404,12 @@ impl Worker {
             return false;
         };
         let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
+        // Loading the parked tiles does not count against the training step rate.
+        self.rate_window.0 += load_ms / 1e3;
         let Some(r) = self.holdout.eval(&splats, now, &eval_extras).await else {
             return false;
         };
-        // Eval time does not count against the training step rate.
+        // Nor does the eval itself.
         self.rate_window.0 += r.ms / 1e3;
         log::info!(
             "eval at {now:.2} s: {} held-out views, psnr {:.2} dB, ssim {:.4}; iter {}, {} splats ({:.0} ms, black background{})",
@@ -685,3 +691,7 @@ fn append_ingredient_round(
         .open(path)?;
     writeln!(file, "{line}")
 }
+
+#[cfg(test)]
+#[path = "worker/eval_tests.rs"]
+mod eval_tests;

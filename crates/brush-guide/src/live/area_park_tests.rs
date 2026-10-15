@@ -29,9 +29,8 @@ fn tile_files(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
 /// eval model still holds them.
 #[tokio::test]
 async fn tiles_left_behind_park_and_stay_in_the_eval_model() {
-    let device = burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let dir = tmp("park");
-    let mut live = LiveModel::new(area_config(2.0), device);
+    let mut live = LiveModel::new(area_config(2.0), device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
     train(&mut live, 5).await;
@@ -40,6 +39,8 @@ async fn tiles_left_behind_park_and_stay_in_the_eval_model() {
     train(&mut live, 10).await;
     let report = live.area_report().unwrap();
     assert!(report.counters.parks >= 1 && report.summary.parked_splats > 0, "{report:?}");
+    let c = report.counters;
+    assert!(c.max_park_ms > 0.0 && c.park_ms >= c.max_park_ms && c.tile_bytes > 0, "{c:?}");
     let resident = live.splats().unwrap().clone();
     let means: Vec<f32> = resident.means().into_data_async().await.unwrap().try_to_vec().unwrap();
     assert!(means.chunks(3).all(|p| p[0] > 10.0), "origin splats left the trainer, keyframe 1's stayed");
@@ -53,9 +54,8 @@ async fn tiles_left_behind_park_and_stay_in_the_eval_model() {
 /// and a park that would take every row is skipped.
 #[tokio::test]
 async fn parking_never_empties_the_trainer() {
-    let device = burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let dir = tmp("park-empty");
-    let mut live = LiveModel::new(area_config(2.0), device);
+    let mut live = LiveModel::new(area_config(2.0), device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
     train(&mut live, 5).await;
@@ -152,7 +152,8 @@ async fn a_park_drops_departed_views_from_the_all_views_loader() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// A tile whose file cannot be written stays resident: its rows go back to the trainer instead of being lost.
+/// A tile whose file cannot be written stays resident: its rows go back to the trainer instead of being lost, and
+/// parking stays off until a reset, even once the directory is back.
 #[tokio::test]
 async fn a_tile_that_cannot_be_written_stays_resident() {
     let dir = tmp("park-unwritable");
@@ -167,6 +168,9 @@ async fn a_tile_that_cannot_be_written_stays_resident() {
     assert_eq!((r.counters.parks, r.summary.parked_tiles), (0, 0), "{r:?}");
     let means: Vec<f32> = live.splats().unwrap().means().into_data_async().await.unwrap().try_to_vec().unwrap();
     assert!(means.chunks(3).any(|p| p[0] < 10.0), "the origin rows were lost");
+    std::fs::create_dir_all(dir.join("tiles")).unwrap();
+    train(&mut live, 10).await;
+    assert_eq!(live.area_report().unwrap().counters.parks, 0, "parking went on after a failed write");
     std::fs::remove_dir_all(dir).ok();
 }
 

@@ -20,6 +20,10 @@ pub(crate) struct AreaState {
     pub(super) conflicts: Vec<TileKey>,
     /// File size of every parked tile.
     pub(super) file_bytes: BTreeMap<TileKey, u64>,
+    /// The last park was skipped for taking every resident row (logged once per streak).
+    pub(super) skipping: bool,
+    /// A tile file could not be written: no parking until the next reset.
+    pub(super) parking_off: bool,
 }
 
 impl AreaState {
@@ -30,6 +34,8 @@ impl AreaState {
             counters: AreaCounters::default(),
             conflicts: Vec::new(),
             file_bytes: BTreeMap::new(),
+            skipping: false,
+            parking_off: false,
         }
     }
 }

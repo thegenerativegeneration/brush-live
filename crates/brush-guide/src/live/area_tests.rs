@@ -92,9 +92,8 @@ async fn served_x(live: &mut LiveModel) -> [f32; 2] {
 /// Both loaders hand out only views within the radius of the newest keyframe.
 #[tokio::test]
 async fn loaders_serve_only_area_views() {
-    let device = burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let dir = tmp("views");
-    let mut live = LiveModel::new(area_config(1.0), device);
+    let mut live = LiveModel::new(area_config(1.0), device().await);
     live.enable_area(dir.join("tiles"));
     for (i, x) in [0.0f32, 0.5, 5.0].iter().enumerate() {
         add(&mut live, &dir, i as u64, Vec3::new(*x, 0.0, 2.0), Vec3::new(*x, 0.0, 0.0)).await;
@@ -111,9 +110,8 @@ async fn loaders_serve_only_area_views() {
 /// Without `enable_area` (or with radius 0) every view trains, as before.
 #[tokio::test]
 async fn area_off_trains_every_view() {
-    let device = burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let dir = tmp("views-off");
-    let mut live = LiveModel::new(area_config(0.0), device);
+    let mut live = LiveModel::new(area_config(0.0), device().await);
     live.enable_area(dir.join("tiles"));
     for (i, x) in [0.0f32, 5.0].iter().enumerate() {
         add(&mut live, &dir, i as u64, Vec3::new(*x, 0.0, 2.0), Vec3::new(*x, 0.0, 0.0)).await;
@@ -288,12 +286,11 @@ async fn the_area_always_holds_the_newest_view() {
 /// everything on reset.
 #[tokio::test]
 async fn enable_area_wipes_stale_tiles_and_reset_wipes_again() {
-    let device = burn::tensor::Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let dir = tmp("wipe-stale");
     let tiles = dir.join("tiles");
     std::fs::create_dir_all(&tiles).unwrap();
     std::fs::write(tiles.join("0_0.bin"), b"stale").unwrap();
-    let mut live = LiveModel::new(area_config(2.0), device);
+    let mut live = LiveModel::new(area_config(2.0), device().await);
     live.enable_area(tiles.clone());
     assert_eq!(std::fs::read_dir(&tiles).unwrap().count(), 0);
     std::fs::write(tiles.join("1_1.bin"), b"from this session").unwrap();
