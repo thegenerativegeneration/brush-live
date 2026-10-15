@@ -59,6 +59,20 @@ impl SplatOrigin {
         self.rows = self.rows.clone().select(0, indices);
     }
 
+    /// Sets the tags of the last `slots.len()` rows to `slots` (`None`: no origin).
+    pub(crate) fn set_tail(&mut self, slots: &[Option<u32>]) {
+        let (k, len) = (slots.len(), self.len());
+        assert!(k <= len, "{k} tail tags for {len} rows");
+        if k == 0 {
+            return;
+        }
+        let tags: Vec<i32> = slots.iter().map(|&s| tag(s) as i32).collect();
+        let tail = Tensor::from_data(TensorData::new(tags, [k]), &self.rows.device());
+        self.rows = self.rows.clone().slice_assign(s![len - k..len], tail);
+        let max_new = slots.iter().map(|&s| tag(s)).max().unwrap_or(0);
+        self.max_tag = self.max_tag.max(max_new);
+    }
+
     /// Appends one child per parent index, with the parent's origin.
     pub(crate) fn split(&mut self, parents: Tensor<1, Int>) {
         let inherited = self.rows.clone().select(0, parents);

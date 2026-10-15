@@ -25,7 +25,7 @@
 use crate::config::TrainConfig;
 use crate::lod::top_k_indices;
 use crate::stats::{RefineRecord, trained_only};
-use burn::tensor::{Bool, Device, Int, Tensor, TensorData};
+use burn::tensor::{Bool, Device, Int, Tensor, TensorData, s};
 
 #[derive(Clone, Debug)]
 pub struct EvictConfig {
@@ -202,6 +202,23 @@ impl SplatLife {
     pub(crate) fn keep(&mut self, indices: Tensor<1, Int>) {
         self.age = self.age.clone().select(0, indices.clone());
         self.importance = self.importance.clone().select(0, indices);
+    }
+
+    /// Sets the age and importance of the last `age.len()` rows.
+    pub(crate) fn set_tail(&mut self, age: &[f32], importance: &[f32]) {
+        let (k, len) = (age.len(), self.len());
+        assert_eq!(importance.len(), k, "one importance per age");
+        assert!(k <= len, "{k} tail rows for {len} rows");
+        if k == 0 {
+            return;
+        }
+        let device = self.age.device();
+        let tail = |v: &[f32]| Tensor::<1>::from_data(TensorData::new(v.to_vec(), [k]), &device);
+        self.age = self.age.clone().slice_assign(s![len - k..len], tail(age));
+        self.importance = self
+            .importance
+            .clone()
+            .slice_assign(s![len - k..len], tail(importance));
     }
 
     /// Appends one child per parent index: age 0, the parent's importance.

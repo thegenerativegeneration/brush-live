@@ -35,6 +35,9 @@ use rand::SeedableRng;
 use crate::profile::{StepProfile, device_sync, lap};
 use tracing::{Instrument, trace_span};
 
+#[path = "train_rows.rs"]
+mod rows_impl;
+
 pub const BOUND_PERCENTILE: f32 = 0.8;
 
 const MIN_OPACITY: f32 = 1.0 / 255.0;
@@ -508,15 +511,37 @@ impl SplatTrainer {
         if n == 0 {
             return splats;
         }
+        let new_floor = splats.min_scale.is_some().then(|| {
+            compute_min_scale(
+                &new.means().inner(),
+                &self.view_cams,
+                self.config.min_scale_factor,
+            )
+            .unwrap_or_else(|| Tensor::zeros([n], &splats.device().inner()))
+        });
+        self.append_raw(splats, new.bake_min_scale(), new_floor, slot)
+    }
+
+    /// Appends `new` (raw params, no floor attached) to `splats`, keeping optimizer, refine and life state and origin
+    /// tags aligned; the new rows get zero moments and tag `slot`. When `splats` carry a Mip floor it is kept and
+    /// extended by `new_floor` (zeros when `None`); otherwise `new_floor` is ignored.
+    fn append_raw(
+        &mut self,
+        splats: Splats,
+        new: Splats,
+        new_floor: Option<Tensor<1>>,
+        slot: Option<u32>,
+    ) -> Splats {
+        let n = new.num_splats() as usize;
+        if n == 0 {
+            return splats;
+        }
+        debug_assert!(
+            new.min_scale.is_none(),
+            "append_raw takes rows without a floor"
+        );
         let opt_device = splats.device().inner();
         let existing_floor = splats.min_scale.clone();
-        let splats = if existing_floor.is_some() {
-            splats
-        } else {
-            splats.bake_min_scale()
-        };
-        let new_means = new.means().inner();
-        let new = new.bake_min_scale();
         let (nt, ns, no) = (
             new.transforms.val(),
             new.sh_coeffs.val(),
@@ -549,9 +574,7 @@ impl SplatTrainer {
         };
 
         if let Some(existing_floor) = existing_floor {
-            let new_floor =
-                compute_min_scale(&new_means, &self.view_cams, self.config.min_scale_factor)
-                    .unwrap_or_else(|| Tensor::zeros([n], &opt_device));
+            let new_floor = new_floor.unwrap_or_else(|| Tensor::zeros([n], &opt_device));
             splats = splats.with_min_scale(Tensor::cat(vec![existing_floor, new_floor], 0));
         }
 
