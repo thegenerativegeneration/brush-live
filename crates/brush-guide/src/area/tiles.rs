@@ -175,16 +175,16 @@ impl TileRegistry {
         pick_until(candidates.into_iter().map(|(_, k, n)| (k, n)), evict, resident).0
     }
 
+    /// Splats of the resident tiles the walker at `centre` has left ([`Self::left_keys`]), as of the last readback.
+    pub fn left_resident_splats(&self, centre: Vec3) -> u32 {
+        self.tiles.iter().filter(|&(&k, t)| t.resident && self.is_left(k, centre)).map(|(_, t)| t.splats).sum()
+    }
+
     /// Resident left tiles to park so the splats of the resident left tiles (the rows held still) number at most
     /// `cap`: farthest first, seen or not, under the rules of [`Self::left_to_park`]. Tiles within radius + hysteresis
     /// are never left, so they never park here. Empty when the held splats fit.
     pub fn held_over_cap(&self, cap: u32, resident: u32, centre: Vec3, keyframes: u32) -> Vec<TileKey> {
-        let held: u32 = self
-            .tiles
-            .iter()
-            .filter(|&(&k, t)| t.resident && self.is_left(k, centre))
-            .map(|(_, t)| t.splats)
-            .sum();
+        let held = self.left_resident_splats(centre);
         if held <= cap {
             return Vec::new();
         }

@@ -148,6 +148,9 @@ pub struct GuideConfig {
     /// Rows held still in tiles the walker has left keep at most this share of `max_splats`; at each refine the
     /// farthest held tiles park, even in view, until the rest fit. 1.0 or more: no cap.
     pub area_held_fraction: f32,
+    /// Hold the rows of tiles the walker has left still while they stay resident. Off: they keep training until they
+    /// park; parking and the cap (`area_held_fraction`, then over the left tiles' resident rows) stay the same.
+    pub area_hold_left: bool,
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.
     pub train_radius_m: f32,
@@ -217,6 +220,7 @@ impl Default for GuideConfig {
             area_restore_inconsistency_m: 1.0,
             area_far_seed_m: 10.0,
             area_held_fraction: 0.25,
+            area_hold_left: true,
             train_radius_m: 0.0,
         }
     }
@@ -374,5 +378,13 @@ mod area_tests {
         assert_eq!(cfg.area_held_fraction, 0.25);
         let cfg: GuideConfig = serde_json::from_str(r#"{"area_held_fraction": 1.0}"#).expect("parses");
         assert_eq!(cfg.area_held_fraction, 1.0);
+    }
+
+    #[test]
+    fn hold_left_defaults_on_and_parses() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert!(cfg.area_hold_left);
+        let cfg: GuideConfig = serde_json::from_str(r#"{"area_hold_left": false}"#).expect("parses");
+        assert!(!cfg.area_hold_left);
     }
 }

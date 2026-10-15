@@ -57,4 +57,6 @@ pub struct AreaReport {
     pub parking_off: bool,
     /// Rows of left tiles the trainer holds still, as of the last refine or keyframe that built the mask.
     pub frozen_rows: u32,
+    /// Splats of the resident tiles the walker has left, held or not, as of the last refine's readback.
+    pub left_splats: u32,
 }

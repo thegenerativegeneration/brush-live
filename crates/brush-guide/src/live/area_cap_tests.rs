@@ -13,8 +13,13 @@ use std::path::PathBuf;
 /// Keyframe 0 at the origin, then keyframe 1 6 m on looking back at it: the origin tiles are left, held and in view
 /// (a seen window of 1000 steps keeps them from parking unseen). The budget is 20 000 splats.
 async fn looking_back(name: &str, fraction: f32) -> (LiveModel, PathBuf) {
+    looking_back_with(name, GuideConfig { area_held_fraction: fraction, ..area_config(2.0) }).await
+}
+
+/// [`looking_back`] with `config` (its seen window set to 1000 steps).
+async fn looking_back_with(name: &str, config: GuideConfig) -> (LiveModel, PathBuf) {
     let dir = tmp(name);
-    let config = GuideConfig { area_held_fraction: fraction, area_seen_window_steps: 1000, ..area_config(2.0) };
+    let config = GuideConfig { area_seen_window_steps: 1000, ..config };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
@@ -88,5 +93,43 @@ async fn area_off_has_no_cap() {
     assert!(live.area_report().is_none());
     assert!(live.trainer.as_ref().unwrap().frozen_rows().is_none());
     assert_eq!(std::fs::read_dir(dir.join("tiles")).unwrap().count(), 0, "a tile parked");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// With `area_hold_left` off, the left tiles' rows keep training while resident, nothing is held, and the cap still
+/// parks the farthest left tiles once their rows exceed it.
+#[tokio::test]
+async fn hold_off_left_rows_train_and_the_cap_parks_the_farthest() {
+    let hold_off = |fraction| GuideConfig { area_hold_left: false, area_held_fraction: fraction, ..area_config(2.0) };
+    let (mut live, dir) = looking_back_with("cap-hold-off", hold_off(1.0)).await;
+    let left = live.area.as_ref().unwrap().registry.left_keys(Vec3::new(6.0, 0.0, 2.0));
+    let in_left = |p: Vec3| left.contains(&TileKey::of(p, 1.0));
+    let before = rows_where(&live, in_left).await;
+    assert!(before.len() > 10, "{} rows in left tiles", before.len());
+    assert!(live.trainer.as_ref().unwrap().frozen_rows().is_none());
+    train(&mut live, 10).await;
+    let after = rows_where(&live, in_left).await;
+    let sum = |r: &SplatRows| r.means.iter().map(|&v| f64::from(v)).sum::<f64>();
+    assert_ne!(sum(&before), sum(&after), "the left rows did not train");
+    let r = live.area_report().unwrap();
+    assert_eq!((r.frozen_rows, r.counters.parks), (0, 0), "{r:?}");
+    assert!(r.left_splats as usize >= before.len() / 2, "{r:?}");
+    assert!(live.trainer.as_ref().unwrap().frozen_rows().is_none());
+    std::fs::remove_dir_all(dir).ok();
+
+    let cap = before.len() as u32 / 2;
+    let (mut live, dir) = looking_back_with("cap-hold-off-half", hold_off((cap as f32 + 0.5) / 20_000.0)).await;
+    train(&mut live, 5).await;
+    let r = live.area_report().unwrap();
+    assert!(r.counters.parks_for_cap >= 1 && r.counters.parks == r.counters.parks_for_cap, "{r:?}");
+    assert!(r.left_splats <= cap, "{} left rows over a cap of {cap}", r.left_splats);
+    assert_eq!(r.frozen_rows, 0);
+    let area = live.area.as_ref().unwrap();
+    let centre = Vec3::new(6.0, 0.0, 2.0);
+    let dist = |k: &TileKey| k.footprint_distance(centre, 1.0);
+    let nearest_parked = area.registry.parked_keys().iter().map(dist).fold(f32::INFINITY, f32::min);
+    let resident_left: Vec<TileKey> =
+        left.iter().copied().filter(|&k| area.registry.get(k).is_some_and(|t| t.resident)).collect();
+    assert!(resident_left.iter().all(|k| dist(k) <= nearest_parked), "a nearer left tile parked first");
     std::fs::remove_dir_all(dir).ok();
 }

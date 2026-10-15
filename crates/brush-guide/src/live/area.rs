@@ -176,6 +176,7 @@ impl LiveModel {
             tiles: area.registry.tile_states(centre),
             parking_off: area.parking_off,
             frozen_rows: area.frozen_rows,
+            left_splats: area.registry.left_resident_splats(centre),
         })
     }
 

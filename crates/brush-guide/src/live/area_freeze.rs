@@ -3,7 +3,8 @@
 //! rows are held in the trainer ([`brush_train::train::SplatTrainer::set_frozen_rows`]): no step trains them, refine
 //! neither decays, re-floors, densifies nor evicts them, so the area stays as the walker left it until it parks or the
 //! walker returns. Rows appended later (seeds, restores) train until the mask is next built. Held rows keep at most
-//! `area_held_fraction` of the splat budget: past it, the farthest held tiles park after a refine, even in view.
+//! `area_held_fraction` of the splat budget: past it, the farthest held tiles park after a refine, even in view. With
+//! `area_hold_left` off nothing is held (left rows train until they park) and the cap counts the left tiles' rows.
 
 use super::LiveModel;
 use crate::area::{TileKey, rows_in};
@@ -14,13 +15,15 @@ use std::collections::BTreeSet;
 
 impl LiveModel {
     /// After a refine and its parks (the refine dropped the trainer's mask, and parks and restores moved rows): marks
-    /// the tiles around the newest view as visited and holds the rows of the left resident tiles. No-op without area
-    /// training.
+    /// the tiles around the newest view as visited and holds the rows of the left resident tiles. Without area
+    /// training nothing happens; with `area_hold_left` off the tiles are marked and nothing is held.
     pub(super) async fn hold_left_rows_after_refine(&mut self, splats: &Splats) {
         let Some(centre) = self.view_cams.last().map(|(p, _)| *p) else {
             return;
         };
-        if let Some(keys) = self.left_resident_keys(centre) {
+        if let Some(keys) = self.left_resident_keys(centre)
+            && self.config.area_hold_left
+        {
             self.hold_rows(splats, keys).await;
         }
     }
@@ -28,11 +31,14 @@ impl LiveModel {
     /// At a keyframe whose camera stands at `centre`, before its restores and seeds: marks the tiles around it as
     /// visited and, when the left resident tiles differ from the resident ones the mask holds, holds the new set (the
     /// walker left a tile, or came back to one). A held tile parked since (its rows left with it) is no change.
-    /// No-op without area training.
+    /// Without area training nothing happens; with `area_hold_left` off the tiles are marked and nothing is held.
     pub(super) async fn hold_left_rows_at_keyframe(&mut self, splats: &Splats, centre: Vec3) {
         let Some(keys) = self.left_resident_keys(centre) else {
             return;
         };
+        if !self.config.area_hold_left {
+            return;
+        }
         let changed = self.area.as_ref().is_some_and(|a| {
             let resident = |k: &&TileKey| a.registry.get(**k).is_some_and(|t| t.resident);
             !a.frozen_keys.iter().filter(resident).eq(keys.iter())
@@ -70,10 +76,11 @@ impl LiveModel {
         self.park_tiles(splats, &keys).await
     }
 
-    /// After a refine's parks, before the mask is built: while the rows held still (the resident left tiles' splats)
-    /// exceed `area_held_fraction` of `max_splats`, parks held tiles farthest first, seen or not
-    /// ([`crate::area::TileRegistry::held_over_cap`]), so the live area keeps the rest of the budget. A held tile
-    /// parks as it was held and is not restored until the walker returns. Counted in `parks_for_cap` and logged once
+    /// After a refine's parks, before the mask is built: while the resident left tiles' splats (the rows held still,
+    /// or with `area_hold_left` off the rows still training there) exceed `area_held_fraction` of `max_splats`, parks
+    /// left tiles farthest first, seen or not ([`crate::area::TileRegistry::held_over_cap`]), so the live area keeps
+    /// the rest of the budget. A held tile parks as it was held; a parked left tile is not restored until the walker
+    /// returns. Counted in `parks_for_cap` and logged once
     /// per refine that parks. No-op without area training, with parking off, or with a fraction of 1.0 or more.
     pub(super) async fn park_held_over_cap(&mut self, splats: Splats) -> Splats {
         let fraction = self.config.area_held_fraction;
