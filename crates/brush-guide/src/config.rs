@@ -148,10 +148,6 @@ pub struct GuideConfig {
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.
     pub train_radius_m: f32,
-    /// The steps not drawn from the recent window (1 − `recent_fraction`) train on a view whose camera centre lies
-    /// within this many metres (3D) of the newest view's, instead of on any view; no all-views loader is built.
-    /// 0: off.
-    pub train_views_radius_m: f32,
 }
 
 impl Default for GuideConfig {
@@ -218,7 +214,6 @@ impl Default for GuideConfig {
             area_restore_inconsistency_m: 1.0,
             area_far_seed_m: 10.0,
             train_radius_m: 0.0,
-            train_views_radius_m: 0.0,
         }
     }
 }
@@ -352,15 +347,6 @@ mod train_radius_tests {
         assert_eq!(cfg.train_radius_m, 0.0);
         let cfg: GuideConfig = serde_json::from_str(r#"{"train_radius_m": 25}"#).expect("parses");
         assert_eq!(cfg.train_radius_m, 25.0);
-    }
-
-    #[test]
-    fn train_views_radius_defaults_to_off_and_parses() {
-        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-        assert_eq!(cfg.train_views_radius_m, 0.0);
-        let cfg: GuideConfig =
-            serde_json::from_str(r#"{"train_views_radius_m": 25}"#).expect("parses");
-        assert_eq!(cfg.train_views_radius_m, 25.0);
     }
 }
 

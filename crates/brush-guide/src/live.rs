@@ -3,7 +3,7 @@ use crate::keyframe::DecodedKeyframe;
 use crate::mono::{MonoSeed, ScaleFit, ScaleHistory, mono_seed_for};
 use crate::seed::{SeedInput, Seeds, seed_points, stride_for};
 use brush_dataset::config::LoadDatasetConfig;
-use brush_dataset::scene::{Scene, SceneView};
+use brush_dataset::scene::SceneView;
 use brush_dataset::scene_loader::SceneLoader;
 use brush_render::gaussian_splats::{SplatRenderMode, Splats, TextureMode, render_splats};
 use brush_render::sh::rgb_to_sh;
@@ -18,14 +18,15 @@ use clap::Parser;
 use glam::{UVec2, Vec3};
 use rand::SeedableRng;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
+mod area;
 mod draw;
+mod loaders;
 mod poses;
-use draw::{Draw, NearCache, choose_draw, load_batch, near_views};
+use draw::{Draw, choose_draw, load_batch};
 pub use poses::{PoseUpdateStats, ViewPose};
 
-#[cfg(test)]
-mod near_tests;
 #[cfg(test)]
 mod scale_history_tests;
 
@@ -35,10 +36,6 @@ struct LoadArgs {
     #[command(flatten)]
     load: LoadDatasetConfig,
 }
-
-/// Recent-window loader is rebuilt every this many new keyframes (and for each
-/// of the first ones): every rebuild spawns a fresh set of loader threads.
-const RECENT_LOADER_REBUILD_EVERY: usize = 3;
 
 /// With debug timing on, the step profile is logged every this many steps.
 const PROFILE_LOG_EVERY: u32 = 100;
@@ -69,18 +66,19 @@ pub struct LiveModel {
     /// Scales of the last LiDAR / feature mono fits, for keyframes with too
     /// few samples of their own; `reset` keeps it.
     scale_history: ScaleHistory,
+    /// Area training's state; `None` with it off (see [`Self::enable_area`]).
+    area: Option<area::AreaState>,
+    /// Where parked tiles live; kept by `reset`, which turns area training on again with it.
+    tiles_dir: Option<PathBuf>,
     recent: Option<SceneLoader>,
-    /// The loader over all views; never built with `train_views_radius_m` on.
     all: Option<SceneLoader>,
-    /// Packed images of the views `train_views_radius_m` draws; empty with it off.
-    near_cache: NearCache,
-    /// Views within `train_views_radius_m` at the last step; `None` with it off or before the first step.
-    near_at_last_draw: Option<u32>,
-    /// Views in the recent loader; those after `views_in_recent` are in no
-    /// recent pool yet and get drawn directly in `train_step`.
-    recent_len: usize,
+    /// Views (indices into `views`) in the recent loader.
+    recent_members: Vec<usize>,
+    /// `views.len()` when the recent loader was built: training views from this index on are in no recent pool
+    /// yet and get drawn directly in `train_step`.
     views_in_recent: usize,
-    views_in_all: usize,
+    /// Views in the all-views loader.
+    all_members: Vec<usize>,
     iter: u32,
     /// Splats evicted to stay within the budget, in total.
     num_evicted: u64,
@@ -112,7 +110,6 @@ impl LiveModel {
         let mut load_config = LoadArgs::parse_from(["brush-guide"]).load;
         load_config.max_scene_batch_cache_size = config.loader_cache_bytes;
         let rng = rand::rngs::StdRng::seed_from_u64(config.seed);
-        let near_cache = NearCache::new(config.loader_cache_bytes);
         Self {
             config,
             device,
@@ -125,13 +122,13 @@ impl LiveModel {
             index: HashMap::new(),
             last_id: None,
             scale_history: ScaleHistory::default(),
+            area: None,
+            tiles_dir: None,
             recent: None,
             all: None,
-            near_cache,
-            near_at_last_draw: None,
-            recent_len: 0,
+            recent_members: Vec::new(),
             views_in_recent: 0,
-            views_in_all: 0,
+            all_members: Vec::new(),
             iter: 0,
             num_evicted: 0,
             refine_stats: (0, 0.0),
@@ -145,11 +142,16 @@ impl LiveModel {
 
     /// Starts over from no keyframes with the same config and device, but
     /// keeps the mono scale history: a scale relates the network's depth to
-    /// camera depth and does not depend on the segment's world.
+    /// camera depth and does not depend on the segment's world. With a tiles
+    /// directory, area training starts again on it (emptied).
     pub fn reset(&mut self) {
         let history = std::mem::take(&mut self.scale_history);
+        let tiles_dir = self.tiles_dir.take();
         *self = Self::new(self.config.clone(), self.device.clone());
         self.scale_history = history;
+        if let Some(dir) = tiles_dir {
+            self.enable_area(dir);
+        }
     }
 
     /// The scale a keyframe with too few samples of its own would use
@@ -213,29 +215,6 @@ impl LiveModel {
     /// Refines and their seconds since the last call.
     pub fn take_refine_stats(&mut self) -> (u32, f64) {
         std::mem::take(&mut self.refine_stats)
-    }
-
-    /// Bytes both loaders' caches and the near cache hold.
-    pub fn loader_cache_bytes(&self) -> u64 {
-        [&self.recent, &self.all]
-            .iter()
-            .filter_map(|l| l.as_ref())
-            .map(SceneLoader::cached_bytes)
-            .sum::<u64>()
-            + self.near_cache.bytes()
-    }
-
-    /// Views within `train_views_radius_m` of the newest view at the last step; `None` with the radius off or
-    /// before the first step.
-    pub fn near_views_at_last_draw(&self) -> Option<u32> {
-        self.near_at_last_draw
-    }
-
-    /// Indices of the views within `train_views_radius_m` of the newest view's current camera; `None` with the
-    /// radius off.
-    fn near_view_indices(&self) -> Option<Vec<usize>> {
-        let radius = self.config.train_views_radius_m;
-        (radius > 0.0).then(|| near_views(self.views.iter().map(|v| v.camera.position), radius))
     }
 
     /// The splats a held-out eval or an export renders: today the trainer's splats.
@@ -325,60 +304,9 @@ impl LiveModel {
 
         self.views.push(kf.view);
         self.last_id = Some(kf.id);
+        self.refresh_area_views();
         self.rebuild_loaders();
         true
-    }
-
-    /// Builds both loaders from the current views now: their prefetched batches and cached images, which carry the
-    /// camera they were built with, are dropped. The seeds take the step count in, so the new loaders do not replay
-    /// the shuffle order the old ones started with.
-    fn rebuild_all_loaders(&mut self) {
-        let salt = u64::from(self.iter) << 32;
-        self.build_recent_loader(salt);
-        self.build_all_loader(salt);
-    }
-
-    fn rebuild_loaders(&mut self) {
-        let n = self.views.len();
-        if n <= RECENT_LOADER_REBUILD_EVERY
-            || n >= self.views_in_recent + RECENT_LOADER_REBUILD_EVERY
-        {
-            self.build_recent_loader(0);
-        }
-        if self.all.is_none()
-            || self.views.len() >= self.views_in_all + self.config.all_loader_rebuild_every
-        {
-            self.build_all_loader(0);
-        }
-    }
-
-    /// The recent-window loader over the newest views; `salt` 0 gives the usual seed.
-    fn build_recent_loader(&mut self, salt: u64) {
-        let n = self.views.len();
-        let start = n.saturating_sub(self.config.recent_window);
-        self.recent_len = n - start;
-        let recent = Scene::new(self.views[start..].to_vec());
-        self.recent = Some(SceneLoader::new(
-            &recent,
-            (self.config.seed + n as u64) ^ salt,
-            &self.load_config,
-        ));
-        self.views_in_recent = n;
-    }
-
-    /// The loader over all views; `salt` 0 gives the usual seed. None with `train_views_radius_m` on: it would
-    /// decode and cache views no step draws.
-    fn build_all_loader(&mut self, salt: u64) {
-        self.views_in_all = self.views.len();
-        if self.config.train_views_radius_m > 0.0 {
-            return;
-        }
-        let all = Scene::new(self.views.clone());
-        self.all = Some(SceneLoader::new(
-            &all,
-            self.config.seed ^ salt,
-            &self.load_config,
-        ));
     }
 
     /// Keeps a seeded random subset of `seeds` that fits under `max_splats`
@@ -547,28 +475,21 @@ impl LiveModel {
     }
 
     /// One optimisation step on a batch drawn from the recent window (with
-    /// probability `recent_fraction`) or else from all views, or with `train_views_radius_m` on from the views near
-    /// the newest one (see [`choose_draw`]). No-op without views.
+    /// probability `recent_fraction`) or else from all training views (see [`choose_draw`]). No-op without views.
     pub async fn train_step(&mut self) {
-        let near = self.near_view_indices();
+        let pending = self.pending_views();
         let (Some(splats), Some(trainer)) = (self.splats.take(), self.trainer.as_mut()) else {
             return;
         };
-        self.near_at_last_draw = near.as_ref().map(|n| n.len() as u32);
         let draw = choose_draw(
             &mut self.rng,
             self.config.recent_fraction,
-            self.recent_len,
-            self.views_in_recent..self.views.len(),
-            near.as_deref(),
+            self.recent_members.len(),
+            &pending,
         );
         let t_batch = web_time::Instant::now();
         let batch = match draw {
             Draw::Pending(i) => load_batch(&self.views[i]).await,
-            Draw::Near(i) => {
-                let near = near.as_deref().unwrap_or_default();
-                self.near_cache.batch(i, &self.views[i], near).await
-            }
             Draw::RecentLoader | Draw::AllLoader => {
                 let loader = if draw == Draw::RecentLoader {
                     self.recent.as_mut()

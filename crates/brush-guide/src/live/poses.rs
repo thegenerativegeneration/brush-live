@@ -63,8 +63,9 @@ impl LiveModel {
 
     /// Moves views to corrected poses: the view's camera, its Mip-filter camera and, for the newest view, the
     /// protected cone, and moves the splats each moved view seeded by that view's correction (when
-    /// `move_anchored_splats` is on); then rebuilds both loaders so no batch with an old camera is drawn again. The
-    /// score set needs nothing: each round reads the splats and the current views.
+    /// `move_anchored_splats` is on); then recomputes the area's views and rebuilds both loaders so no batch with an
+    /// old camera, or of a view that left the area, is drawn again. The score set needs nothing: each round reads the
+    /// splats and the current views.
     pub fn update_poses(&mut self, poses: &[ViewPose]) -> PoseUpdateStats {
         let mut stats = PoseUpdateStats::default();
         // Per moved view: its slot and the world transform that takes the old camera onto the new one.
@@ -98,13 +99,14 @@ impl LiveModel {
                 self.splats = Some(t.move_by_origin(splats, &moves));
             }
         }
+        self.refresh_area_views();
         self.rebuild_all_loaders();
         stats
     }
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+mod tests {
     use super::*;
     use crate::config::GuideConfig;
     use crate::keyframe::decode_keyframe;
@@ -113,13 +115,13 @@ pub(super) mod tests {
 
     /// `tests/integration/test_scene::arkit_pose_at`: integration-test helpers are not visible to unit tests, and
     /// these need `LiveModel`'s private loaders.
-    pub(in crate::live) fn pose_at(pos: Vec3) -> [f32; 16] {
+    fn pose_at(pos: Vec3) -> [f32; 16] {
         Mat4::look_at_rh(pos, Vec3::ZERO, Vec3::Y)
             .inverse()
             .to_cols_array()
     }
 
-    pub(in crate::live) fn keyframe(id: u64, pos: Vec3) -> (KeyframeHeader, Vec<u8>) {
+    fn keyframe(id: u64, pos: Vec3) -> (KeyframeHeader, Vec<u8>) {
         let (w, h) = (16u32, 12u32);
         let img = image::RgbImage::from_fn(w, h, |x, y| {
             image::Rgb([(x * 16) as u8, (y * 20) as u8, 90])

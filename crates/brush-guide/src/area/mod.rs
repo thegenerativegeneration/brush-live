@@ -4,6 +4,7 @@
 pub mod park_file;
 pub mod pose_replay;
 pub mod tiles;
+pub mod views;
 
 pub use park_file::{
     ParkedTile, SlotPose, TILE_FILE_VERSION, decode_tile, encode_tile, read_tile, read_tile_count, remove_tile_files,
@@ -11,3 +12,4 @@ pub use park_file::{
 };
 pub use pose_replay::{CameraPose, MIN_SLOT_SHARE, apply_moves, move_spread, slot_moves};
 pub use tiles::{AreaParams, AreaSummary, TileInfo, TileKey, TileRegistry, group_rows, rows_in};
+pub use views::{area_views, camera_sees_box, junction_views, membership_additions};
