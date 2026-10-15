@@ -2,7 +2,8 @@
 //! now beyond radius + hysteresis) can stay resident for a while, since views near the walker may still see it. Its
 //! rows are held in the trainer ([`brush_train::train::SplatTrainer::set_frozen_rows`]): no step trains them, refine
 //! neither decays, re-floors, densifies nor evicts them, so the area stays as the walker left it until it parks or the
-//! walker returns. Rows appended later (seeds, restores) train until the mask is next built.
+//! walker returns. Rows appended later (seeds, restores) train until the mask is next built. Held rows keep at most
+//! `area_held_fraction` of the splat budget: past it, the farthest held tiles park after a refine, even in view.
 
 use super::LiveModel;
 use crate::area::{TileKey, rows_in};
@@ -69,6 +70,41 @@ impl LiveModel {
         self.park_tiles(splats, &keys).await
     }
 
+    /// After a refine's parks, before the mask is built: while the rows held still (the resident left tiles' splats)
+    /// exceed `area_held_fraction` of `max_splats`, parks held tiles farthest first, seen or not
+    /// ([`crate::area::TileRegistry::held_over_cap`]), so the live area keeps the rest of the budget. A held tile
+    /// parks as it was held and is not restored until the walker returns. Counted in `parks_for_cap` and logged once
+    /// per refine that parks. No-op without area training, with parking off, or with a fraction of 1.0 or more.
+    pub(super) async fn park_held_over_cap(&mut self, splats: Splats) -> Splats {
+        let fraction = self.config.area_held_fraction;
+        let max_splats = self.train_config.max_splats;
+        let (Some(area), Some(&(centre, _))) = (self.area.as_mut(), self.view_cams.last()) else {
+            return splats;
+        };
+        if area.parking_off || !(fraction < 1.0) {
+            return splats;
+        }
+        area.registry.note_walker(centre);
+        let cap = (fraction.max(0.0) * max_splats as f32) as u32;
+        let before = splats.num_splats();
+        let keys = area.registry.held_over_cap(cap, before, centre, self.views.len() as u32);
+        if keys.is_empty() {
+            return splats;
+        }
+        let parks = area.counters.parks;
+        let splats = self.park_tiles(splats, &keys).await;
+        let area = self.area.as_mut().expect("area training is on");
+        let tiles = area.counters.parks - parks;
+        if tiles > 0 {
+            area.counters.parks_for_cap += tiles;
+            log::info!(
+                "area: park held over cap {tiles} tiles, {} splats",
+                before.saturating_sub(splats.num_splats())
+            );
+        }
+        splats
+    }
+
     /// Notes the walker at `centre` and returns the resident tiles it has left; `None` without area training.
     fn left_resident_keys(&mut self, centre: Vec3) -> Option<BTreeSet<TileKey>> {
         let registry = &mut self.area.as_mut()?.registry;
@@ -118,3 +154,7 @@ impl LiveModel {
 #[cfg(test)]
 #[path = "area_freeze_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "area_cap_tests.rs"]
+mod cap_tests;

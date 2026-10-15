@@ -23,6 +23,8 @@ use serde::Serialize;
 pub struct AreaCounters {
     /// Tiles parked.
     pub parks: u32,
+    /// Tiles among `parks` parked because the rows held still in left tiles exceeded `area_held_fraction`.
+    pub parks_for_cap: u32,
     /// Parks left out because they would have taken every resident splat.
     pub parks_skipped: u32,
     pub restores: u32,

@@ -145,6 +145,9 @@ pub struct GuideConfig {
     pub area_restore_inconsistency_m: f32,
     /// Seeds in a parked tile are restored only when the tile lies within `area_radius_m` plus this many metres.
     pub area_far_seed_m: f32,
+    /// Rows held still in tiles the walker has left keep at most this share of `max_splats`; at each refine the
+    /// farthest held tiles park, even in view, until the rest fit. 1.0 or more: no cap.
+    pub area_held_fraction: f32,
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.
     pub train_radius_m: f32,
@@ -213,6 +216,7 @@ impl Default for GuideConfig {
             area_junction_steps: 200,
             area_restore_inconsistency_m: 1.0,
             area_far_seed_m: 10.0,
+            area_held_fraction: 0.25,
             train_radius_m: 0.0,
         }
     }
@@ -362,5 +366,13 @@ mod area_tests {
         assert_eq!((cfg.area_restore_inconsistency_m, cfg.area_far_seed_m), (1.0, 10.0));
         let cfg: GuideConfig = serde_json::from_str(r#"{"area_radius_m": 25}"#).expect("parses");
         assert_eq!(cfg.area_radius_m, 25.0);
+    }
+
+    #[test]
+    fn held_fraction_defaults_to_a_quarter_and_parses() {
+        let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!(cfg.area_held_fraction, 0.25);
+        let cfg: GuideConfig = serde_json::from_str(r#"{"area_held_fraction": 1.0}"#).expect("parses");
+        assert_eq!(cfg.area_held_fraction, 1.0);
     }
 }

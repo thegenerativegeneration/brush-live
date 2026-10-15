@@ -10,7 +10,7 @@ use crate::live::area::tests::add_at;
 use brush_train::rows::SplatRows;
 
 /// The trainer's rows whose mean satisfies `keep`, in trainer order.
-async fn rows_where(live: &LiveModel, keep: impl Fn(Vec3) -> bool) -> SplatRows {
+pub(super) async fn rows_where(live: &LiveModel, keep: impl Fn(Vec3) -> bool) -> SplatRows {
     let all = live.trainer.as_ref().unwrap().read_rows(live.splats.as_ref().unwrap()).await;
     let idx: Vec<usize> = (0..all.len()).filter(|&i| keep(all.mean(i))).collect();
     all.select(&idx)
@@ -24,7 +24,7 @@ fn params(r: &SplatRows) -> Vec<Vec<u32>> {
 }
 
 /// [`params`] per row, sorted.
-fn by_row(r: &SplatRows) -> Vec<Vec<u32>> {
+pub(super) fn by_row(r: &SplatRows) -> Vec<Vec<u32>> {
     let cols = params(r);
     let mut rows: Vec<Vec<u32>> = (0..r.len())
         .map(|i| cols.iter().flat_map(|c| { let w = c.len() / r.len(); c[i * w..(i + 1) * w].to_vec() }).collect())

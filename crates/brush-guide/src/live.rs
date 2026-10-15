@@ -419,6 +419,7 @@ impl LiveModel {
         self.num_evicted += u64::from(stats.num_evicted);
         self.last_refine_evicted = stats.num_evicted;
         let splats = self.park_after_refine(splats).await;
+        let splats = self.park_held_over_cap(splats).await;
         self.hold_left_rows_after_refine(&splats).await;
         splats
     }
