@@ -12,6 +12,24 @@ pub struct MetricDepth {
 }
 
 impl MetricDepth {
+    /// Nearest native-grid sample at normalized image coordinates; no interpolation across holes.
+    pub fn sample_uv(&self, uv: glam::Vec2, min_confidence: u8) -> Option<f32> {
+        if !uv.is_finite() || uv.min_element() < 0.0 || uv.max_element() >= 1.0 {
+            return None;
+        }
+        let x = (uv.x * self.size.x as f32) as usize;
+        let y = (uv.y * self.size.y as f32) as usize;
+        let i = y.checked_mul(self.size.x as usize)?.checked_add(x)?;
+        let c = self
+            .confidence
+            .as_ref()
+            .and_then(|v| v.get(i))
+            .copied()
+            .unwrap_or(0);
+        let d = *self.values_m.get(i)?;
+        (c >= min_confidence && d.is_finite() && d > 0.0).then_some(d)
+    }
+
     pub fn validate(&self) -> Result<(), ReconError> {
         let n = pixel_count(self.size)?;
         if self.values_m.len() != n || self.confidence.as_ref().is_some_and(|c| c.len() != n) {

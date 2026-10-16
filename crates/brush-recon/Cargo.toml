@@ -12,10 +12,13 @@ image.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+half = "2"
+sha2 = "0.10"
 
 [dev-dependencies]
 brush-cube.path = "../brush-cube"
 tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile = "3.23.0"
 
 [lints]
 workspace = true
