@@ -1228,6 +1228,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brush-recon"
+version = "1.0.0"
+dependencies = [
+ "brush-cube",
+ "brush-render",
+ "burn",
+ "glam 0.30.10",
+ "image",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "brush-render"
 version = "1.0.0"
 dependencies = [

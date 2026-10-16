@@ -1,0 +1,21 @@
+[package]
+name = "brush-recon"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+brush-render.path = "../brush-render"
+burn.workspace = true
+glam.workspace = true
+image.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brush-cube.path = "../brush-cube"
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
