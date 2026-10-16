@@ -1,8 +1,9 @@
-//! Training only the active tiles (`area_freeze` inactive): at each keyframe and pose update the active set is ranked
-//! from the newest camera ([`crate::area::rank_active`]): the tiles within 2.5 m of it, then up to
-//! `area_active_tiles` tiles it sees within `area_view_m`, largest on its image first, with hysteresis. The views that
-//! see an active tile train ([`LiveModel::refresh_area_views`]), keyframes seed only into active tiles and onto new
-//! ground, and every other resident row is held in the trainer until it parks ([`super::area_freeze`]).
+//! Training the active tiles (`area_freeze` inactive or inactive_at_cap): at each keyframe and pose update the active
+//! set is ranked from the newest camera ([`crate::area::rank_active`]): the tiles within 2.5 m (at most half a tile)
+//! of it, then up to `area_active_tiles` tiles it sees within `area_view_m`, largest on its image first, with
+//! hysteresis. The views that see an active tile train ([`LiveModel::refresh_area_views`]). With inactive (and
+//! inactive_at_cap at the cap, [`super::area_budget`]) keyframes seed only into active tiles and onto new ground, and
+//! every other resident row is held in the trainer until it parks ([`super::area_freeze`]).
 
 use super::LiveModel;
 use super::area_freeze::Held;
@@ -15,9 +16,9 @@ use brush_render::gaussian_splats::Splats;
 use std::collections::BTreeSet;
 
 impl LiveModel {
-    /// Whether area training is on with `area_freeze` inactive.
+    /// Whether area training is on with an active set (`area_freeze` inactive or inactive_at_cap).
     pub(super) fn trains_active_tiles(&self) -> bool {
-        self.area.is_some() && self.config.area_freeze == AreaFreeze::Inactive
+        self.area.is_some() && matches!(self.config.area_freeze, AreaFreeze::Inactive | AreaFreeze::InactiveAtCap)
     }
 
     /// Ranks the active set for `camera` ([`rank_active`], the last set as incumbents) over the resident tiles that
@@ -57,9 +58,10 @@ impl LiveModel {
 
     /// Clears `keep` for the seeds (flat xyz) that land in a tile holding rows outside the active set
     /// ([`keep_active_seeds`]); seeds kept on new ground outside it mark the mask stale, so they are held from the
-    /// keyframe's end on. No-op (nothing sorted) unless [`Self::trains_active_tiles`].
+    /// keyframe's end on. No-op (nothing sorted) unless the rows outside the active set are held
+    /// ([`Self::holds_inactive`]).
     pub(super) fn keep_active(&mut self, seed_means: &[f32], keep: &mut [bool]) -> SeedSort {
-        if !self.trains_active_tiles() {
+        if !self.holds_inactive() {
             return SeedSort::default();
         }
         let area = self.area.as_mut().expect("area training is on");
@@ -88,11 +90,16 @@ impl LiveModel {
         area.fresh.clear();
     }
 
-    /// Holds every row of `splats` outside the active tiles when the active set changed since the mask was built, or
-    /// the mask went stale (rows appended outside the set: restores, seeds on new ground; or a pose update). Called
-    /// at the end of a keyframe and before each training step. No-op unless [`Self::trains_active_tiles`].
+    /// Holds every row of `splats` outside the active tiles ([`Self::hold_inactive`]) when the active set changed
+    /// since the mask was built, or the mask went stale (rows appended outside the set: restores, seeds on new
+    /// ground; a pose update; inactive_at_cap reaching or leaving the cap, [`Self::note_cap`]). Called at the end of a
+    /// keyframe and before each training step. No-op unless [`Self::trains_active_tiles`].
     pub(super) async fn hold_inactive_if_stale(&mut self, splats: &Splats) {
-        let Some(area) = self.area.as_ref().filter(|_| self.trains_active_tiles()) else {
+        if !self.trains_active_tiles() {
+            return;
+        }
+        self.note_cap(splats.num_splats());
+        let Some(area) = self.area.as_ref() else {
             return;
         };
         let mut active = area.active.clone();
@@ -102,17 +109,23 @@ impl LiveModel {
         }
     }
 
-    /// Holds every row of `splats` outside the active tiles and records the mask's active set, the resident tiles
-    /// it holds and the rows in the active tiles.
+    /// Holds every row of `splats` outside the active tiles, or none while inactive_at_cap is below the cap
+    /// ([`Self::holds_inactive`]), and records the mask's active set, the resident tiles it holds and the rows in the
+    /// active tiles.
     pub(super) async fn hold_inactive(&mut self, splats: &Splats) {
         let Some(area) = self.area.as_ref() else {
             return;
         };
         let active: BTreeSet<TileKey> = area.active.iter().copied().collect();
-        self.hold_rows(splats, Held::OutsideOf(active.clone())).await;
+        let holds = self.holds_inactive();
+        let held = if holds { Held::OutsideOf(active.clone()) } else { Held::In(BTreeSet::new()) };
+        self.hold_rows(splats, held).await;
         let n = splats.num_splats();
         let area = self.area.as_mut().expect("area training is on");
-        area.frozen_keys = area.registry.resident_keys().into_iter().filter(|k| !active.contains(k)).collect();
+        area.frozen_keys = match holds {
+            true => area.registry.resident_keys().into_iter().filter(|k| !active.contains(k)).collect(),
+            false => BTreeSet::new(),
+        };
         area.mask_active = Some(active.into_iter().collect());
         area.mask_stale = false;
         area.active_splats = n.saturating_sub(area.frozen_rows);

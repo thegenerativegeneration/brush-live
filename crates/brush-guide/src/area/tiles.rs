@@ -432,7 +432,7 @@ impl TileRegistry {
 
 /// Takes `(tile, splats)` candidates in order until they hold `need` splats, skipping any that would bring the total
 /// to all `resident` splats; returns the tiles and the splats they hold.
-fn pick_until(candidates: impl Iterator<Item = (TileKey, u32)>, need: u32, resident: u32) -> (Vec<TileKey>, u32) {
+pub(super) fn pick_until(candidates: impl Iterator<Item = (TileKey, u32)>, need: u32, resident: u32) -> (Vec<TileKey>, u32) {
     let (mut picked, mut freed) = (Vec::new(), 0u32);
     for (key, splats) in candidates {
         if freed >= need {

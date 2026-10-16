@@ -6,7 +6,9 @@
 
 use super::LiveModel;
 use brush_dataset::scene::SceneBatch;
-use crate::area::{AreaCounters, AreaParams, AreaReport, Heights, TileKey, TileRegistry, area_views, views_seeing};
+use crate::area::{
+    AreaCounters, AreaParams, AreaReport, Heights, TileKey, TileRegistry, area_views, tile_splats, views_seeing,
+};
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
 use brush_train::rows::SplatRows;
 use burn::tensor::{Tensor, s};
@@ -42,7 +44,8 @@ pub(crate) struct AreaState {
     pub(super) frozen_keys: BTreeSet<TileKey>,
     /// Rows the trainer held when the mask was last built.
     pub(super) frozen_rows: u32,
-    /// With `area_freeze` inactive: the active tiles, the one under the newest camera first ([`super::area_active`]).
+    /// With `area_freeze` inactive or inactive_at_cap: the active tiles, the one under the newest camera first
+    /// ([`super::area_active`]).
     pub(super) active: Vec<TileKey>,
     /// Boxes (min, max) of the active tiles that hold rows; the training views are the views that see one.
     pub(super) active_boxes: Vec<(Vec3, Vec3)>,
@@ -62,6 +65,12 @@ pub(crate) struct AreaState {
     pub(super) active_splats: u32,
     /// The active set changed since the training views were last logged.
     pub(super) active_changed: bool,
+    /// With `area_freeze` inactive_at_cap: the rows outside the active tiles are held ([`LiveModel::note_cap`]).
+    pub(super) at_cap: bool,
+    /// The tiles of the groups of the row budget last handed to the trainer, in group order.
+    pub(super) budget_keys: Vec<TileKey>,
+    /// Rows refines evicted per tile under a row budget, since the start.
+    pub(super) tile_evictions: BTreeMap<TileKey, u32>,
 }
 
 /// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
@@ -130,6 +139,9 @@ impl AreaState {
             mask_stale: false,
             active_splats: 0,
             active_changed: false,
+            at_cap: false,
+            budget_keys: Vec::new(),
+            tile_evictions: BTreeMap::new(),
         }
     }
 }
@@ -227,6 +239,9 @@ impl LiveModel {
             active_tiles: area.active.iter().map(|k| [k.x, k.z]).collect(),
             active_splats: area.active_splats,
             held_untrained_rows: area.held_untrained_rows,
+            at_cap: area.at_cap,
+            tile_splats: tile_splats(&area.registry),
+            tile_evictions: area.tile_evictions.iter().map(|(k, &n)| [k.x, k.z, n as i32]).collect(),
         })
     }
 

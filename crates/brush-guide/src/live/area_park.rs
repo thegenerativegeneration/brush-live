@@ -17,8 +17,9 @@ use std::path::Path;
 
 impl LiveModel {
     /// Records per resident tile whether a training step since the last refine drew one of its splats (the refine
-    /// record's `importance_views`, occlusion included) from one readback of the means and that count. No-op without
-    /// area training or before a step since the last refine; call right before `refine`.
+    /// record's `importance_views`, occlusion included) from one readback of the means and that count, and hands the
+    /// trainer the row budget from the same means ([`Self::set_row_budget`]). No-op without area training or before a
+    /// step since the last refine; call right before `refine`.
     pub(super) async fn note_visibility(&mut self, splats: &Splats) {
         let (Some(area), Some(trainer)) = (self.area.as_mut(), self.trainer.as_ref()) else {
             return;
@@ -63,6 +64,7 @@ impl LiveModel {
             area.conflicts = conflicts;
         }
         self.note_heights(&means);
+        self.set_row_budget(&means);
     }
 
     /// After a refine: parked tiles that resident rows drifted into come back ([`RestoreReason::Rows`]) when they lie

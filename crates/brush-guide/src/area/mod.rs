@@ -2,6 +2,7 @@
 //! and restored when it comes back (spec `docs/superpowers/specs/2026-10-14-area-training-design.md`).
 
 pub mod active;
+pub mod budget;
 pub mod park_file;
 pub mod ply_stream;
 pub mod pose_replay;
@@ -9,9 +10,11 @@ pub mod tiles;
 pub mod views;
 
 pub use active::{
-    ActiveRule, Candidate, Heights, SeedSort, candidate_boxes, keep_active_seeds, near_tiles, rank_active, tile_heights,
+    ActiveRule, Candidate, Heights, SeedSort, candidate_boxes, keep_active_seeds, near_radius, near_tiles, rank_active,
+    tile_heights,
     views_seeing, widen_all,
 };
+pub use budget::{FairShare, far_inactive_to_park, keep_under_tile_cap, row_budget, tile_counts, tile_splats};
 pub use ply_stream::PlyStreamWriter;
 pub use park_file::{
     ParkedTile, SlotPose, TILE_FILE_VERSION, decode_tile, encode_tile, read_tile, read_tile_count, remove_tile_files,
@@ -47,10 +50,14 @@ pub struct AreaCounters {
     pub max_restore_ms: f64,
     /// Bytes of the tile files on disk.
     pub tile_bytes: u64,
-    /// Changes of the active set (`area_freeze` inactive).
+    /// Changes of the active set (`area_freeze` inactive or inactive_at_cap).
     pub active_changes: u32,
     /// Changes among `active_changes` back to the set before the last one.
     pub active_reversals: u32,
+    /// Tiles parked before a refine to make room for its eviction or for the held cap (`parks_for_cap` among them).
+    pub parks_for_room: u32,
+    /// Seeds dropped because their tile had no room under `area_tile_max_splats`.
+    pub seeds_over_tile_cap: u32,
 }
 
 /// Area training's state for the eval log: tile and splat counts, counters, and every tile's state.
@@ -68,12 +75,20 @@ pub struct AreaReport {
     pub frozen_rows: u32,
     /// Splats of the resident tiles the walker has left, held or not, as of the last refine's readback.
     pub left_splats: u32,
-    /// `[x, z]` of the active tiles with `area_freeze` inactive, the tile under the newest camera first; empty
-    /// otherwise.
+    /// `[x, z]` of the active tiles with `area_freeze` inactive or inactive_at_cap, the tile under the newest camera
+    /// first; empty otherwise.
     pub active_tiles: Vec<[i32; 2]>,
-    /// Rows in the active tiles when the mask was last built (0 unless `area_freeze` is inactive).
+    /// Rows in the active tiles when the mask was last built (0 unless `area_freeze` is inactive or inactive_at_cap;
+    /// every resident row while inactive_at_cap is below the cap).
     pub active_splats: u32,
     /// Held rows no training step ever updated, when the mask was last built (rows restored from tile files count as
     /// trained; 0 without eviction, whose state carries the flag).
     pub held_untrained_rows: u32,
+    /// With `area_freeze` inactive_at_cap: the rows outside the active tiles are held (the resident rows reached
+    /// `area_freeze_at` of `max_splats`).
+    pub at_cap: bool,
+    /// `[x, z, splats]` per tile, resident (as of the last readback) or parked ([`tile_splats`]).
+    pub tile_splats: Vec<[i32; 3]>,
+    /// `[x, z, rows]`: rows refines evicted per tile under a row budget since the start, tiles with evictions only.
+    pub tile_evictions: Vec<[i32; 3]>,
 }

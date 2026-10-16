@@ -83,6 +83,15 @@ fn the_tiles_of_a_corner_are_all_active() {
     assert_eq!(near_tiles(Vec3::new(5.0, 0.0, 5.0), 10.0), vec![key(0, 0)], "2.5 m from no border");
 }
 
+/// The near radius is 2.5 m, at most half a tile: with 1 m tiles only the tiles within 0.5 m are near, never a tile
+/// beyond the ring around the camera's own.
+#[test]
+fn the_near_radius_is_at_most_half_a_tile() {
+    assert_eq!((near_radius(10.0), near_radius(4.0), near_radius(1.0)), (2.5, 2.0, 0.5));
+    let near = near_tiles(Vec3::new(0.3, 0.0, 0.3), 1.0);
+    assert_eq!(near, vec![key(0, 0), key(-1, 0), key(0, -1), key(-1, -1)]);
+}
+
 /// Two tiles that cover about the same share of the image, the camera wobbling between favouring one and the other:
 /// without hysteresis the ranked tile flips at every wobble, with it the first one stays.
 #[test]

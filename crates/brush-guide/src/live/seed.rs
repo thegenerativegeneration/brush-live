@@ -1,6 +1,6 @@
 //! Seeding: splats for a new keyframe where the current model is transparent, from its depth, mono depth and
 //! feature points, within the splat budget. With area training, seeds that land in parked tiles bring nearby tiles
-//! back first or are dropped.
+//! back first or are dropped, and a tile at `area_tile_max_splats` takes no seeds.
 
 use super::LiveModel;
 use super::area_restore::RestoreReason;
@@ -96,6 +96,7 @@ impl LiveModel {
             seeds.mono
         );
         self.refresh_active(&kf.camera, &seeds.means);
+        let seeds = self.drop_over_tile_cap(seeds);
         let seeds = self.cap_seeds(seeds, 0);
         self.note_seeded(&seeds.means);
         let splats = if seeds.colors.len() >= 3 {
@@ -140,6 +141,7 @@ impl LiveModel {
         );
         self.refresh_active(&kf.camera, &seeds.means);
         let (splats, seeds) = self.triage_parked(splats, seeds, kf, size, mono).await;
+        let seeds = self.drop_over_tile_cap(seeds);
         let seeds = self.cap_seeds(seeds, splats.num_splats());
         self.note_seeded(&seeds.means);
         let new = (seeds.colors.len() >= 3).then(|| {
@@ -234,6 +236,16 @@ impl LiveModel {
         let mut keep = triage.keep;
         let sort = self.keep_active(&seeds.means, &mut keep);
         (splats, kept_logged(seeds, &keep, sort))
+    }
+
+    /// Drops the seeds whose tile has no room under `area_tile_max_splats` ([`Self::tile_cap_keep`]), logged.
+    fn drop_over_tile_cap(&mut self, seeds: Seeds) -> Seeds {
+        let Some(keep) = self.tile_cap_keep(&seeds.means) else {
+            return seeds;
+        };
+        let kept = keep_seeds(seeds, &keep);
+        log::info!("area: dropped {} seeds in full tiles", keep.len() - kept.colors.len());
+        kept
     }
 
     fn seeds_to_splats(&self, means: Vec<f32>, colors: &[Vec3]) -> Splats {

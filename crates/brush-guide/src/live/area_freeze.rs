@@ -1,12 +1,14 @@
 //! Holding rows still: with `area_freeze` inactive every resident row outside the active tiles
-//! ([`super::area_active`]), with `area_freeze` left the rows of the resident tiles the walker has left
+//! ([`super::area_active`]), with inactive_at_cap the same once the resident rows reach the cap
+//! ([`super::area_budget`]), with left the rows of the resident tiles the walker has left
 //! ([`crate::area::TileRegistry::left_keys`]: visited, now beyond radius + hysteresis), which views near the walker may
 //! still see. Held rows stay in the trainer ([`brush_train::train::SplatTrainer::set_frozen_rows`]): no step trains
-//! them, refine neither decays, re-floors, densifies nor evicts them, so they stay as they are until they park, the
-//! walker returns or (inactive) their tile becomes active. Rows appended later (seeds, restores) train until the mask
-//! is next built. The left tiles' rows keep at most `area_held_fraction` of the splat budget: past it, the farthest
-//! left tiles park after a refine, even in view. With `area_freeze` none nothing is held (left rows train until they
-//! park) and the cap still counts the left tiles' rows.
+//! them, refine neither decays, re-floors nor densifies them, and they are no eviction victims unless no step ever
+//! trained them, so they stay as they are until they park, the walker returns or their tile becomes active. Rows
+//! appended later (seeds, restores) train until the mask is next built. The left tiles' rows keep at most
+//! `area_held_fraction` of the splat budget: past it, the farthest left tiles park before a refine, even in view
+//! ([`LiveModel::park_for_room`]). With `area_freeze` none nothing is held (left rows train until they park) and the
+//! cap still counts the left tiles' rows.
 
 use super::LiveModel;
 use crate::area::{TileKey, rows_in};
@@ -19,8 +21,8 @@ use std::collections::BTreeSet;
 impl LiveModel {
     /// After a refine and its parks (the refine dropped the trainer's mask, and parks and restores moved rows): marks
     /// the tiles around the newest view as visited and holds the rows outside the active tiles (`area_freeze`
-    /// inactive) or of the left resident tiles (left). Without area training nothing happens; with `area_freeze`
-    /// none the tiles are marked and nothing is held.
+    /// inactive, and inactive_at_cap at the cap, [`Self::note_cap`]) or of the left resident tiles (left). Without
+    /// area training nothing happens; with `area_freeze` none the tiles are marked and nothing is held.
     pub(super) async fn hold_rows_after_refine(&mut self, splats: &Splats) {
         let Some(centre) = self.view_cams.last().map(|(p, _)| *p) else {
             return;
@@ -29,7 +31,10 @@ impl LiveModel {
             return;
         };
         match self.config.area_freeze {
-            AreaFreeze::Inactive => self.hold_inactive(splats).await,
+            AreaFreeze::Inactive | AreaFreeze::InactiveAtCap => {
+                self.note_cap(splats.num_splats());
+                self.hold_inactive(splats).await;
+            }
             AreaFreeze::Left => self.hold_rows(splats, Held::In(keys)).await,
             AreaFreeze::Off => {}
         }
@@ -54,70 +59,6 @@ impl LiveModel {
         if changed {
             self.hold_rows(splats, Held::In(keys)).await;
         }
-    }
-
-    /// Right before a refine that will evict (a seed shortfall noted, or blocked growth backlog while keyframes seed
-    /// new cells, [`brush_train::train::SplatTrainer::pending_evictions`]): parks resident left tiles, farthest first,
-    /// holding as many splats as the eviction would free ([`crate::area::TileRegistry::left_to_park`]), so the
-    /// eviction takes from the area the walker left instead of the live one. The splats the previous refine evicted,
-    /// less the room left below `max_splats`, are a floor for that count: a refine's own split and growth demand is
-    /// not pending beforehand, and at the cap the next refine usually evicts about as many again, while with room
-    /// to spare it evicts nothing. Needs the registry as the visibility readback just left it. No-op without area
-    /// training, with parking off, or when nothing would be evicted.
-    pub(super) async fn park_left_before_eviction(&mut self, splats: Splats) -> Splats {
-        let (Some(area), Some(trainer), Some(&(centre, _))) =
-            (self.area.as_ref(), self.trainer.as_ref(), self.view_cams.last())
-        else {
-            return splats;
-        };
-        let current = splats.num_splats();
-        let room = self.train_config.max_splats.saturating_sub(current);
-        let evict = trainer.pending_evictions(current).max(self.last_refine_evicted.saturating_sub(room));
-        if area.parking_off || evict == 0 {
-            return splats;
-        }
-        let keys = area.registry.left_to_park(evict, current, centre, self.views.len() as u32);
-        if keys.is_empty() {
-            return splats;
-        }
-        log::info!("area: park {} left tiles before evicting {evict} splats", keys.len());
-        self.park_tiles(splats, &keys).await
-    }
-
-    /// After a refine's parks, before the mask is built: while the resident left tiles' splats (held still with
-    /// `area_freeze` left or inactive, still training with none) exceed `area_held_fraction` of `max_splats`, parks
-    /// left tiles farthest first, seen or not ([`crate::area::TileRegistry::held_over_cap`]), so the live area keeps
-    /// the rest of the budget. A held tile parks as it was held; a parked left tile is not restored until the walker
-    /// returns. Counted in `parks_for_cap` and logged once
-    /// per refine that parks. No-op without area training, with parking off, or with a fraction of 1.0 or more.
-    pub(super) async fn park_held_over_cap(&mut self, splats: Splats) -> Splats {
-        let fraction = self.config.area_held_fraction;
-        let max_splats = self.train_config.max_splats;
-        let (Some(area), Some(&(centre, _))) = (self.area.as_mut(), self.view_cams.last()) else {
-            return splats;
-        };
-        if area.parking_off || !(fraction < 1.0) {
-            return splats;
-        }
-        area.registry.note_walker(centre);
-        let cap = (fraction.max(0.0) * max_splats as f32) as u32;
-        let before = splats.num_splats();
-        let keys = area.registry.held_over_cap(cap, before, centre, self.views.len() as u32);
-        if keys.is_empty() {
-            return splats;
-        }
-        let parks = area.counters.parks;
-        let splats = self.park_tiles(splats, &keys).await;
-        let area = self.area.as_mut().expect("area training is on");
-        let tiles = area.counters.parks - parks;
-        if tiles > 0 {
-            area.counters.parks_for_cap += tiles;
-            log::info!(
-                "area: park held over cap {tiles} tiles, {} splats",
-                before.saturating_sub(splats.num_splats())
-            );
-        }
-        splats
     }
 
     /// Notes the walker at `centre` and returns the resident tiles it has left; `None` without area training.
@@ -179,9 +120,9 @@ impl LiveModel {
 
 /// The rows [`LiveModel::hold_rows`] holds.
 pub(super) enum Held {
-    /// The rows lying in these tiles.
+    /// The rows lying in these tiles; no tiles hold nothing.
     In(BTreeSet<TileKey>),
-    /// The rows lying in none of these tiles.
+    /// The rows lying in none of these tiles; no tiles (nothing active) hold every row.
     OutsideOf(BTreeSet<TileKey>),
 }
 

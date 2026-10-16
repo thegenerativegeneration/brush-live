@@ -6,12 +6,17 @@ use crate::scores::{
 
 /// Which resident rows area training holds still (no step, decay, floor bake, growth or eviction) until they park.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum AreaFreeze {
-    /// Only the active tiles train: up to `area_active_tiles` tiles the newest keyframe sees within `area_view_m`
-    /// (the tile under its camera always among them). The training views are the keyframes that see an active tile,
-    /// keyframes seed only into active tiles and ground no tile holds yet, and every other resident row is held.
+    /// The active tiles as with `inactive` (training views, ranking); the rows outside them train and grow while
+    /// the resident rows stay below `area_freeze_at` of `max_splats`, and from there are held as with `inactive`
+    /// until the resident rows drop below `area_freeze_at` − 0.05.
     #[default]
+    InactiveAtCap,
+    /// Only the active tiles train: the tiles within 2.5 m (at most half a tile) of the newest keyframe's camera and
+    /// up to `area_active_tiles` tiles it sees within `area_view_m`. The training views are the keyframes that see an
+    /// active tile, keyframes seed only into active tiles and ground no tile holds yet, and every other resident row
+    /// is held.
     Inactive,
     /// The tiles the walker has left are held while resident; the views within `area_radius_m` train.
     Left,
@@ -169,13 +174,20 @@ pub struct GuideConfig {
     pub area_held_fraction: f32,
     /// Which resident rows area training holds still until they park (see [`AreaFreeze`]).
     pub area_freeze: AreaFreeze,
-    /// With `area_freeze` inactive: the newest keyframe makes the tiles it sees up to this many metres deep active.
+    /// With `area_freeze` inactive(_at_cap): the newest keyframe makes the tiles it sees up to this many metres deep
+    /// active.
     pub area_view_m: f32,
-    /// With `area_freeze` inactive: at most this many tiles in view are active, besides the tiles within 2.5 m of the
-    /// camera.
+    /// With `area_freeze` inactive(_at_cap): at most this many tiles in view are active, besides the near tiles (within
+    /// 2.5 m of the camera, at most half a tile).
     pub area_active_tiles: u32,
-    /// With `area_freeze` inactive: a tile in view needs this many rows to become active.
+    /// With `area_freeze` inactive(_at_cap): a tile in view needs this many rows to become active.
     pub area_active_min_rows: u32,
+    /// With `area_freeze` inactive_at_cap: the share of `max_splats` at which the rows outside the active tiles are
+    /// held (released again below this share − 0.05).
+    pub area_freeze_at: f32,
+    /// Most splats one tile holds: seeds into a full tile are dropped, its rows do not densify, and a tile over it
+    /// evicts its least important rows down to it at the next refine. 0: no per-tile cap.
+    pub area_tile_max_splats: u32,
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.
     pub train_radius_m: f32,
@@ -246,10 +258,12 @@ impl Default for GuideConfig {
             area_restore_inconsistency_m: 1.0,
             area_far_seed_m: 10.0,
             area_held_fraction: 0.25,
-            area_freeze: AreaFreeze::Inactive,
+            area_freeze: AreaFreeze::InactiveAtCap,
             area_view_m: 15.0,
             area_active_tiles: 3,
             area_active_min_rows: 50,
+            area_freeze_at: 0.9,
+            area_tile_max_splats: 10_000,
             train_radius_m: 0.0,
         }
     }
@@ -410,11 +424,17 @@ mod area_tests {
     }
 
     #[test]
-    fn freeze_defaults_to_inactive_and_parses() {
+    fn freeze_defaults_to_inactive_at_cap_and_parses() {
         let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-        assert_eq!(cfg.area_freeze, AreaFreeze::Inactive);
+        assert_eq!(cfg.area_freeze, AreaFreeze::InactiveAtCap);
         assert_eq!((cfg.area_view_m, cfg.area_active_tiles, cfg.area_active_min_rows), (15.0, 3, 50));
-        let modes = [("left", AreaFreeze::Left), ("none", AreaFreeze::Off), ("inactive", AreaFreeze::Inactive)];
+        assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_splats), (0.9, 10_000));
+        let modes = [
+            ("left", AreaFreeze::Left),
+            ("none", AreaFreeze::Off),
+            ("inactive", AreaFreeze::Inactive),
+            ("inactive_at_cap", AreaFreeze::InactiveAtCap),
+        ];
         for (json, want) in modes {
             let cfg: GuideConfig =
                 serde_json::from_str(&format!(r#"{{"area_freeze": "{json}"}}"#)).expect("parses");
@@ -422,5 +442,8 @@ mod area_tests {
         }
         let cfg: GuideConfig = serde_json::from_str(r#"{"area_view_m": 20, "area_active_tiles": 5}"#).expect("parses");
         assert_eq!((cfg.area_view_m, cfg.area_active_tiles), (20.0, 5));
+        let cfg: GuideConfig =
+            serde_json::from_str(r#"{"area_freeze_at": 0.8, "area_tile_max_splats": 0}"#).expect("parses");
+        assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_splats), (0.8, 0));
     }
 }

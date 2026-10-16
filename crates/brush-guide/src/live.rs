@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 mod area;
 mod area_active;
+mod area_budget;
 mod area_export;
 mod area_freeze;
 mod area_park;
@@ -253,7 +254,8 @@ impl LiveModel {
 
     /// Adds a view and seeds splats where the current model is transparent. With area training, parked tiles within
     /// the radius of its camera come back first, then those its seeds hit nearby (see `seed_from_mask`); with
-    /// `area_freeze` inactive the keyframe ranks the active tiles and the rows outside them are held at its end.
+    /// `area_freeze` inactive(_at_cap) the keyframe ranks the active tiles and the rows outside them are held at its end
+    /// (inactive_at_cap: at the cap only). Seeds into a tile at `area_tile_max_splats` are dropped.
     /// Returns false if a keyframe with this id was already added.
     pub async fn add_keyframe(&mut self, mut kf: DecodedKeyframe) -> bool {
         if self.index.contains_key(&kf.id) {
@@ -405,12 +407,13 @@ impl LiveModel {
     }
 
     /// Refines the splats (densify, prune, evict). With area training it first notes which tiles the window's views
-    /// drew and parks left tiles an eviction would otherwise make room for, and afterwards parks the tiles the capture
-    /// has left and holds the rows `area_freeze` names (outside the active tiles, or of left tiles still resident).
+    /// drew and hands the trainer the tiles' row budget, and parks the tiles an eviction or the held cap would
+    /// otherwise make room for; afterwards it parks the tiles the capture has left and holds the rows `area_freeze`
+    /// names (outside the active tiles, or of left tiles still resident).
     async fn refine(&mut self, splats: Splats) -> Splats {
         crate::timing::sync_splats(&splats).await;
         self.note_visibility(&splats).await;
-        let splats = self.park_left_before_eviction(splats).await;
+        let splats = self.park_for_room(splats).await;
         let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
         let t = web_time::Instant::now();
         let before = splats.num_splats();
@@ -430,8 +433,8 @@ impl LiveModel {
         );
         self.num_evicted += u64::from(stats.num_evicted);
         self.last_refine_evicted = stats.num_evicted;
+        self.note_budget_evictions();
         let splats = self.park_after_refine(splats).await;
-        let splats = self.park_held_over_cap(splats).await;
         self.hold_rows_after_refine(&splats).await;
         splats
     }

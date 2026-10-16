@@ -1,6 +1,6 @@
-//! The active set of area training with `area_freeze` inactive: the tiles around the newest keyframe's camera and the
-//! tiles it looks at, ranked by how much of its image they cover, and the rules that follow from it for training
-//! views and seeds.
+//! The active set of area training with `area_freeze` inactive(_at_cap): the tiles around the newest keyframe's camera
+//! and the tiles it looks at, ranked by how much of its image they cover, and the rules that follow from it for
+//! training views and seeds.
 
 use super::tiles::{TileKey, TileRegistry};
 use super::views::{camera_sees_box, projected_area};
@@ -8,9 +8,15 @@ use brush_render::camera::Camera;
 use glam::Vec3;
 use std::collections::BTreeMap;
 
-/// Tiles whose footprint lies within this many metres of the camera are active and outside the ranking, so a room at
-/// a corner of tiles trains whole.
+/// Tiles whose footprint lies within this many metres of the camera, and at most half a tile ([`near_radius`]), are
+/// active and outside the ranking, so a room at a corner of tiles trains whole.
 pub const NEAR_TILE_M: f32 = 2.5;
+
+/// The near radius for tiles of `tile_size`: [`NEAR_TILE_M`], at most half a tile, so the near tiles never reach
+/// beyond the ring of tiles around the camera's own.
+pub fn near_radius(tile_size: f32) -> f32 {
+    NEAR_TILE_M.min(tile_size / 2.0)
+}
 
 /// An active tile stays active while the camera sees its box up to this many metres beyond `area_view_m`.
 pub const KEEP_MARGIN_M: f32 = 2.0;
@@ -108,18 +114,19 @@ pub struct ActiveRule {
     pub tile_size: f32,
 }
 
-/// The tiles whose footprint lies within [`NEAR_TILE_M`] of `p` horizontally: the one under it first, then by
+/// The tiles whose footprint lies within [`near_radius`] of `p` horizontally: the one under it first, then by
 /// distance (ties by key).
 pub fn near_tiles(p: Vec3, tile_size: f32) -> Vec<TileKey> {
     if !p.is_finite() {
         return Vec::new();
     }
+    let r = near_radius(tile_size);
     let cell = |c: f32| (c / tile_size).floor() as i32;
-    let span = |c: f32| cell(c - NEAR_TILE_M)..=cell(c + NEAR_TILE_M);
+    let span = |c: f32| cell(c - r)..=cell(c + r);
     let mut near: Vec<(f32, TileKey)> = span(p.x)
         .flat_map(|x| span(p.z).map(move |z| TileKey { x, z }))
         .map(|k| (k.footprint_distance(p, tile_size), k))
-        .filter(|&(d, _)| d <= NEAR_TILE_M)
+        .filter(|&(d, _)| d <= r)
         .collect();
     near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
     near.into_iter().map(|(_, k)| k).collect()
