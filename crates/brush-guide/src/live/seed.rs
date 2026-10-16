@@ -95,7 +95,9 @@ impl LiveModel {
             kf.depth.is_some(),
             seeds.mono
         );
+        self.refresh_active(&kf.camera, &seeds.means);
         let seeds = self.cap_seeds(seeds, 0);
+        self.note_seeded(&seeds.means);
         let splats = if seeds.colors.len() >= 3 {
             self.seeds_to_splats(seeds.means, &seeds.colors)
         } else {
@@ -136,8 +138,10 @@ impl LiveModel {
             seeds.mono,
             splats.num_splats()
         );
+        self.refresh_active(&kf.camera, &seeds.means);
         let (splats, seeds) = self.triage_parked(splats, seeds, kf, size, mono).await;
         let seeds = self.cap_seeds(seeds, splats.num_splats());
+        self.note_seeded(&seeds.means);
         let new = (seeds.colors.len() >= 3).then(|| {
             self.seeds_to_splats(seeds.means, &seeds.colors)
                 .with_sh_degree(self.config.sh_degree)
@@ -186,7 +190,8 @@ impl LiveModel {
     /// With area training, sorts the keyframe's seeds against the parked tiles: tiles beyond the radius (the tiles
     /// within it were already tried by distance) that at least `area_restore_min_seeds` seeds hit within the radius
     /// plus `area_far_seed_m` come back ([`RestoreReason::Seeds`]), and when one did the keyframe seeds again over
-    /// them. Seeds that land in a parked tile, as the registry stands after that, are dropped. Without area training
+    /// them. Seeds that land in a parked tile, as the registry stands after that, are dropped, and with `area_freeze`
+    /// inactive so are seeds in tiles with rows outside the active set ([`Self::keep_active`]). Without area training
     /// the seeds pass unchanged.
     async fn triage_parked(
         &mut self,
@@ -213,6 +218,8 @@ impl LiveModel {
                 let counts = (seeds.colors.len() as u32, second.colors.len() as u32);
                 log::info!("area: reseed {} -> {} seeds", counts.0, counts.1);
                 self.area.as_mut().expect("area training is on").last_reseed = Some(counts);
+                // The restored tiles may be in view now: rank them.
+                self.refresh_active(&kf.camera, &second.means);
                 second
             } else {
                 seeds
@@ -220,10 +227,13 @@ impl LiveModel {
             // The restore may have parked tiles for room or dropped tiles: sort the seeds against the registry as
             // it is now (a dropped tile's area takes seeds again).
             let registry = &self.area.as_ref().expect("area training is on").registry;
-            let triage = registry.triage_seeds(&seeds.means, pos, usize::MAX);
-            return (splats, kept_logged(seeds, &triage.keep));
+            let mut keep = registry.triage_seeds(&seeds.means, pos, usize::MAX).keep;
+            self.keep_active(&seeds.means, &mut keep);
+            return (splats, kept_logged(seeds, &keep));
         }
-        (splats, kept_logged(seeds, &triage.keep))
+        let mut keep = triage.keep;
+        self.keep_active(&seeds.means, &mut keep);
+        (splats, kept_logged(seeds, &keep))
     }
 
     fn seeds_to_splats(&self, means: Vec<f32>, colors: &[Vec3]) -> Splats {
@@ -242,12 +252,13 @@ impl LiveModel {
     }
 }
 
-/// The seeds `keep` flags (see [`keep_seeds`]); logs how many seeds in parked tiles were dropped.
+/// The seeds `keep` flags (see [`keep_seeds`]); logs how many seeds were dropped in all (parked or left tiles, and
+/// tiles outside the active set).
 fn kept_logged(seeds: Seeds, keep: &[bool]) -> Seeds {
     let kept = keep_seeds(seeds, keep);
     let dropped = keep.len() - kept.colors.len();
     if dropped > 0 {
-        log::info!("area: dropped {dropped} seeds in parked tiles");
+        log::info!("area: dropped {dropped} seeds");
     }
     kept
 }

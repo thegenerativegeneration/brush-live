@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 mod area;
+mod area_active;
 mod area_export;
 mod area_freeze;
 mod area_park;
@@ -251,7 +252,8 @@ impl LiveModel {
     }
 
     /// Adds a view and seeds splats where the current model is transparent. With area training, parked tiles within
-    /// the radius of its camera come back first, then those its seeds hit nearby (see `seed_from_mask`).
+    /// the radius of its camera come back first, then those its seeds hit nearby (see `seed_from_mask`); with
+    /// `area_freeze` inactive the keyframe ranks the active tiles and the rows outside them are held at its end.
     /// Returns false if a keyframe with this id was already added.
     pub async fn add_keyframe(&mut self, mut kf: DecodedKeyframe) -> bool {
         if self.index.contains_key(&kf.id) {
@@ -312,6 +314,7 @@ impl LiveModel {
                 }
             }
         };
+        self.hold_inactive_at_keyframe(&splats).await;
         self.splats = Some(splats);
         if let Some(t) = self.trainer.as_mut() {
             t.set_protect_cone(Some(view_cone(&kf.view.camera)));
@@ -400,7 +403,7 @@ impl LiveModel {
 
     /// Refines the splats (densify, prune, evict). With area training it first notes which tiles the window's views
     /// drew and parks left tiles an eviction would otherwise make room for, and afterwards parks the tiles the capture
-    /// has left and holds the rows of left tiles still resident.
+    /// has left and holds the rows `area_freeze` names (outside the active tiles, or of left tiles still resident).
     async fn refine(&mut self, splats: Splats) -> Splats {
         crate::timing::sync_splats(&splats).await;
         self.note_visibility(&splats).await;
@@ -426,7 +429,7 @@ impl LiveModel {
         self.last_refine_evicted = stats.num_evicted;
         let splats = self.park_after_refine(splats).await;
         let splats = self.park_held_over_cap(splats).await;
-        self.hold_left_rows_after_refine(&splats).await;
+        self.hold_rows_after_refine(&splats).await;
         splats
     }
 }

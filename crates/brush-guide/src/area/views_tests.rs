@@ -55,3 +55,43 @@ fn frustum_box_test_follows_the_principal_point() {
     assert!(camera_sees_box(&c, Vec3::new(-8.5, -0.5, 9.9), Vec3::new(-8.0, 0.5, 10.0), 100.0), "left, wide side");
     assert!(!camera_sees_box(&c, Vec3::new(4.0, -0.5, 9.9), Vec3::new(4.5, 0.5, 10.0), 100.0), "right, narrow side");
 }
+
+/// Share of the image a box covers: tan(30°) ≈ 0.577, so the image spans ±5.77 m at 10 m depth.
+#[test]
+fn projected_area_is_the_image_share_the_box_covers() {
+    let c = camera();
+    let w = 2.0 * (30f32.to_radians()).tan() * 10.0;
+    let thin = projected_area(&c, Vec3::new(-1.0, -1.0, 10.0), Vec3::new(1.0, 1.0, 10.001), 100.0);
+    assert!((thin - 4.0 / (w * w)).abs() < 1e-3, "{thin}");
+    // A deeper box shows its near face: the far face projects inside it.
+    let deep = projected_area(&c, Vec3::new(-1.0, -1.0, 10.0), Vec3::new(1.0, 1.0, 12.0), 100.0);
+    assert!((deep - thin).abs() < 1e-3, "{deep} vs {thin}");
+    // Half of it beyond the image's right edge counts half.
+    let edge = w / 2.0;
+    let half = projected_area(&c, Vec3::new(edge - 1.0, -1.0, 10.0), Vec3::new(edge + 1.0, 1.0, 10.001), 100.0);
+    assert!((half - thin / 2.0).abs() < 1e-3, "{half}");
+    // An off-axis box seen from the side shows more than its front face.
+    let side = projected_area(&c, Vec3::new(1.0, -1.0, 10.0), Vec3::new(3.0, 1.0, 12.0), 100.0);
+    let front = projected_area(&c, Vec3::new(1.0, -1.0, 10.0), Vec3::new(3.0, 1.0, 10.001), 100.0);
+    assert!(side > front * 1.05, "{side} vs {front}");
+}
+
+#[test]
+fn projected_area_clips_to_the_image_and_the_depth_range() {
+    let c = camera();
+    // Inside a slim box the near plane cuts it: its corners alone (±0.2 at 5 m) would cover a fraction.
+    let inside = projected_area(&c, Vec3::new(-1.0, -1.0, -5.0), Vec3::new(1.0, 1.0, 5.0), 100.0);
+    assert!((inside - 1.0).abs() < 1e-5, "camera inside the box: {inside}");
+    let wall = projected_area(&c, Vec3::new(-50.0, -50.0, 2.0), Vec3::new(50.0, 50.0, 3.0), 100.0);
+    assert!((wall - 1.0).abs() < 1e-5, "a wall filling the view: {wall}");
+    assert_eq!(projected_area(&c, Vec3::new(-1.0, -1.0, -6.0), Vec3::new(1.0, 1.0, -4.0), 100.0), 0.0, "behind");
+    assert_eq!(projected_area(&c, Vec3::new(10.0, -1.0, 1.0), Vec3::new(12.0, 1.0, 2.0), 100.0), 0.0, "beside");
+    assert_eq!(projected_area(&c, Vec3::new(-1.0, -1.0, 16.0), Vec3::new(1.0, 1.0, 20.0), 15.0), 0.0, "too deep");
+    // A box reaching from 10 m to 20 m deep counts up to the far plane: its near face, the same as when it ends there.
+    let cut = projected_area(&c, Vec3::new(-1.0, -1.0, 10.0), Vec3::new(1.0, 1.0, 20.0), 15.0);
+    let ends = projected_area(&c, Vec3::new(-1.0, -1.0, 10.0), Vec3::new(1.0, 1.0, 15.0), 100.0);
+    assert!(cut > 0.0 && (cut - ends).abs() < 1e-4, "{cut} vs {ends}");
+    // A box beyond the far plane but for a 1 m sliver: the hull of its face at 14 m and its cut at 15 m.
+    let sliver = projected_area(&c, Vec3::new(2.0, 2.0, 14.0), Vec3::new(4.0, 4.0, 20.0), 15.0);
+    assert!((sliver - 0.017_279).abs() < 1e-5, "{sliver}");
+}

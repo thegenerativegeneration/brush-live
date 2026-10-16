@@ -1,13 +1,16 @@
-//! Holding left tiles still: a resident tile the walker has left ([`crate::area::TileRegistry::left_keys`]: visited,
-//! now beyond radius + hysteresis) can stay resident for a while, since views near the walker may still see it. Its
-//! rows are held in the trainer ([`brush_train::train::SplatTrainer::set_frozen_rows`]): no step trains them, refine
-//! neither decays, re-floors, densifies nor evicts them, so the area stays as the walker left it until it parks or the
-//! walker returns. Rows appended later (seeds, restores) train until the mask is next built. Held rows keep at most
-//! `area_held_fraction` of the splat budget: past it, the farthest held tiles park after a refine, even in view. With
-//! `area_hold_left` off nothing is held (left rows train until they park) and the cap counts the left tiles' rows.
+//! Holding rows still: with `area_freeze` inactive every resident row outside the active tiles
+//! ([`super::area_active`]), with `area_freeze` left the rows of the resident tiles the walker has left
+//! ([`crate::area::TileRegistry::left_keys`]: visited, now beyond radius + hysteresis), which views near the walker may
+//! still see. Held rows stay in the trainer ([`brush_train::train::SplatTrainer::set_frozen_rows`]): no step trains
+//! them, refine neither decays, re-floors, densifies nor evicts them, so they stay as they are until they park, the
+//! walker returns or (inactive) their tile becomes active. Rows appended later (seeds, restores) train until the mask
+//! is next built. The left tiles' rows keep at most `area_held_fraction` of the splat budget: past it, the farthest
+//! left tiles park after a refine, even in view. With `area_freeze` none nothing is held (left rows train until they
+//! park) and the cap still counts the left tiles' rows.
 
 use super::LiveModel;
 use crate::area::{TileKey, rows_in};
+use crate::config::AreaFreeze;
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::{Bool, Tensor, TensorData};
 use glam::Vec3;
@@ -15,28 +18,33 @@ use std::collections::BTreeSet;
 
 impl LiveModel {
     /// After a refine and its parks (the refine dropped the trainer's mask, and parks and restores moved rows): marks
-    /// the tiles around the newest view as visited and holds the rows of the left resident tiles. Without area
-    /// training nothing happens; with `area_hold_left` off the tiles are marked and nothing is held.
-    pub(super) async fn hold_left_rows_after_refine(&mut self, splats: &Splats) {
+    /// the tiles around the newest view as visited and holds the rows outside the active tiles (`area_freeze`
+    /// inactive) or of the left resident tiles (left). Without area training nothing happens; with `area_freeze`
+    /// none the tiles are marked and nothing is held.
+    pub(super) async fn hold_rows_after_refine(&mut self, splats: &Splats) {
         let Some(centre) = self.view_cams.last().map(|(p, _)| *p) else {
             return;
         };
-        if let Some(keys) = self.left_resident_keys(centre)
-            && self.config.area_hold_left
-        {
-            self.hold_rows(splats, keys).await;
+        let Some(keys) = self.left_resident_keys(centre) else {
+            return;
+        };
+        match self.config.area_freeze {
+            AreaFreeze::Inactive => self.hold_inactive(splats).await,
+            AreaFreeze::Left => self.hold_rows(splats, keys, false).await,
+            AreaFreeze::Off => {}
         }
     }
 
     /// At a keyframe whose camera stands at `centre`, before its restores and seeds: marks the tiles around it as
     /// visited and, when the left resident tiles differ from the resident ones the mask holds, holds the new set (the
     /// walker left a tile, or came back to one). A held tile parked since (its rows left with it) is no change.
-    /// Without area training nothing happens; with `area_hold_left` off the tiles are marked and nothing is held.
+    /// Without area training nothing happens; unless `area_freeze` is left the tiles are marked and nothing is held
+    /// here (inactive holds at the keyframe's end, [`Self::hold_inactive_at_keyframe`]).
     pub(super) async fn hold_left_rows_at_keyframe(&mut self, splats: &Splats, centre: Vec3) {
         let Some(keys) = self.left_resident_keys(centre) else {
             return;
         };
-        if !self.config.area_hold_left {
+        if self.config.area_freeze != AreaFreeze::Left {
             return;
         }
         let changed = self.area.as_ref().is_some_and(|a| {
@@ -44,7 +52,7 @@ impl LiveModel {
             !a.frozen_keys.iter().filter(resident).eq(keys.iter())
         });
         if changed {
-            self.hold_rows(splats, keys).await;
+            self.hold_rows(splats, keys, false).await;
         }
     }
 
@@ -76,8 +84,8 @@ impl LiveModel {
         self.park_tiles(splats, &keys).await
     }
 
-    /// After a refine's parks, before the mask is built: while the resident left tiles' splats (the rows held still,
-    /// or with `area_hold_left` off the rows still training there) exceed `area_held_fraction` of `max_splats`, parks
+    /// After a refine's parks, before the mask is built: while the resident left tiles' splats (held still with
+    /// `area_freeze` left or inactive, still training with none) exceed `area_held_fraction` of `max_splats`, parks
     /// left tiles farthest first, seen or not ([`crate::area::TileRegistry::held_over_cap`]), so the live area keeps
     /// the rest of the budget. A held tile parks as it was held; a parked left tile is not restored until the walker
     /// returns. Counted in `parks_for_cap` and logged once
@@ -121,9 +129,9 @@ impl LiveModel {
         Some(keys)
     }
 
-    /// Holds the rows of `splats` lying in `keys` in the trainer (one means readback; none when `keys` is empty) and
-    /// records the tiles and the row count.
-    async fn hold_rows(&mut self, splats: &Splats, keys: BTreeSet<TileKey>) {
+    /// Holds the rows of `splats` lying in `keys` in the trainer, or with `outside` the rows lying in none of them
+    /// (one means readback; none when `keys` is empty), and records the tiles and the held row count.
+    pub(super) async fn hold_rows(&mut self, splats: &Splats, keys: BTreeSet<TileKey>, outside: bool) {
         let (Some(area), Some(trainer)) = (self.area.as_mut(), self.trainer.as_mut()) else {
             return;
         };
@@ -140,14 +148,18 @@ impl LiveModel {
                 .try_into_vec()
                 .expect("f32 means");
             let keys: Vec<TileKey> = keys.iter().copied().collect();
-            let flags = rows_in(&keys, &means, area.registry.params().tile_size);
+            let mut flags = rows_in(&keys, &means, area.registry.params().tile_size);
+            if outside {
+                flags.iter_mut().for_each(|f| *f = !*f);
+            }
             held = flags.iter().filter(|&&f| f).count() as u32;
             let n = flags.len();
             mask = (held > 0).then(|| Tensor::<1, Bool>::from_data(TensorData::new(flags, [n]), &splats.device()));
             log::debug!(
                 target: crate::timing::TARGET,
-                "hold at iter {}: {held} rows in {} left tiles, {:.1} ms",
+                "hold at iter {}: {held} rows {} {} tiles, {:.1} ms",
                 self.iter,
+                if outside { "outside" } else { "in" },
                 keys.len(),
                 t.elapsed().as_secs_f64() * 1e3
             );
@@ -160,7 +172,7 @@ impl LiveModel {
 
 #[cfg(test)]
 #[path = "area_freeze_tests.rs"]
-mod tests;
+pub(in crate::live) mod tests;
 
 #[cfg(test)]
 #[path = "area_cap_tests.rs"]

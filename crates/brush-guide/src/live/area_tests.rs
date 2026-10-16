@@ -50,9 +50,11 @@ pub(in crate::live) fn keyframe_toward(id: u64, pos: Vec3, target: Vec3) -> (Key
 }
 
 /// Small tiles and radius, no hysteresis or windows, a refine every 5 steps, and the all-views loader rebuilt on
-/// every added area view (the default waits for 10).
+/// every added area view (the default waits for 10). Left tiles are held and the views within the radius train
+/// (`area_freeze` left, Tasks 8–14b); [`active_config`] trains the active tiles instead.
 pub(in crate::live) fn area_config(radius: f32) -> GuideConfig {
     GuideConfig {
+        area_freeze: crate::config::AreaFreeze::Left,
         refine_every: 5,
         all_loader_rebuild_every: 1,
         max_splats: 20_000,
@@ -63,6 +65,16 @@ pub(in crate::live) fn area_config(radius: f32) -> GuideConfig {
         area_min_resident_keyframes: 0,
         area_junction_steps: 10,
         ..GuideConfig::default()
+    }
+}
+
+/// [`area_config`] training only the active tiles: up to 2 tiles within 4 m.
+pub(in crate::live) fn active_config(radius: f32) -> GuideConfig {
+    GuideConfig {
+        area_freeze: crate::config::AreaFreeze::Inactive,
+        area_view_m: 4.0,
+        area_active_tiles: 2,
+        ..area_config(radius)
     }
 }
 

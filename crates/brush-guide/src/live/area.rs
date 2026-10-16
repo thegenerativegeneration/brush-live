@@ -1,11 +1,12 @@
-//! Area training in the live model: only views whose camera lies within `area_radius_m` (horizontally) of the
-//! newest keyframe's camera train; tiles the capture has left are held still while resident ([`super::area_freeze`]),
+//! Area training in the live model: only the views that see an active tile ([`super::area_active`]), or that lie
+//! within `area_radius_m` (horizontally) of the newest keyframe's camera, train; rows outside the active tiles, or
+//! of tiles the capture has left, are held still while resident ([`super::area_freeze`]),
 //! parked on disk ([`super::area_park`]), come back when it returns ([`super::area_restore`]), and the eval model loads
 //! them back.
 
 use super::LiveModel;
 use brush_dataset::scene::SceneBatch;
-use crate::area::{AreaCounters, AreaParams, AreaReport, TileKey, TileRegistry, area_views};
+use crate::area::{AreaCounters, AreaParams, AreaReport, TileKey, TileRegistry, area_views, views_seeing};
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
 use brush_train::rows::SplatRows;
 use burn::tensor::{Tensor, s};
@@ -36,10 +37,25 @@ pub(crate) struct AreaState {
     pub(super) deferring: BTreeMap<TileKey, u32>,
     /// Tiles deferred since the last keyframe ended; a streak whose tile is not among them ends with the keyframe.
     pub(super) deferred_now: BTreeSet<TileKey>,
-    /// The left resident tiles whose rows the trainer holds ([`super::area_freeze`]).
+    /// The resident tiles whose rows the trainer holds ([`super::area_freeze`]): the left ones, or with
+    /// `area_freeze` inactive every resident tile not active.
     pub(super) frozen_keys: BTreeSet<TileKey>,
     /// Rows the trainer held when the mask was last built.
     pub(super) frozen_rows: u32,
+    /// With `area_freeze` inactive: the active tiles, the one under the newest camera first ([`super::area_active`]).
+    pub(super) active: Vec<TileKey>,
+    /// Boxes (min, max) of the active tiles that hold rows; the training views are the views that see one.
+    pub(super) active_boxes: Vec<(Vec3, Vec3)>,
+    /// Height range per tile of the rows seeded since the last visibility readback (which the registry has not seen).
+    pub(super) fresh: BTreeMap<TileKey, (f32, f32)>,
+    /// The active tiles the mask was last built for (sorted); `None` before any mask with `area_freeze` inactive.
+    pub(super) mask_active: Option<Vec<TileKey>>,
+    /// Rows outside the active tiles were appended since the mask was built (restores, seeds on new ground).
+    pub(super) mask_stale: bool,
+    /// Rows in the active tiles when the mask was last built.
+    pub(super) active_splats: u32,
+    /// The active set changed since the training views were last logged.
+    pub(super) active_changed: bool,
 }
 
 /// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
@@ -98,6 +114,13 @@ impl AreaState {
             deferred_now: BTreeSet::new(),
             frozen_keys: BTreeSet::new(),
             frozen_rows: 0,
+            active: Vec::new(),
+            active_boxes: Vec::new(),
+            fresh: BTreeMap::new(),
+            mask_active: None,
+            mask_stale: false,
+            active_splats: 0,
+            active_changed: false,
         }
     }
 }
@@ -142,9 +165,13 @@ impl LiveModel {
         }
     }
 
-    /// Recomputes the area's views around the newest view's current camera; no-op with area training off. The
-    /// newest view is always among them, even when its position is not finite.
+    /// Recomputes the area's views; no-op with area training off. With `area_freeze` inactive and an active tile that
+    /// holds rows they are the views that see an active tile up to `area_view_m` deep
+    /// ([`crate::area::views_seeing`]); otherwise the views within the radius of the newest view's current camera.
+    /// The newest view is always among them, even when its position is not finite. A changed active set is logged
+    /// with the view count.
     pub(super) fn refresh_area_views(&mut self) {
+        let view_m = self.config.area_view_m;
         let Some(area) = self.area.as_mut() else {
             return;
         };
@@ -153,7 +180,17 @@ impl LiveModel {
             area.views.clear();
             return;
         };
-        area.views = area_views(&positions, centre, area.registry.params().radius);
+        area.views = if area.active_boxes.is_empty() {
+            area_views(&positions, centre, area.registry.params().radius)
+        } else {
+            let cameras: Vec<_> = self.views.iter().map(|v| v.camera).collect();
+            views_seeing(&cameras, &area.active_boxes, view_m)
+        };
+        if std::mem::take(&mut area.active_changed) {
+            let stems: Vec<String> = area.active.iter().map(|k| k.stem()).collect();
+            let how = if area.active_boxes.is_empty() { "radius fallback" } else { "by sight" };
+            log::info!("area: active tiles {} ({} training views, {how})", stems.join(", "), area.views.len());
+        }
         // Only a non-finite centre leaves the newest view out; the loaders need at least one view.
         let newest = positions.len() - 1;
         if area.views.last() != Some(&newest) {
@@ -178,6 +215,8 @@ impl LiveModel {
             parking_off: area.parking_off,
             frozen_rows: area.frozen_rows,
             left_splats: area.registry.left_resident_splats(centre),
+            active_tiles: area.active.iter().map(|k| [k.x, k.z]).collect(),
+            active_splats: area.active_splats,
         })
     }
 

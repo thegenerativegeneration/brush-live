@@ -61,8 +61,8 @@ pub(super) struct EvalRecord {
     pub adam_clamped: u64,
     /// Splats the last training step left alone for lying beyond `train_radius_m`; `None` with the radius off.
     pub masked_by_radius: Option<u32>,
-    /// Views in the training area (camera within `area_radius_m` of the newest keyframe's, horizontally); `None`
-    /// with area training off.
+    /// Views that train with area training on: those that see an active tile (`area_freeze` inactive) or whose camera
+    /// lies within `area_radius_m` of the newest keyframe's, horizontally; `None` with area training off.
     pub area_views: Option<u32>,
     /// Milliseconds the full model took to assemble (resident splats plus every parked tile read from disk) with
     /// area training on.
@@ -132,6 +132,8 @@ mod tests {
             parking_off: true,
             frozen_rows: 12,
             left_splats: 30,
+            active_tiles: vec![[0, 1], [1, 1]],
+            active_splats: 7,
         });
         r.parked_load_ms = Some(4.5);
         let some = serde_json::to_value(&r).unwrap();
@@ -142,6 +144,8 @@ mod tests {
         assert_eq!(some["area"]["frozen_rows"].as_u64(), Some(12));
         assert_eq!(some["area"]["left_splats"].as_u64(), Some(30));
         assert_eq!(some["area"]["parks_for_cap"].as_u64(), Some(0));
+        let active = (some["area"]["active_tiles"][1][0].as_i64(), some["area"]["active_splats"].as_u64());
+        assert_eq!(active, (Some(1), Some(7)));
     }
 
     #[test]

@@ -5,7 +5,7 @@ use super::tests::{by_row, rows_where};
 use super::*;
 use crate::area::{ParkedTile, decode_tile, encode_tile, read_tile};
 use brush_train::rows::SplatRows;
-use crate::config::GuideConfig;
+use crate::config::{AreaFreeze, GuideConfig};
 use crate::live::area::tests::{add, area_config, device, tmp};
 use crate::live::area_restore::tests::train;
 use std::path::PathBuf;
@@ -96,11 +96,12 @@ async fn area_off_has_no_cap() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// With `area_hold_left` off, the left tiles' rows keep training while resident, nothing is held, and the cap still
+/// With `area_freeze` none, the left tiles' rows keep training while resident, nothing is held, and the cap still
 /// parks the farthest left tiles once their rows exceed it.
 #[tokio::test]
 async fn hold_off_left_rows_train_and_the_cap_parks_the_farthest() {
-    let hold_off = |fraction| GuideConfig { area_hold_left: false, area_held_fraction: fraction, ..area_config(2.0) };
+    let hold_off =
+        |fraction| GuideConfig { area_freeze: AreaFreeze::Off, area_held_fraction: fraction, ..area_config(2.0) };
     let (mut live, dir) = looking_back_with("cap-hold-off", hold_off(1.0)).await;
     let left = live.area.as_ref().unwrap().registry.left_keys(Vec3::new(6.0, 0.0, 2.0));
     let in_left = |p: Vec3| left.contains(&TileKey::of(p, 1.0));

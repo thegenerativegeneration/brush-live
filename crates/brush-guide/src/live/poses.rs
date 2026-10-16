@@ -63,9 +63,9 @@ impl LiveModel {
 
     /// Moves views to corrected poses: the view's camera, its Mip-filter camera and, for the newest view, the
     /// protected cone, and moves the splats each moved view seeded by that view's correction (when
-    /// `move_anchored_splats` is on); then recomputes the area's views and rebuilds both loaders so no batch with an
-    /// old camera, or of a view that left the area, is drawn again. The score set needs nothing: each round reads the
-    /// splats and the current views.
+    /// `move_anchored_splats` is on); then ranks the active tiles again, recomputes the area's views and rebuilds both
+    /// loaders so no batch with an old camera, or of a view that left the area, is drawn again. The score set needs
+    /// nothing: each round reads the splats and the current views.
     pub fn update_poses(&mut self, poses: &[ViewPose]) -> PoseUpdateStats {
         let mut stats = PoseUpdateStats::default();
         // Per moved view: its slot and the world transform that takes the old camera onto the new one.
@@ -99,6 +99,8 @@ impl LiveModel {
                 self.splats = Some(t.move_by_origin(splats, &moves));
             }
         }
+        let camera = self.views[newest].camera;
+        self.refresh_active(&camera, &[]);
         self.refresh_area_views();
         self.rebuild_all_loaders();
         stats
