@@ -298,6 +298,7 @@ pub fn load_capture(
         format_version:1,source:root,source_kind:"arkit_raw".into(),pose_convention:"camera-to-world OpenGL/ARKit; converted to Brush +z forward/y down; depth camera-z metres".into(),
         selection:selection.clone(),train_ids:train.iter().map(|f|f.id).collect(),holdout_ids:holdout.iter().map(|f|f.id).collect(),source_sha256:hashes,
         selection_note:"Depth-support-selected subset, including eventual held-out depth statistics; optimization-isolated, not selection-blind".into(),
+        frozen:None,
     };
     Ok(CaptureSplit {
         train,

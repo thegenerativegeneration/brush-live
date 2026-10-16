@@ -36,6 +36,28 @@ pub struct CaptureManifest {
     /// Relative source paths to SHA-256, including the complete transforms JSON.
     pub source_sha256: BTreeMap<String, String>,
     pub selection_note: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen: Option<FrozenAssets>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssetReference {
+    pub file: PathBuf,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FrozenAssets {
+    pub seed: AssetReference,
+    pub roi: BTreeMap<u64, AssetReference>,
+    pub seed_config: serde_json::Value,
+    pub loss_config: serde_json::Value,
+    pub schedule_config: serde_json::Value,
+    pub render_config: serde_json::Value,
+    pub rng_seed: u64,
+    pub git_revision: String,
+    pub dirty_patch_sha256: String,
+    pub environment: serde_json::Value,
 }
 
 pub struct CaptureSplit {

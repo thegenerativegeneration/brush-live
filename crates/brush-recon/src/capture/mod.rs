@@ -1,5 +1,6 @@
 mod manifest;
+pub mod mask;
 mod raw;
 
-pub use manifest::{CaptureManifest, CaptureSelection, CaptureSplit};
+pub use manifest::{AssetReference, CaptureManifest, CaptureSelection, CaptureSplit, FrozenAssets};
 pub use raw::load_capture;
