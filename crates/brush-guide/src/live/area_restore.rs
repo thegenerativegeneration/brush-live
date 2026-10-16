@@ -109,6 +109,7 @@ impl LiveModel {
         area.counters.max_restore_ms = area.counters.max_restore_ms.max(ms);
         log::info!("area: restore event {tiles} tiles, {restored} splats in {ms:.1} ms ({reason})");
         if tiles > 0 {
+            area.mask_stale = true;
             area.junction.steps_left = junction_steps;
             // A running junction starts over with other views: its decoded batches would fill the cache.
             area.junction.cache.clear();
@@ -276,3 +277,7 @@ pub(in crate::live) mod tests;
 #[cfg(test)]
 #[path = "area_room_tests.rs"]
 mod room_tests;
+
+#[cfg(test)]
+#[path = "area_restore_bulk_tests.rs"]
+mod bulk_tests;
