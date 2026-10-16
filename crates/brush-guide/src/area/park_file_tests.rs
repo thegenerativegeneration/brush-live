@@ -1,4 +1,5 @@
 use super::*;
+use brush_train::rows::RowMoments;
 
 /// A deterministic pseudo-random stream in [0, 1) (xorshift), so the test needs no RNG crate API.
 fn stream(mut s: u32) -> impl FnMut() -> f32 {
@@ -182,7 +183,7 @@ fn every_prefix_and_every_unknown_header_is_an_error() {
     };
     let version = decode_tile(&patched(4, TILE_FILE_VERSION + 1)).unwrap_err();
     assert!(version.to_string().contains("version"), "{version}");
-    assert!(decode_tile(&patched(28, 0b10)).is_err(), "unknown flag bit");
+    assert!(decode_tile(&patched(28, 0b1000)).is_err(), "unknown flag bit");
     assert!(
         decode_tile(&patched(20, u32::MAX)).is_err(),
         "a row count beyond the file"
@@ -266,4 +267,67 @@ fn a_failed_write_leaves_no_temporary_file() {
     assert!(write_tile(&dir, &t).is_err());
     assert!(!dir.join("-3_12.bin.tmp").exists());
     std::fs::remove_dir_all(dir).ok();
+}
+
+/// `n` rows of moments whose magnitudes span 1e-30 to 1e-1 with both signs on the first moments, plus exact zeros.
+fn wide_moments(n: usize, coeffs: usize) -> RowMoments {
+    let mut r = stream(11);
+    let mut m = RowMoments::zeros(n, coeffs);
+    let mut fill = |v: &mut Vec<f32>, signed: bool| {
+        for (i, x) in v.iter_mut().enumerate() {
+            let mag = 10f32.powf(-30.0 + 29.0 * r());
+            *x = match i % 7 {
+                0 => 0.0,
+                1 => 1e-10,
+                _ if signed && i % 2 == 0 => -mag,
+                _ => mag,
+            };
+        }
+    };
+    fill(&mut m.transforms_m1, true);
+    fill(&mut m.transforms_m2, false);
+    fill(&mut m.sh_m1, true);
+    fill(&mut m.sh_m2, false);
+    fill(&mut m.opacity_m1, true);
+    fill(&mut m.opacity_m2, false);
+    m
+}
+
+/// Task 17b: the moments come back within bfloat16 (relative 2⁻⁸, the zeros and a squared gradient of 1e-10 too, which
+/// fp16 would flush to zero), and the trained flags exactly.
+#[test]
+fn moments_and_trained_flags_round_trip() {
+    let mut r = rows(37, Vec3::ZERO);
+    r.moments = Some(wide_moments(37, 4));
+    r.trained = (0..37).map(|i| i % 3 != 0).collect();
+    let back = decode_tile(&encode_tile(&tile(r.clone()))).unwrap().rows;
+    assert_eq!(back.trained, r.trained);
+    let (got, want) = (back.moments.unwrap(), r.moments.unwrap());
+    for ((name, g, _), (_, w, _)) in got.columns(4).iter().zip(want.columns(4)) {
+        assert_eq!(g.len(), w.len(), "{name}");
+        for (x, y) in g.iter().zip(w) {
+            assert!((x - y).abs() <= y.abs() / 256.0, "{name}: {x} vs {y}");
+            assert_eq!(*y == 0.0, *x == 0.0, "{name}: {x} vs {y}");
+        }
+    }
+    assert!(want.sh_m2.contains(&1e-10) && got.sh_m2.iter().any(|&v| (v - 1e-10).abs() < 1e-12));
+}
+
+/// Task 17b: a version 1 file (the layout without moments and trained flags) still loads, without moments (the trainer
+/// starts them at zero) and without flags (the rows count as trained); version 1 knows no flag but the floor.
+#[test]
+fn a_version_1_file_loads_without_moments() {
+    let t = tile(rows(9, Vec3::ZERO));
+    let mut v1 = encode_tile(&t);
+    v1[4..8].copy_from_slice(&1u32.to_le_bytes());
+    let back = decode_tile(&v1).unwrap();
+    assert_eq!(back, decode_tile(&encode_tile(&t)).unwrap());
+    assert!(back.rows.moments.is_none() && back.rows.trained.is_empty());
+    let mut flagged = v1.clone();
+    flagged[28..32].copy_from_slice(&0b11u32.to_le_bytes());
+    assert!(decode_tile(&flagged).is_err(), "version 1 has no moments flag");
+    let mut with = t.clone();
+    with.rows.moments = Some(RowMoments::zeros(9, 4));
+    assert_eq!(&encode_tile(&with)[4..8], &TILE_FILE_VERSION.to_le_bytes(), "files are written at version 2");
+    assert_eq!(TILE_FILE_VERSION, 2);
 }

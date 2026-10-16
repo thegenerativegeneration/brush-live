@@ -283,8 +283,8 @@ async fn restore_one(live: &mut LiveModel, key: TileKey, n: usize) -> SplatRows 
 }
 
 /// The user requirement, read before any refine touches them: a parked and restored tile comes back as it was
-/// taken, means exact, rotations normalised and the other columns within fp16, with its origins, ages, importance
-/// and Mip floor.
+/// taken, means exact, rotations normalised and the other columns within fp16, with its origins, ages, importance,
+/// Mip floor and trained flags, and its Adam moments within bf16 (Task 17b).
 #[tokio::test]
 async fn a_restored_tile_equals_the_parked_one() {
     let (mut live, dir, key, taken) = one_tile_parked("restore-equal", area_config(2.0)).await;
@@ -311,6 +311,15 @@ async fn a_restored_tile_equals_the_parked_one() {
     close(&back.raw_opacities, &taken.raw_opacities, "opacities");
     close(&back.sh_coeffs, &taken.sh_coeffs, "SH");
     close(&back.min_scale, &taken.min_scale, "floor");
+    assert_eq!(back.trained, taken.trained);
+    let (b, t) = (back.moments.expect("restored moments"), taken.moments.expect("parked moments"));
+    assert!(t.opacity_m1.iter().any(|&v| v != 0.0), "the steps left moments to park");
+    for ((name, got, _), (_, want, _)) in b.columns(4).iter().zip(t.columns(4)) {
+        assert_eq!(got.len(), want.len(), "{name}");
+        for (x, y) in got.iter().zip(want) {
+            assert!((x - y).abs() <= y.abs() / 256.0, "{name}: {x} vs {y}");
+        }
+    }
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -340,7 +349,11 @@ async fn a_tile_of_another_sh_degree_is_dropped() {
     for &key in &keys {
         let mut tile = read_tile(&tiles, key).unwrap();
         let coeffs = tile.rows.sh_coeffs_per_channel as usize;
-        tile.rows.sh_coeffs = tile.rows.sh_coeffs.chunks(coeffs * 3).flat_map(|c| c[..3].to_vec()).collect();
+        let band_0 = |v: &[f32]| v.chunks(coeffs * 3).flat_map(|c| c[..3].to_vec()).collect();
+        tile.rows.sh_coeffs = band_0(&tile.rows.sh_coeffs);
+        if let Some(m) = tile.rows.moments.as_mut() {
+            m.sh_m1 = band_0(&m.sh_m1);
+        }
         tile.rows.sh_coeffs_per_channel = 1;
         write_tile(&tiles, &tile).unwrap();
     }

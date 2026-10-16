@@ -126,9 +126,9 @@ impl LiveModel {
     /// 2. A file that cannot be read, holds another SH degree, or whose seeding views carry the tile more than
     ///    `area_restore_inconsistency_m` apart is dropped ([`Self::drop_parked`]).
     /// 3. The planned tiles park; if that fell short (parking off, a skipped park), the restore is deferred.
-    /// 4. The rows, moved by their views' pose corrections since the park, are appended (zero Adam moments; their
-    ///    floor, age and importance kept, the importance unscored after more than `STALE_WINDOWS` seen windows), the
-    ///    file goes, and the rows' box joins the junction.
+    /// 4. The rows, moved by their views' pose corrections since the park, are appended (their Adam moments, floor,
+    ///    age, importance and trained flags kept, zero moments from a version 1 file, the importance unscored after
+    ///    more than `STALE_WINDOWS` seen windows), the file goes, and the rows' box joins the junction.
     async fn restore_one(&mut self, splats: Splats, dir: &Path, key: TileKey, centre: Vec3) -> (Splats, Restore) {
         let max_splats = self.config.max_splats;
         let keyframes = self.views.len() as u32;

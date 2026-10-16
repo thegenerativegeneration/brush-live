@@ -1,25 +1,41 @@
 //! The tile file: the splat rows of one parked tile plus the poses of the views that seeded them at park time, so a
-//! restore can replay the pose corrections made while the tile was parked ([`super::pose_replay`]).
+//! restore can replay the pose corrections made while the tile was parked ([`super::pose_replay`]), and the rows'
+//! Adam moments, so a restored tile trains on where it stopped.
 //!
 //! Layout, little-endian: `b"BGTL"`, u32 file version, i32 key x, i32 key z, u32 tile version, u32 row count n, u32
-//! SH coefficients per channel, u32 flags (bit 0: floor), u32 pose count; per pose u32 slot, 3×f32 position, 4×f32
-//! rotation (x y z w); then the columns: means f32×3n, rotations f16×4n (normalised, w x y z), log-scales f16×3n,
-//! raw opacities f16×n, SH f16×(n·coeffs·3), floor f16×n (when flagged), origin u32×n (slot + 1, 0 none), age f32×n,
-//! importance f32×n. Means stay f32 so splats far from the world origin keep their position exactly.
+//! SH coefficients per channel, u32 flags (bit 0: floor, bit 1: moments, bit 2: trained flags), u32 pose count; per
+//! pose u32 slot, 3×f32 position, 4×f32 rotation (x y z w); then the columns: means f32×3n, rotations f16×4n
+//! (normalised, w x y z), log-scales f16×3n, raw opacities f16×n, SH f16×(n·coeffs·3), floor f16×n (when flagged),
+//! origin u32×n (slot + 1, 0 none), age f32×n, importance f32×n, trained u8×n (1 trained, when flagged), and when
+//! flagged the moments in bf16: transforms first and second moment 10n each, SH first moment n·coeffs·3, SH second
+//! moment n (one per row), opacity first and second moment n each. Means stay f32 so splats far from the world origin
+//! keep their position exactly.
+//!
+//! Moments are bf16, not f16: a second moment is a mean squared gradient, often 1e-10 or smaller, which f16 (smallest
+//! subnormal 6e-8) would flush to zero; a zero second moment under a nonzero first one is the step Adam clamps at its
+//! largest. bf16 keeps f32's range at a relative precision of 2⁻⁸. No per-row step count is stored: the trainer's bias
+//! correction uses its one step count for every row, which is what a row that stayed resident and held still sees.
+//!
+//! Version 1 is the same layout without flag bits 1 and 2; it still loads, its rows without moments (the trainer
+//! starts them at zero) and without trained flags (the rows count as trained).
 
 use super::tiles::TileKey;
-use brush_train::rows::SplatRows;
+use brush_train::rows::{RowMoments, SplatRows};
 use glam::{Quat, Vec3};
-use half::f16;
+use half::{bf16, f16};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-/// The layout this module writes and the only one it reads.
-pub const TILE_FILE_VERSION: u32 = 1;
+/// The layout this module writes; it reads this one and version 1.
+pub const TILE_FILE_VERSION: u32 = 2;
 
 const MAGIC: &[u8; 4] = b"BGTL";
 /// Flags bit 0: the file carries a Mip floor column.
 const FLAG_FLOOR: u32 = 1;
+/// Flags bit 1 (version 2): the file carries the Adam moment columns.
+const FLAG_MOMENTS: u32 = 2;
+/// Flags bit 2 (version 2): the file carries the trained flag column.
+const FLAG_TRAINED: u32 = 4;
 /// Magic plus eight u32 / i32 header fields.
 const HEADER_BYTES: usize = 36;
 
@@ -71,6 +87,10 @@ fn put_f16s(out: &mut Vec<u8>, values: impl IntoIterator<Item = f32>) {
     );
 }
 
+fn put_bf16s(out: &mut Vec<u8>, values: &[f32]) {
+    out.extend(values.iter().flat_map(|&v| bf16::from_f32(v).to_le_bytes()));
+}
+
 /// `q` (w x y z) scaled to unit length; a zero or non-finite length leaves it as it is.
 fn normalised(q: &[f32]) -> [f32; 4] {
     let l = q.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -103,12 +123,20 @@ pub fn encode_tile(t: &ParkedTile) -> Vec<u8> {
         panic!("encode_tile: {e}");
     }
     let n = r.len() as u32;
+    let coeffs = r.sh_coeffs_per_channel as usize;
     let floor = !r.min_scale.is_empty();
-    // Header, poses, then per row: means, rotations, log-scales, opacity, floor, origin, age, importance; and SH.
-    let row_bytes = 12 + 8 + 6 + 2 + 2 + 4 + 4 + 4;
+    let trained = !r.trained.is_empty();
+    // Header, poses, then per row: means, rotations, log-scales, opacity, floor, origin, age, importance, trained;
+    // SH; moments.
+    let row_bytes = 12 + 8 + 6 + 2 + 2 + 4 + 4 + 4 + 1;
+    let moment_bytes = r.moments.as_ref().map_or(0, |m| m.columns(coeffs).iter().map(|c| c.1.len() * 2).sum());
     let mut out = Vec::with_capacity(
-        HEADER_BYTES + t.slot_poses.len() * 32 + r.len() * row_bytes + r.sh_coeffs.len() * 2,
+        HEADER_BYTES + t.slot_poses.len() * 32 + r.len() * row_bytes + r.sh_coeffs.len() * 2 + moment_bytes,
     );
+    let flags = [(floor, FLAG_FLOOR), (r.moments.is_some(), FLAG_MOMENTS), (trained, FLAG_TRAINED)]
+        .iter()
+        .filter(|(on, _)| *on)
+        .fold(0, |f, (_, bit)| f | bit);
     out.extend_from_slice(MAGIC);
     put_u32(&mut out, TILE_FILE_VERSION);
     put_i32(&mut out, t.key.x);
@@ -116,7 +144,7 @@ pub fn encode_tile(t: &ParkedTile) -> Vec<u8> {
     put_u32(&mut out, t.version);
     put_u32(&mut out, n);
     put_u32(&mut out, r.sh_coeffs_per_channel);
-    put_u32(&mut out, if floor { FLAG_FLOOR } else { 0 });
+    put_u32(&mut out, flags);
     put_u32(
         &mut out,
         u32::try_from(t.slot_poses.len()).expect("pose count fits u32"),
@@ -138,6 +166,12 @@ pub fn encode_tile(t: &ParkedTile) -> Vec<u8> {
     }
     put_f32s(&mut out, &r.age);
     put_f32s(&mut out, &r.importance);
+    out.extend(r.trained.iter().map(|&t| u8::from(t)));
+    if let Some(m) = &r.moments {
+        for (_, values, _) in m.columns(coeffs) {
+            put_bf16s(&mut out, values);
+        }
+    }
     out
 }
 
@@ -204,6 +238,24 @@ impl<'a> Reader<'a> {
             .map(|b| f16::from_le_bytes(b.try_into().expect("2 bytes")).to_f32())
             .collect())
     }
+
+    fn bf16s(&mut self, count: usize) -> io::Result<Vec<f32>> {
+        Ok(self
+            .chunks(count, 2)?
+            .map(|b| bf16::from_le_bytes(b.try_into().expect("2 bytes")).to_f32())
+            .collect())
+    }
+
+    /// `count` trained flags, one byte each: 0 untrained, 1 trained.
+    fn flags(&mut self, count: usize) -> io::Result<Vec<bool>> {
+        self.take(count)?
+            .iter()
+            .map(|&b| match b {
+                0 | 1 => Ok(b == 1),
+                _ => Err(invalid(format!("trained flag {b}"))),
+            })
+            .collect()
+    }
 }
 
 /// The fixed-size head of a tile file.
@@ -213,6 +265,8 @@ struct Header {
     n: usize,
     coeffs: u32,
     floor: bool,
+    moments: bool,
+    trained: bool,
     poses: usize,
 }
 
@@ -220,10 +274,11 @@ fn read_header(r: &mut Reader<'_>) -> io::Result<Header> {
     if r.take(4)? != MAGIC {
         return Err(invalid("not a tile file"));
     }
-    let file_version = r.u32()?;
-    if file_version != TILE_FILE_VERSION {
-        return Err(invalid(format!("tile file version {file_version}")));
-    }
+    let known = match r.u32()? {
+        1 => FLAG_FLOOR,
+        TILE_FILE_VERSION => FLAG_FLOOR | FLAG_MOMENTS | FLAG_TRAINED,
+        other => return Err(invalid(format!("tile file version {other}"))),
+    };
     let key = TileKey {
         x: r.i32()?,
         z: r.i32()?,
@@ -232,7 +287,7 @@ fn read_header(r: &mut Reader<'_>) -> io::Result<Header> {
     let n = r.u32()? as usize;
     let coeffs = r.u32()?;
     let flags = r.u32()?;
-    if flags & !FLAG_FLOOR != 0 {
+    if flags & !known != 0 {
         return Err(invalid(format!("unknown tile file flags {flags:#x}")));
     }
     let poses = r.u32()? as usize;
@@ -242,12 +297,29 @@ fn read_header(r: &mut Reader<'_>) -> io::Result<Header> {
         n,
         coeffs,
         floor: flags & FLAG_FLOOR != 0,
+        moments: flags & FLAG_MOMENTS != 0,
+        trained: flags & FLAG_TRAINED != 0,
         poses,
     })
 }
 
-/// The tile in `bytes`. An `InvalidData` error for a truncated or foreign file, another file version, unknown
-/// flags, bytes after the last column, or columns that fail [`SplatRows::check`]; never a panic.
+/// The moment columns of `n` rows with `sh_width` SH values per row.
+fn read_moments(r: &mut Reader<'_>, n: usize, sh_width: usize) -> io::Result<RowMoments> {
+    let ten = n.checked_mul(10).ok_or_else(|| invalid("tile file sizes overflow"))?;
+    let sh = n.checked_mul(sh_width).ok_or_else(|| invalid("tile file sizes overflow"))?;
+    Ok(RowMoments {
+        transforms_m1: r.bf16s(ten)?,
+        transforms_m2: r.bf16s(ten)?,
+        sh_m1: r.bf16s(sh)?,
+        sh_m2: r.bf16s(n)?,
+        opacity_m1: r.bf16s(n)?,
+        opacity_m2: r.bf16s(n)?,
+    })
+}
+
+/// The tile in `bytes`, of this file version or version 1. An `InvalidData` error for a truncated or foreign file,
+/// another file version, flags unknown to its version, a trained flag other than 0 or 1, bytes after the last column,
+/// or columns that fail [`SplatRows::check`]; never a panic.
 pub fn decode_tile(bytes: &[u8]) -> io::Result<ParkedTile> {
     let mut r = Reader { bytes };
     let h = read_header(&mut r)?;
@@ -285,8 +357,8 @@ pub fn decode_tile(bytes: &[u8]) -> io::Result<ParkedTile> {
         age: r.f32s(h.n)?,
         importance: r.f32s(h.n)?,
         sh_coeffs_per_channel: h.coeffs,
-        trained: Vec::new(),
-        moments: None,
+        trained: if h.trained { r.flags(h.n)? } else { Vec::new() },
+        moments: if h.moments { Some(read_moments(&mut r, h.n, sh_width)?) } else { None },
     };
     if !r.bytes.is_empty() {
         return Err(invalid(format!(

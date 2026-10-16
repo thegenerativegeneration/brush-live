@@ -100,6 +100,7 @@ async fn final_export_skips_unreadable_and_other_degree_tiles() {
     let dc = |i: usize| other.rows.sh_coeffs[i * coeffs * 3..i * coeffs * 3 + 3].to_vec();
     other.rows.sh_coeffs = (0..n).flat_map(dc).collect();
     other.rows.sh_coeffs_per_channel = 1;
+    other.rows.moments = None;
     assert_ne!(coeffs, 1, "the model trains higher SH degrees");
     write_tile(&tiles, &other).unwrap();
     let left_out: u32 = keys[..2].iter().map(|&k| live.area.as_ref().unwrap().registry.get(k).unwrap().splats).sum();

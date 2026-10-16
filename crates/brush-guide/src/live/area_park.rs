@@ -99,7 +99,7 @@ impl LiveModel {
 
     /// Parks the resident tiles `keys`: their rows leave the trainer and go to one tile file each, with the pose of
     /// every view that seeded them. A park that would take every resident row is skipped (counted). The rows of a
-    /// tile whose file cannot be written go back to the trainer (with zero Adam moments) and parking stays off until
+    /// tile whose file cannot be written go back to the trainer (with their Adam moments) and parking stays off until
     /// the next reset. Each park logs one line per tile and one for the whole event, whose time includes the row
     /// readback. After a park the all-views loader drops views that left the area. No-op with parking off.
     pub(super) async fn park_tiles(&mut self, splats: Splats, keys: &[TileKey]) -> Splats {
