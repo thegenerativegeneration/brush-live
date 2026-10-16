@@ -96,7 +96,8 @@ impl LiveModel {
             seeds.mono
         );
         self.refresh_active(&kf.camera, &seeds.means);
-        let seeds = self.drop_over_tile_cap(seeds);
+        let (seeds, full) = self.drop_over_tile_cap(seeds);
+        log_dropped(Dropped { full, ..Dropped::default() });
         let seeds = self.cap_seeds(seeds, 0);
         self.note_seeded(&seeds.means);
         let splats = if seeds.colors.len() >= 3 {
@@ -140,8 +141,9 @@ impl LiveModel {
             splats.num_splats()
         );
         self.refresh_active(&kf.camera, &seeds.means);
-        let (splats, seeds) = self.triage_parked(splats, seeds, kf, size, mono).await;
-        let seeds = self.drop_over_tile_cap(seeds);
+        let (splats, seeds, dropped) = self.triage_parked(splats, seeds, kf, size, mono).await;
+        let (seeds, full) = self.drop_over_tile_cap(seeds);
+        log_dropped(Dropped { full, ..dropped });
         let seeds = self.cap_seeds(seeds, splats.num_splats());
         self.note_seeded(&seeds.means);
         let new = (seeds.colors.len() >= 3).then(|| {
@@ -202,9 +204,9 @@ impl LiveModel {
         kf: &DecodedKeyframe,
         size: UVec2,
         mono: Option<MonoSeed<'_>>,
-    ) -> (Splats, Seeds) {
+    ) -> (Splats, Seeds, Dropped) {
         let Some(area) = self.area.as_ref() else {
-            return (splats, seeds);
+            return (splats, seeds, Dropped::default());
         };
         let pos = kf.camera.position;
         let min_seeds = self.config.area_restore_min_seeds as usize;
@@ -231,21 +233,24 @@ impl LiveModel {
             let registry = &self.area.as_ref().expect("area training is on").registry;
             let mut keep = registry.triage_seeds(&seeds.means, pos, usize::MAX).keep;
             let sort = self.keep_active(&seeds.means, &mut keep);
-            return (splats, kept_logged(seeds, &keep, sort));
+            let (seeds, dropped) = kept(seeds, &keep, sort);
+            return (splats, seeds, dropped);
         }
         let mut keep = triage.keep;
         let sort = self.keep_active(&seeds.means, &mut keep);
-        (splats, kept_logged(seeds, &keep, sort))
+        let (seeds, dropped) = kept(seeds, &keep, sort);
+        (splats, seeds, dropped)
     }
 
-    /// Drops the seeds whose tile has no room under `area_tile_max_splats` ([`Self::tile_cap_keep`]), logged.
-    fn drop_over_tile_cap(&mut self, seeds: Seeds) -> Seeds {
+    /// Drops the seeds whose tile has no room under the per-tile cap ([`Self::tile_cap_keep`]); returns the rest and
+    /// how many went.
+    fn drop_over_tile_cap(&mut self, seeds: Seeds) -> (Seeds, u32) {
         let Some(keep) = self.tile_cap_keep(&seeds.means) else {
-            return seeds;
+            return (seeds, 0);
         };
         let kept = keep_seeds(seeds, &keep);
-        log::info!("area: dropped {} seeds in full tiles", keep.len() - kept.colors.len());
-        kept
+        let dropped = (keep.len() - kept.colors.len()) as u32;
+        (kept, dropped)
     }
 
     fn seeds_to_splats(&self, means: Vec<f32>, colors: &[Vec3]) -> Splats {
@@ -264,15 +269,36 @@ impl LiveModel {
     }
 }
 
-/// The seeds `keep` flags (see [`keep_seeds`]); logs how many were dropped, `sort.dropped` of them for landing in
-/// tiles outside the active set, the rest in parked or left tiles.
-fn kept_logged(seeds: Seeds, keep: &[bool], sort: SeedSort) -> Seeds {
+/// Seeds an area keyframe dropped, by reason.
+#[derive(Clone, Copy, Debug, Default)]
+struct Dropped {
+    /// In parked or left tiles.
+    parked: u32,
+    /// In tiles with rows outside the active set.
+    inactive: u32,
+    /// In tiles at the per-tile cap.
+    full: u32,
+}
+
+/// The seeds `keep` flags (see [`keep_seeds`]) and how many went, `sort.dropped` of them for landing in tiles outside
+/// the active set, the rest in parked or left tiles.
+fn kept(seeds: Seeds, keep: &[bool], sort: SeedSort) -> (Seeds, Dropped) {
     let kept = keep_seeds(seeds, keep);
-    let dropped = keep.len() - kept.colors.len();
-    if dropped > 0 {
-        log::info!("area: dropped {dropped} seeds ({} outside the active tiles)", sort.dropped);
+    let gone = (keep.len() - kept.colors.len()) as u32;
+    (kept, Dropped { parked: gone.saturating_sub(sort.dropped), inactive: sort.dropped, full: 0 })
+}
+
+/// Logs the seeds a keyframe dropped, once all drops are known; nothing when none were.
+fn log_dropped(d: Dropped) {
+    let total = d.parked + d.inactive + d.full;
+    if total > 0 {
+        log::info!(
+            "area: dropped {total} seeds ({} in parked or left tiles, {} outside the active tiles, {} in full tiles)",
+            d.parked,
+            d.inactive,
+            d.full
+        );
     }
-    kept
 }
 
 /// The seeds `keep` flags; the mono count is clamped to what is left, since which seeds came from mono depth is not

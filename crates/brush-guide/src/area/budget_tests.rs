@@ -56,23 +56,29 @@ fn seeds_into_a_full_tile_are_dropped() {
     assert!(keep.iter().all(|&k| k));
 }
 
-/// After the left tiles, the tiles that are neither active nor near and lie beyond the radius park, farthest first,
-/// until they hold the need; a tile within the radius, an active one and a recently restored one never do, and
-/// neither does the last of the resident rows.
+/// After the left tiles, the tiles that are neither active nor near, lie beyond radius + max(hysteresis, far seed)
+/// (20 m) and are not seen park, farthest first, until they hold the need; a nearer tile, a seen one, an active one
+/// and a recently restored one never do, and neither does the last of the resident rows.
 #[test]
 fn far_inactive_tiles_park_farthest_first() {
-    let mut r = registry_with(&[((0, 0), 5), ((1, 0), 5), ((3, 0), 4), ((4, 0), 3), ((5, 0), 2), ((-4, 0), 6)]);
+    let mut r =
+        registry_with(&[((0, 0), 5), ((1, 0), 5), ((2, 0), 4), ((3, 0), 4), ((4, 0), 3), ((5, 0), 2), ((-4, 0), 6)]);
     let centre = Vec3::new(5.0, 0.0, 5.0);
-    // (5, 0) is active; (1, 0) lies within the radius.
+    let unseen = |_: TileKey| false;
+    // (5, 0) is active; (1, 0) and (2, 0) lie within 20 m (5 and 15 m).
     let keep = [key(0, 0), key(5, 0)];
-    assert_eq!(far_inactive_to_park(&r, 5, 25, centre, 30, &keep), vec![key(-4, 0)]);
-    assert_eq!(far_inactive_to_park(&r, 7, 25, centre, 30, &keep), vec![key(-4, 0), key(4, 0)]);
-    assert_eq!(far_inactive_to_park(&r, 100, 25, centre, 30, &keep), vec![key(-4, 0), key(4, 0), key(3, 0)]);
+    assert_eq!(far_inactive_to_park(&r, 5, 25, centre, 30, &keep, unseen), vec![key(-4, 0)]);
+    assert_eq!(far_inactive_to_park(&r, 7, 25, centre, 30, &keep, unseen), vec![key(-4, 0), key(4, 0)]);
+    let all = far_inactive_to_park(&r, 100, 25, centre, 30, &keep, unseen);
+    assert_eq!(all, vec![key(-4, 0), key(4, 0), key(3, 0)]);
+    let seen = |k: TileKey| k == key(-4, 0);
+    assert_eq!(far_inactive_to_park(&r, 5, 25, centre, 30, &keep, seen), vec![key(4, 0), key(3, 0)], "seen");
     r.mark_parked(key(-4, 0), 6, 0);
     r.mark_restored(key(-4, 0), 25, 0);
-    assert_eq!(far_inactive_to_park(&r, 5, 25, centre, 30, &keep), vec![key(4, 0), key(3, 0)], "restored 5 kf ago");
+    let fresh = far_inactive_to_park(&r, 5, 25, centre, 30, &keep, unseen);
+    assert_eq!(fresh, vec![key(4, 0), key(3, 0)], "restored 5 kf ago");
     // Of 7 resident rows, (-4, 0) takes 6: adding (4, 0) or (3, 0) would take them all.
-    assert_eq!(far_inactive_to_park(&r, 100, 7, centre, 50, &keep), vec![key(-4, 0)]);
+    assert_eq!(far_inactive_to_park(&r, 100, 7, centre, 50, &keep, unseen), vec![key(-4, 0)]);
 }
 
 /// One group per tile: a tile at the cap is full and keeps the cap; with a fair share an active tile gives its rows

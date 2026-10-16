@@ -56,8 +56,10 @@ pub struct AreaCounters {
     pub active_reversals: u32,
     /// Tiles parked before a refine to make room for its eviction or for the held cap (`parks_for_cap` among them).
     pub parks_for_room: u32,
-    /// Seeds dropped because their tile had no room under `area_tile_max_splats`.
+    /// Seeds dropped because their tile had no room under the per-tile cap.
     pub seeds_over_tile_cap: u32,
+    /// Refines whose eviction was widened because parks and the active tiles' fair shares did not cover it.
+    pub eviction_fallbacks: u32,
 }
 
 /// Area training's state for the eval log: tile and splat counts, counters, and every tile's state.
@@ -91,4 +93,7 @@ pub struct AreaReport {
     pub tile_splats: Vec<[i32; 3]>,
     /// `[x, z, rows]`: rows refines evicted per tile under a row budget since the start, tiles with evictions only.
     pub tile_evictions: Vec<[i32; 3]>,
+    /// The per-tile cap in effect (`area_tile_max_fraction` of `max_splats`); 0: none. Held rows no step ever trained
+    /// are eviction victims at the total cap with or without it.
+    pub tile_cap: u32,
 }

@@ -1,17 +1,26 @@
 //! The splat budget of area training in the live model:
-//! - Per tile (`area_tile_max_splats`): seeds into a full tile are dropped; at a refine the trainer gets a row budget
+//! - Per tile (`area_tile_max_fraction` of `max_splats`): seeds into a full tile are dropped; at a refine the trainer
+//!   gets a row budget
 //!   ([`crate::area::row_budget`]) under which a full tile's rows do not densify and a tile over the cap evicts its
 //!   least important rows down to it.
-//! - At the total cap (`max_splats`): before a refine, the tiles the walker has left park first, then the tiles
-//!   neither active nor near beyond the radius ([`LiveModel::park_for_room`]); an eviction that still bites takes only
-//!   rows of active tiles above their fair share (`max_splats` / active tiles), or held rows no step ever trained.
+//! - At the total cap (`max_splats`): before a refine, the tiles the walker has left park first, then far tiles
+//!   neither active nor near nor in view ([`LiveModel::park_for_room`]). While rows outside the active tiles are
+//!   held, an eviction that still bites takes only rows of active tiles above their fair share (`max_splats` / active
+//!   tiles), or held rows no step ever trained; when that and the parks fall short, it may take any row outside the
+//!   active and near tiles, held or not, and with every resident tile active or near any row, as without area
+//!   training ([`LiveModel::relax_eviction_if_short`]).
 //! - With `area_freeze` inactive_at_cap the rows outside the active tiles train while the resident rows stay below
 //!   `area_freeze_at` of `max_splats` and are held from there ([`LiveModel::note_cap`]).
 
 use super::LiveModel;
-use crate::area::{FairShare, TileKey, far_inactive_to_park, keep_under_tile_cap, near_tiles, row_budget, tile_counts};
+use crate::area::{
+    FairShare, TileKey, camera_sees_box, far_inactive_to_park, keep_under_tile_cap, near_tiles, row_budget,
+    tile_counts,
+};
 use crate::config::AreaFreeze;
 use brush_render::gaussian_splats::Splats;
+use brush_train::budget::EvictionRelax;
+use glam::Vec3;
 
 /// With `area_freeze` inactive_at_cap, held rows are released once the resident rows drop this share of
 /// `max_splats` below `area_freeze_at`, so the hold does not toggle at every refine.
@@ -49,11 +58,11 @@ impl LiveModel {
         }
     }
 
-    /// Per seed (flat xyz), whether a tile has room for it under `area_tile_max_splats`, counting the registry's rows,
+    /// Per seed (flat xyz), whether a tile has room for it under the per-tile cap, counting the registry's rows,
     /// the rows seeded since its last readback and the seeds before it ([`keep_under_tile_cap`]); the seeds turned
     /// away are counted. `None` without area training or a per-tile cap.
     pub(super) fn tile_cap_keep(&mut self, seed_means: &[f32]) -> Option<Vec<bool>> {
-        let cap = self.config.area_tile_max_splats;
+        let cap = self.config.area_tile_cap();
         let area = self.area.as_mut().filter(|_| cap > 0)?;
         let counts = tile_counts(&area.registry, &area.fresh);
         let mut keep = vec![true; seed_means.len() / 3];
@@ -63,16 +72,18 @@ impl LiveModel {
     }
 
     /// Hands the trainer the row budget for the next refine from a readback of every resident row (flat xyz `means`):
-    /// the per-tile cap, and with an active set (`area_freeze` inactive or inactive_at_cap) the fair share an
-    /// eviction may take from each active tile. No-op without area training.
+    /// the per-tile cap, and while the rows outside the active tiles are held ([`Self::holds_inactive`]) the fair
+    /// share an eviction may take from each active tile (otherwise the eviction is not limited). No-op without area
+    /// training.
     pub(super) fn set_row_budget(&mut self, means: &[f32]) {
+        let holds = self.holds_inactive();
+        let cap = self.config.area_tile_cap();
         let (Some(area), Some(trainer)) = (self.area.as_mut(), self.trainer.as_mut()) else {
             return;
         };
-        let has_active = matches!(self.config.area_freeze, AreaFreeze::Inactive | AreaFreeze::InactiveAtCap);
-        let fair = has_active.then(|| FairShare { active: &area.active, max_splats: self.config.max_splats });
+        let fair = holds.then(|| FairShare { active: &area.active, max_splats: self.config.max_splats });
         let tile_size = area.registry.params().tile_size;
-        let budget = row_budget(means, tile_size, self.config.area_tile_max_splats, fair);
+        let budget = row_budget(means, tile_size, cap, fair);
         let (keys, budget) = budget.map_or((Vec::new(), None), |(k, b)| (k, Some(b)));
         area.budget_keys = keys;
         trainer.set_row_budget(budget);
@@ -98,31 +109,27 @@ impl LiveModel {
 
     /// Right before a refine, from the registry as the visibility readback just left it: makes the room the refine
     /// would otherwise evict for, and keeps the resident left tiles' rows within `area_held_fraction` of
-    /// `max_splats`. The need is the larger of
-    /// - the eviction: what the refine evicts at least ([`brush_train::train::SplatTrainer::pending_evictions`]: a
-    ///   seed shortfall noted, or blocked growth while keyframes seed new cells), floored by the splats the previous
-    ///   refine evicted beyond the room left below `max_splats` (a refine's own split and growth demand is not
-    ///   pending beforehand);
-    /// - the left tiles' rows beyond the held cap.
-    ///
-    /// Left tiles park first, farthest first, seen or not ([`crate::area::TileRegistry::left_to_park`]); then, for
-    /// the eviction and with an active set, tiles neither active nor near beyond the radius
-    /// ([`far_inactive_to_park`]). Never an active or near tile, never every row. Counted in `parks_for_room`, the
-    /// left tiles the held cap needed also in `parks_for_cap`. No-op without area training, with parking off, or when
-    /// nothing is needed.
+    /// `max_splats` ([`Self::park_room_tiles`]); when the parks and the active tiles' fair shares do not cover the
+    /// eviction, widens it ([`Self::relax_eviction_if_short`]). No-op without area training, a trainer or views.
     pub(super) async fn park_for_room(&mut self, splats: Splats) -> Splats {
-        let has_active = self.trains_active_tiles();
-        let (Some(area), Some(trainer), Some(&(centre, _))) =
-            (self.area.as_mut(), self.trainer.as_ref(), self.view_cams.last())
-        else {
+        let Some(need) = self.room_need(splats.num_splats()) else {
             return splats;
         };
-        if area.parking_off {
-            return splats;
-        }
-        area.registry.note_walker(centre);
-        let current = splats.num_splats();
-        let max_splats = self.train_config.max_splats;
+        let before = splats.num_splats();
+        let splats = self.park_room_tiles(splats, need).await;
+        self.relax_eviction_if_short(need.evict, before.saturating_sub(splats.num_splats()));
+        splats
+    }
+
+    /// What the next refine needs room for with `current` resident rows; `None` without area training, a trainer or
+    /// views. See [`RoomNeed`].
+    fn room_need(&self, current: u32) -> Option<RoomNeed> {
+        let (Some(area), Some(trainer), Some(&(centre, _))) =
+            (self.area.as_ref(), self.trainer.as_ref(), self.view_cams.last())
+        else {
+            return None;
+        };
+        let max_splats = self.config.max_splats;
         let room = max_splats.saturating_sub(current);
         let evict = trainer.pending_evictions(current).max(self.last_refine_evicted.saturating_sub(room));
         let fraction = self.config.area_held_fraction;
@@ -132,14 +139,28 @@ impl LiveModel {
         } else {
             0
         };
-        let need = evict.max(held_over);
-        if need == 0 {
+        Some(RoomNeed { evict, held_over, centre })
+    }
+
+    /// Parks for `need` (the larger of its two parts): left tiles first, farthest first, seen or not
+    /// ([`crate::area::TileRegistry::left_to_park`]); then, for the eviction and with an active set, far tiles
+    /// neither active nor near nor seen by the newest camera ([`far_inactive_to_park`]). Never an active or near tile,
+    /// never every row. Counted in `parks_for_room`, the left tiles the held cap needed also in `parks_for_cap`. No-op
+    /// with parking off or nothing needed.
+    async fn park_room_tiles(&mut self, splats: Splats, need: RoomNeed) -> Splats {
+        let has_active = self.trains_active_tiles();
+        let camera = self.views.last().map(|v| v.camera);
+        let RoomNeed { evict, held_over, centre } = need;
+        let total = evict.max(held_over);
+        let Some(area) = self.area.as_mut().filter(|a| !a.parking_off && total > 0) else {
             return splats;
-        }
+        };
+        area.registry.note_walker(centre);
+        let current = splats.num_splats();
         let keyframes = self.views.len() as u32;
         let registry = &area.registry;
         let splats_of = |k: &TileKey| registry.get(*k).map_or(0, |t| t.splats);
-        let left = registry.left_to_park(need, current, centre, keyframes);
+        let left = registry.left_to_park(total, current, centre, keyframes);
         let freed: u32 = left.iter().map(splats_of).sum();
         // The left tiles the held cap needs, in parking order.
         let mut for_cap = 0u32;
@@ -154,7 +175,13 @@ impl LiveModel {
         let far = if has_active && evict > freed {
             let mut keep = area.active.clone();
             keep.extend(near_tiles(centre, registry.params().tile_size));
-            far_inactive_to_park(registry, evict - freed, current - freed, centre, keyframes, &keep)
+            let seen = |k: TileKey| {
+                let (Some(cam), Some((lo, hi))) = (camera.as_ref(), registry.tile_box(k)) else {
+                    return false;
+                };
+                camera_sees_box(cam, lo, hi, SIGHT_M)
+            };
+            far_inactive_to_park(registry, evict - freed, current - freed, centre, keyframes, &keep, seen)
         } else {
             Vec::new()
         };
@@ -177,7 +204,61 @@ impl LiveModel {
         area.counters.parks_for_cap += parked.min(for_cap);
         splats
     }
+
+    /// When the trainer's eviction is limited to the active tiles' fair shares and those quotas plus the `freed` rows
+    /// the parks took cover less than `evict`, widens it for the next refine
+    /// ([`brush_train::train::SplatTrainer::relax_eviction`]): it may take any row of the resident tiles neither
+    /// active nor near, held rows included, least important first and outside the newest keyframe's cone; with every
+    /// resident tile active or near, any row not held, as without area training. Counted in `eviction_fallbacks`
+    /// and logged.
+    fn relax_eviction_if_short(&mut self, evict: u32, freed: u32) {
+        let near = self.view_cams.last().map(|(p, _)| *p);
+        let (Some(area), Some(trainer), Some(centre)) = (self.area.as_mut(), self.trainer.as_mut(), near) else {
+            return;
+        };
+        let Some(budget) = trainer.row_budget().filter(|b| b.limit_eviction && evict > 0) else {
+            return;
+        };
+        let quotas: u64 = budget.groups.iter().map(|g| u64::from(g.evictable)).sum();
+        if u64::from(freed) + quotas >= u64::from(evict) {
+            return;
+        }
+        let mut keep = area.active.clone();
+        keep.extend(near_tiles(centre, area.registry.params().tile_size));
+        let open: Vec<u32> = area
+            .budget_keys
+            .iter()
+            .enumerate()
+            .filter(|&(_, k)| !keep.contains(k) && area.registry.get(*k).is_some_and(|t| t.resident))
+            .map(|(g, _)| g as u32)
+            .collect();
+        let tiles = open.len();
+        let relax = if open.is_empty() { EvictionRelax::Unlimited } else { EvictionRelax::Groups(open) };
+        log::info!(
+            "area: eviction of {evict} beyond parks ({freed}) and fair shares ({quotas}): {}",
+            if tiles == 0 { "unlimited".to_string() } else { format!("{tiles} inactive tiles may give rows") }
+        );
+        trainer.relax_eviction(relax);
+        area.counters.eviction_fallbacks += 1;
+    }
 }
+
+/// What a refine needs room for ([`LiveModel::park_for_room`]).
+#[derive(Clone, Copy, Debug)]
+struct RoomNeed {
+    /// What the refine evicts at least ([`brush_train::train::SplatTrainer::pending_evictions`]: a seed shortfall
+    /// noted, or blocked growth while keyframes seed new cells), floored by the splats the previous refine evicted
+    /// for the total beyond the room left below `max_splats` (a refine's own split and growth demand is not pending
+    /// beforehand).
+    evict: u32,
+    /// The left tiles' rows beyond the held cap (`area_held_fraction` of `max_splats`).
+    held_over: u32,
+    /// The newest view's camera position.
+    centre: Vec3,
+}
+
+/// How deep the newest camera's view reaches when room parking spares the far tiles it sees, metres.
+const SIGHT_M: f32 = 100.0;
 
 #[cfg(test)]
 #[path = "area_budget_tests.rs"]

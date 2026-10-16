@@ -321,27 +321,3 @@ fn left_tiles_to_park_before_an_eviction() {
     assert_eq!(r.left_to_park(50, 340, c, 100), vec![far, near]);
     assert_eq!(r.left_to_park(50, 140, c, 100), vec![far], "parking both would take every resident splat");
 }
-
-/// Task 14b: rows held still in left tiles over the cap park farthest first until the rest fit, seen or not; a
-/// visited tile within radius + hysteresis and a far tile never visited never park for the cap.
-#[test]
-fn held_tiles_over_the_cap_park_farthest_first() {
-    let mut r = TileRegistry::new(params());
-    r.note_walker(Vec3::new(5.0, 0.0, 5.0));
-    r.note_walker(Vec3::new(5.0, 0.0, 45.0));
-    r.note_walker(Vec3::new(95.0, 0.0, 5.0));
-    let mut pts = vec![[5.0, 0.0, 5.0]; 100]; // (0, 0): left, 117 m
-    pts.extend(vec![[5.0, 0.0, 45.0]; 40]); // (0, 4): left, 122 m
-    pts.extend(vec![[95.0, 0.0, 5.0]; 300]); // (9, 0): visited, 27 m (within radius + hysteresis)
-    pts.extend(vec![[5.0, 0.0, -45.0]; 300]); // (0, -5): never visited
-    pts.extend(vec![[125.0, 0.0, 5.0]; 200]); // (12, 0): the walker's tile
-    r.note_resident(&flat(&pts), &vec![true; pts.len()], 0);
-    let c = Vec3::new(127.0, 0.0, 5.0);
-    let (near, far) = (TileKey { x: 0, z: 0 }, TileKey { x: 0, z: 4 });
-    let resident = pts.len() as u32;
-    assert!(r.held_over_cap(140, resident, c, 100).is_empty(), "140 held rows fit a cap of 140");
-    assert_eq!(r.held_over_cap(110, resident, c, 100), vec![far]);
-    assert_eq!(r.held_over_cap(50, resident, c, 100), vec![far, near]);
-    assert_eq!(r.held_over_cap(0, resident, c, 100), vec![far, near], "only left tiles park for the cap");
-    assert_eq!(r.held_over_cap(0, 140, c, 100), vec![far], "parking both would take every resident splat");
-}

@@ -70,9 +70,10 @@ pub fn keep_under_tile_cap(
 }
 
 /// Resident tiles to park for room once the left ones are not enough: tiles that are not among `keep` (the active and
-/// near tiles) and lie beyond the radius of `centre` (a parked tile within it comes back at the next keyframe),
-/// farthest first, until they hold `need` splats. Tiles restored fewer than `min_resident_keyframes` keyframes before
-/// `keyframes` are skipped, and so is a tile whose parking would leave none of the `resident` splats.
+/// near tiles), lie beyond radius + max(hysteresis, far seed) of `centre` (nearer, a distance or seed restore would
+/// bring them straight back) and are not `seen` by the newest camera, farthest first, until they hold `need` splats.
+/// Tiles restored fewer than `min_resident_keyframes` keyframes before `keyframes` are skipped, and so is a tile whose
+/// parking would leave none of the `resident` splats.
 pub fn far_inactive_to_park(
     registry: &TileRegistry,
     need: u32,
@@ -80,8 +81,10 @@ pub fn far_inactive_to_park(
     centre: Vec3,
     keyframes: u32,
     keep: &[TileKey],
+    seen: impl Fn(TileKey) -> bool,
 ) -> Vec<TileKey> {
     let p = registry.params();
+    let beyond = p.radius + p.hysteresis.max(p.far_seed);
     let mut candidates: Vec<(f32, TileKey, u32)> = registry
         .resident_keys()
         .into_iter()
@@ -91,7 +94,7 @@ pub fn far_inactive_to_park(
             let d = k.footprint_distance(centre, p.tile_size);
             let settled =
                 t.restored_at_keyframe.is_none_or(|r| keyframes.saturating_sub(r) >= p.min_resident_keyframes);
-            (d > p.radius && settled).then_some((d, k, t.splats))
+            (d > beyond && settled && !seen(k)).then_some((d, k, t.splats))
         })
         .collect();
     candidates.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
@@ -148,7 +151,7 @@ pub fn row_budget(
         })
         .collect();
     debug_assert!(group.iter().all(|&g| g != NO_GROUP));
-    Some((keys, RowBudget { group, groups, limit_eviction: fair.is_some() }))
+    Some((keys, RowBudget { group, groups, limit_eviction: fair.is_some(), evict_held: false }))
 }
 
 #[cfg(test)]

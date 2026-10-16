@@ -242,6 +242,7 @@ impl LiveModel {
             at_cap: area.at_cap,
             tile_splats: tile_splats(&area.registry),
             tile_evictions: area.tile_evictions.iter().map(|(k, &n)| [k.x, k.z, n as i32]).collect(),
+            tile_cap: self.config.area_tile_cap(),
         })
     }
 

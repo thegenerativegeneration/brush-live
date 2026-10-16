@@ -87,7 +87,8 @@ pub struct LiveModel {
     iter: u32,
     /// Splats evicted to stay within the budget, in total.
     num_evicted: u64,
-    /// Splats the last refine evicted; a floor for what the next refine parks before it evicts.
+    /// Splats the last refine evicted for the total (not for a tile's own cap); a floor for what the next refine parks
+    /// before it evicts.
     last_refine_evicted: u32,
     /// Refines and their time since `take_refine_stats`, for debug timing.
     refine_stats: (u32, f64),
@@ -246,6 +247,14 @@ impl LiveModel {
         self.trainer.as_ref().map_or(0.0, |t| t.bounds().median_size())
     }
 
+    /// Makes the trainer work towards `config.max_splats`, the one splat budget (it may change between refines).
+    fn sync_max_splats(&mut self) {
+        self.train_config.max_splats = self.config.max_splats;
+        if let Some(t) = self.trainer.as_mut() {
+            t.set_max_splats(self.config.max_splats);
+        }
+    }
+
     /// Number of training steps taken.
     #[allow(clippy::iter_not_returning_iterator)]
     pub fn iter(&self) -> u32 {
@@ -255,7 +264,7 @@ impl LiveModel {
     /// Adds a view and seeds splats where the current model is transparent. With area training, parked tiles within
     /// the radius of its camera come back first, then those its seeds hit nearby (see `seed_from_mask`); with
     /// `area_freeze` inactive(_at_cap) the keyframe ranks the active tiles and the rows outside them are held at its end
-    /// (inactive_at_cap: at the cap only). Seeds into a tile at `area_tile_max_splats` are dropped.
+    /// (inactive_at_cap: at the cap only). Seeds into a tile at the per-tile cap are dropped.
     /// Returns false if a keyframe with this id was already added.
     pub async fn add_keyframe(&mut self, mut kf: DecodedKeyframe) -> bool {
         if self.index.contains_key(&kf.id) {
@@ -411,6 +420,7 @@ impl LiveModel {
     /// otherwise make room for; afterwards it parks the tiles the capture has left and holds the rows `area_freeze`
     /// names (outside the active tiles, or of left tiles still resident).
     async fn refine(&mut self, splats: Splats) -> Splats {
+        self.sync_max_splats();
         crate::timing::sync_splats(&splats).await;
         self.note_visibility(&splats).await;
         let splats = self.park_for_room(splats).await;
@@ -432,7 +442,7 @@ impl LiveModel {
             stats.num_evicted
         );
         self.num_evicted += u64::from(stats.num_evicted);
-        self.last_refine_evicted = stats.num_evicted;
+        self.last_refine_evicted = stats.evicted_for_total;
         self.note_budget_evictions();
         let splats = self.park_after_refine(splats).await;
         self.hold_rows_after_refine(&splats).await;

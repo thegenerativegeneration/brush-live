@@ -185,9 +185,11 @@ pub struct GuideConfig {
     /// With `area_freeze` inactive_at_cap: the share of `max_splats` at which the rows outside the active tiles are
     /// held (released again below this share − 0.05).
     pub area_freeze_at: f32,
-    /// Most splats one tile holds: seeds into a full tile are dropped, its rows do not densify, and a tile over it
-    /// evicts its least important rows down to it at the next refine. 0: no per-tile cap.
-    pub area_tile_max_splats: u32,
+    /// Most splats one tile holds, as a share of `max_splats` (0.4: 10k of 25k): seeds into a full tile are dropped,
+    /// its rows do not densify, and a tile over it evicts its least important rows down to it at the next refine. A
+    /// tile still filling up can overshoot by one refine's growth before that. 0: no per-tile cap (held rows no step
+    /// ever trained stay eviction victims at the total cap either way).
+    pub area_tile_max_fraction: f32,
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.
     pub train_radius_m: f32,
@@ -263,13 +265,22 @@ impl Default for GuideConfig {
             area_active_tiles: 3,
             area_active_min_rows: 50,
             area_freeze_at: 0.9,
-            area_tile_max_splats: 10_000,
+            area_tile_max_fraction: 0.4,
             train_radius_m: 0.0,
         }
     }
 }
 
 impl GuideConfig {
+    /// Most splats one tile holds: `area_tile_max_fraction` of `max_splats`, rounded; 0 for no per-tile cap.
+    pub fn area_tile_cap(&self) -> u32 {
+        if self.area_tile_max_fraction > 0.0 {
+            (f64::from(self.area_tile_max_fraction) * f64::from(self.max_splats)).round() as u32
+        } else {
+            0
+        }
+    }
+
     pub fn fisher_ridge(&self) -> FisherRidge {
         FisherRidge {
             abs: self.fisher_lambda,
@@ -428,7 +439,9 @@ mod area_tests {
         let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
         assert_eq!(cfg.area_freeze, AreaFreeze::InactiveAtCap);
         assert_eq!((cfg.area_view_m, cfg.area_active_tiles, cfg.area_active_min_rows), (15.0, 3, 50));
-        assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_splats), (0.9, 10_000));
+        assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_fraction), (0.9, 0.4));
+        assert_eq!(GuideConfig { max_splats: 25_000, ..cfg.clone() }.area_tile_cap(), 10_000);
+        assert_eq!(GuideConfig { area_tile_max_fraction: 0.0, ..cfg }.area_tile_cap(), 0);
         let modes = [
             ("left", AreaFreeze::Left),
             ("none", AreaFreeze::Off),
@@ -443,7 +456,7 @@ mod area_tests {
         let cfg: GuideConfig = serde_json::from_str(r#"{"area_view_m": 20, "area_active_tiles": 5}"#).expect("parses");
         assert_eq!((cfg.area_view_m, cfg.area_active_tiles), (20.0, 5));
         let cfg: GuideConfig =
-            serde_json::from_str(r#"{"area_freeze_at": 0.8, "area_tile_max_splats": 0}"#).expect("parses");
-        assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_splats), (0.8, 0));
+            serde_json::from_str(r#"{"area_freeze_at": 0.8, "area_tile_max_fraction": 0}"#).expect("parses");
+        assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_fraction), (0.8, 0.0));
     }
 }

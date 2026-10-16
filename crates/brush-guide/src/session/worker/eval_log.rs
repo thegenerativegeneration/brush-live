@@ -138,6 +138,7 @@ mod tests {
             at_cap: true,
             tile_splats: vec![[0, 0, 9]],
             tile_evictions: vec![[0, 0, 4]],
+            tile_cap: 10_000,
         });
         r.parked_load_ms = Some(4.5);
         let some = serde_json::to_value(&r).unwrap();
@@ -156,6 +157,8 @@ mod tests {
         assert_eq!(some["area"]["tile_evictions"][0][2].as_i64(), Some(4));
         assert_eq!(some["area"]["parks_for_room"].as_u64(), Some(0));
         assert_eq!(some["area"]["seeds_over_tile_cap"].as_u64(), Some(0));
+        assert_eq!(some["area"]["tile_cap"].as_u64(), Some(10_000));
+        assert_eq!(some["area"]["eviction_fallbacks"].as_u64(), Some(0));
         assert_eq!(some["area"]["active_changes"].as_u64(), Some(0));
     }
 
