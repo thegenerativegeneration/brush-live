@@ -28,6 +28,19 @@ pub struct RowBudget {
     /// The budget eviction takes rows only within each group's `evictable` (rows held but never trained excepted);
     /// false: anywhere, as without a budget.
     pub limit_eviction: bool,
+    /// Held rows ([`crate::train::SplatTrainer::set_frozen_rows`]) are eviction victims too, within their group's
+    /// `evictable` ([`EvictionRelax::Groups`]); false: only those no step ever trained.
+    pub evict_held: bool,
+}
+
+/// How [`crate::train::SplatTrainer::relax_eviction`] widens a limited eviction for the next refine, when the room the
+/// caller made does not cover what it must evict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvictionRelax {
+    /// These groups may give every row, held rows included (lowest importance first, the protected cone kept).
+    Groups(Vec<u32>),
+    /// No group limit: the eviction takes from every row not held, as without a budget.
+    Unlimited,
 }
 
 impl RowBudget {
@@ -50,6 +63,33 @@ impl RowBudget {
     pub(crate) fn no_growth(&self) -> Option<Vec<bool>> {
         let flags: Vec<bool> = (0..self.group.len()).map(|i| self.of_row(i).is_some_and(|g| g.full)).collect();
         flags.iter().any(|&f| f).then_some(flags)
+    }
+
+    /// Widens the eviction as `relax` says.
+    pub(crate) fn relax(&mut self, relax: EvictionRelax) {
+        match relax {
+            EvictionRelax::Groups(groups) => {
+                for g in groups {
+                    if let Some(budget) = self.groups.get_mut(g as usize) {
+                        budget.evictable = u32::MAX;
+                    }
+                }
+                self.evict_held = true;
+            }
+            EvictionRelax::Unlimited => self.limit_eviction = false,
+        }
+    }
+
+    /// Whether a group holds more rows than its `max_rows` (counting rows that may be pruned anyway): without one the
+    /// over-cap eviction has nothing to do.
+    pub(crate) fn any_over_cap(&self) -> bool {
+        let mut counts = vec![0u32; self.groups.len()];
+        for &g in &self.group {
+            if let Some(c) = counts.get_mut(g as usize) {
+                *c += 1;
+            }
+        }
+        counts.iter().zip(&self.groups).any(|(&n, g)| n > g.max_rows)
     }
 
     /// Per group, the rows a limited eviction may take; `None` when the eviction is not limited.

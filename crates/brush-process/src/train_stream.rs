@@ -344,6 +344,7 @@ pub(crate) async fn train_stream(
                 num_pruned: 0,
                 num_pruned_non_finite: 0,
                 num_evicted: 0,
+                evicted_for_total: 0,
                 total_splats: splats.num_splats(),
             }
         };

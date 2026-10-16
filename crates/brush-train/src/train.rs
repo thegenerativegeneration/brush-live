@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_1_SQRT_2;
 
 use crate::{
     adam_scaled::{AdamScaled, AdamState},
-    budget::RowBudget,
+    budget::{EvictionRelax, RowBudget},
     config::TrainConfig,
     evict::{EvictConfig, Eviction, ProtectCone, SplatLife, read_f32},
     msg::{RefineStats, TrainStepStats},
@@ -358,6 +358,18 @@ impl SplatTrainer {
             log::error!("row budget ({} rows) out of step with the splats ({rows:?}); no budget", budget.group.len());
         }
         fits
+    }
+
+    /// Widens the eviction of the row budget the next refine applies ([`EvictionRelax`]); no-op without one.
+    pub fn relax_eviction(&mut self, relax: EvictionRelax) {
+        if let Some(budget) = self.row_budget.as_mut() {
+            budget.relax(relax);
+        }
+    }
+
+    /// Sets the splat budget (`max_splats`) eviction and growth work towards from now on.
+    pub fn set_max_splats(&mut self, max_splats: u32) {
+        self.config.max_splats = max_splats;
     }
 
     /// Diagnostic: the row budget the next refine applies ([`Self::set_row_budget`]); `None` when there is none.
@@ -1347,6 +1359,7 @@ impl SplatTrainer {
                 num_pruned: pruned_count,
                 num_pruned_non_finite,
                 num_evicted,
+                evicted_for_total: evicted_for_total as u32,
                 total_splats: splat_count,
             },
         )

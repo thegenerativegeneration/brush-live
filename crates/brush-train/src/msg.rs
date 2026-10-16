@@ -10,8 +10,11 @@ pub struct RefineStats {
     pub num_pruned: u32,
     /// Subset of `num_pruned` whose params went non-finite (NaN/Inf).
     pub num_pruned_non_finite: u32,
-    /// Subset of `num_pruned` evicted to stay within the budget.
+    /// Subset of `num_pruned` evicted to stay within the budget: for the total, and for a group's own cap under a row
+    /// budget.
     pub num_evicted: u32,
+    /// Subset of `num_evicted` evicted for the total (`max_splats`), without the rows a group gave for its own cap.
+    pub evicted_for_total: u32,
     pub total_splats: u32,
 }
 

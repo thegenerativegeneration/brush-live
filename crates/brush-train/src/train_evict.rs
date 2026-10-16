@@ -104,8 +104,9 @@ impl SplatTrainer {
         };
         // Held rows no step ever trained (raw seeds on ground outside the active tiles) do not block the budget.
         let untrained_held = held.as_ref().map(|h| h.clone().bool_and(life.trained.clone().lower_elem(0.5)));
+        let evict_held = budget.is_some_and(|b| b.limit_eviction && b.evict_held);
         let exclude = match (held, &untrained_held) {
-            (Some(held), Some(u)) => dead.clone().bool_or(held.bool_and(u.clone().bool_not())),
+            (Some(held), Some(u)) if !evict_held => dead.clone().bool_or(held.bool_and(u.clone().bool_not())),
             _ => dead.clone(),
         };
         let quota = budget.and_then(|b| b.quota());
@@ -139,7 +140,7 @@ impl SplatTrainer {
         let Some(life) = self.evict.as_ref().and_then(|e| e.life.as_ref()) else {
             return (dead, Vec::new());
         };
-        if budget.groups.iter().all(|g| g.max_rows == u32::MAX) {
+        if !budget.any_over_cap() {
             return (dead, Vec::new());
         }
         let n = budget.group.len();

@@ -5,7 +5,7 @@
 use super::evict_tests::{N, batch, importance, record_importance, rows, splats, trainer_at_budget};
 use super::radius_tests::{FAR, NEAR, bits, floats};
 use super::*;
-use crate::budget::{GroupBudget, NO_GROUP, RowBudget};
+use crate::budget::{EvictionRelax, GroupBudget, NO_GROUP, RowBudget};
 use crate::evict::EvictConfig;
 use burn::module::Module;
 use clap::Parser;
@@ -16,7 +16,8 @@ fn group(max_rows: u32, full: bool, evictable: u32) -> GroupBudget {
 
 /// Rows 0..30 in group 0 and 30..60 in group 1 (of the 60-splat eviction model).
 fn halves(g0: GroupBudget, g1: GroupBudget, limit_eviction: bool) -> RowBudget {
-    RowBudget { group: (0..N).map(|i| u32::from(i >= 30)).collect(), groups: vec![g0, g1], limit_eviction }
+    let group = (0..N).map(|i| u32::from(i >= 30)).collect();
+    RowBudget { group, groups: vec![g0, g1], limit_eviction, evict_held: false }
 }
 
 /// The importance of the splats left after a refine, in order.
@@ -54,6 +55,7 @@ async fn a_full_group_does_not_grow() {
         group: (0..NEAR + FAR + 1).map(|i| u32::from(i >= NEAR)).collect(),
         groups: vec![group(10_000, true, 0), group(10_000, false, 0)],
         limit_eviction: false,
+        evict_held: false,
     };
     let (before, after, stats) = refine_with(Some(budget)).await;
     assert_eq!(stats.num_pruned, 1);
@@ -72,6 +74,7 @@ async fn an_over_cap_group_shrinks_to_its_cap() {
     trainer.set_row_budget(Some(halves(group(25, true, 0), group(100, false, 0), false)));
     let (s, stats) = trainer.refine(1, s).await;
     assert_eq!((stats.num_evicted, stats.num_pruned, stats.num_added), (5, 5, 0));
+    assert_eq!(stats.evicted_for_total, 0, "a group's own cap is no eviction for the total");
     assert_eq!(s.num_splats() as usize, N - 5);
     let mut lowest: Vec<f32> = imp[..30].to_vec();
     lowest.sort_by(f32::total_cmp);
@@ -92,7 +95,7 @@ async fn a_limited_eviction_keeps_each_groups_quota() {
     trainer.set_row_budget(Some(halves(group(u32::MAX, false, 2), group(u32::MAX, false, 100), true)));
     let (_, stats) = trainer.refine(1, s).await;
     // Budget 60, headroom 10 %: six go, two from group 0 (its lowest), four from group 1.
-    assert_eq!(stats.num_evicted, 6);
+    assert_eq!((stats.num_evicted, stats.evicted_for_total), (6, 6));
     let want: Vec<f32> = imp.iter().copied().filter(|&v| !(v < 2.0 || (30.0..34.0).contains(&v))).collect();
     assert_eq!(kept_importance(&trainer).await, want);
     assert_eq!(trainer.budget_evictions(), &[2, 4]);
@@ -159,4 +162,35 @@ async fn the_budget_follows_take_and_append() {
     trainer.set_row_budget(Some(RowBudget { group: want, ..halves(group(100, false, 0), group(100, false, 0), false) }));
     let _ = trainer.refine(1, s).await;
     assert!(trainer.row_budget.is_none(), "refine kept the budget");
+}
+
+/// A limited eviction whose quotas give nothing takes, once relaxed for a group, that group's rows by lowest importance,
+/// held rows included; relaxed to unlimited it takes the least important rows that are not held, as without a budget.
+#[tokio::test]
+async fn a_relaxed_eviction_takes_held_rows_of_the_opened_groups() {
+    let imp: Vec<f32> = (0..N).map(|i| i as f32).collect();
+    // Rows 30..60 (group 1) held after a step trained them.
+    let held = |s: &Splats| {
+        let flags: Vec<bool> = (0..N).map(|i| i >= 30).collect();
+        Tensor::<1, Bool>::from_data(TensorData::new(flags, [N]), &s.device().inner())
+    };
+    let run = async |relax: Option<EvictionRelax>| {
+        let (mut trainer, s) = trainer_at_budget(0).await;
+        record_importance(&mut trainer, &imp);
+        trainer.set_frozen_rows(Some(held(&s)));
+        trainer.note_seed_shortfall(1);
+        trainer.set_row_budget(Some(halves(group(u32::MAX, false, 0), group(u32::MAX, false, 0), true)));
+        if let Some(relax) = relax {
+            trainer.relax_eviction(relax);
+        }
+        let (_, stats) = trainer.refine(1, s).await;
+        (stats.num_evicted, kept_importance(&trainer).await)
+    };
+    assert_eq!(run(None).await.0, 0, "quotas of 0 give nothing");
+    let (n, kept) = run(Some(EvictionRelax::Groups(vec![1]))).await;
+    assert_eq!(n, 6);
+    assert_eq!(kept, imp.iter().copied().filter(|&v| !(30.0..36.0).contains(&v)).collect::<Vec<_>>());
+    let (n, kept) = run(Some(EvictionRelax::Unlimited)).await;
+    assert_eq!(n, 6);
+    assert_eq!(kept, imp.iter().copied().filter(|&v| v >= 6.0).collect::<Vec<_>>(), "held rows stay");
 }

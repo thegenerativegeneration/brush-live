@@ -11,6 +11,7 @@ fn budget() -> RowBudget {
         group: vec![0, 0, 0, 1, 1, NO_GROUP],
         groups: vec![group(2, true, 1), group(u32::MAX, false, 0)],
         limit_eviction: true,
+        evict_held: false,
     }
 }
 
@@ -31,6 +32,26 @@ fn rows_of_a_full_group_do_not_grow() {
     assert_eq!(b.no_growth(), None, "no full group, no mask");
 }
 
+/// Relaxing opens the named groups whole and lets held rows go; unlimited drops the limit.
+#[test]
+fn relaxing_opens_groups_or_lifts_the_limit() {
+    let mut b = budget();
+    b.relax(EvictionRelax::Groups(vec![1, 7]));
+    assert_eq!(b.quota(), Some(vec![1, u32::MAX]));
+    assert!(b.evict_held);
+    b.relax(EvictionRelax::Unlimited);
+    assert_eq!(b.quota(), None);
+}
+
+/// The host pre-check: only a group with more rows than its cap needs the over-cap readbacks.
+#[test]
+fn a_group_over_its_cap_is_found_on_the_host() {
+    assert!(budget().any_over_cap(), "group 0: three rows for two");
+    let mut b = budget();
+    b.groups[0].max_rows = 3;
+    assert!(!b.any_over_cap());
+}
+
 #[test]
 fn the_quota_is_per_group_and_only_when_eviction_is_limited() {
     assert_eq!(budget().quota(), Some(vec![1, 0]));
@@ -44,6 +65,7 @@ fn a_group_over_its_cap_gives_its_least_important_rows() {
         group: vec![0, 0, 0, 0, 0, 1, 1, NO_GROUP],
         groups: vec![group(2, true, 0), group(1, true, 0)],
         limit_eviction: false,
+        evict_held: false,
     };
     let scores = [5.0, f32::INFINITY, 1.0, 1.0, 9.0, 3.0, 2.0, 0.0];
     // Group 0: five rows for two; rows 2 and 3 tie at 1.0, then row 0, then 4; the unscored row 1 last.
