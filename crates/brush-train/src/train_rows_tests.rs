@@ -352,6 +352,7 @@ fn assert_rows_aligned(trainer: &SplatTrainer, splats: &Splats) {
     assert_eq!(m.moment_2.dims()[0], n, "opacity moment 2");
     let life = trainer.evict.as_ref().unwrap().life.as_ref().unwrap();
     assert_eq!(life.len(), n, "life");
+    assert_eq!((life.importance.dims()[0], life.trained.dims()[0]), (n, n), "life importance, trained");
     assert_eq!(trainer.origin.as_ref().unwrap().len(), n, "origin");
 }
 

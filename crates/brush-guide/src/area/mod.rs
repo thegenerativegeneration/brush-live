@@ -8,7 +8,10 @@ pub mod pose_replay;
 pub mod tiles;
 pub mod views;
 
-pub use active::{SeedSort, candidate_boxes, keep_active_seeds, rank_active, seed_heights, views_seeing};
+pub use active::{
+    ActiveRule, Candidate, Heights, SeedSort, candidate_boxes, keep_active_seeds, near_tiles, rank_active, tile_heights,
+    views_seeing, widen_all,
+};
 pub use ply_stream::PlyStreamWriter;
 pub use park_file::{
     ParkedTile, SlotPose, TILE_FILE_VERSION, decode_tile, encode_tile, read_tile, read_tile_count, remove_tile_files,
@@ -44,6 +47,10 @@ pub struct AreaCounters {
     pub max_restore_ms: f64,
     /// Bytes of the tile files on disk.
     pub tile_bytes: u64,
+    /// Changes of the active set (`area_freeze` inactive).
+    pub active_changes: u32,
+    /// Changes among `active_changes` back to the set before the last one.
+    pub active_reversals: u32,
 }
 
 /// Area training's state for the eval log: tile and splat counts, counters, and every tile's state.
@@ -66,4 +73,7 @@ pub struct AreaReport {
     pub active_tiles: Vec<[i32; 2]>,
     /// Rows in the active tiles when the mask was last built (0 unless `area_freeze` is inactive).
     pub active_splats: u32,
+    /// Held rows no training step ever updated, when the mask was last built (rows restored from tile files count as
+    /// trained; 0 without eviction, whose state carries the flag).
+    pub held_untrained_rows: u32,
 }

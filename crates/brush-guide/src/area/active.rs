@@ -1,5 +1,6 @@
-//! The active set of area training with `area_freeze` inactive: the tiles the newest keyframe looks at, ranked by how
-//! much of its image they cover, and the rules that follow from it for training views and seeds.
+//! The active set of area training with `area_freeze` inactive: the tiles around the newest keyframe's camera and the
+//! tiles it looks at, ranked by how much of its image they cover, and the rules that follow from it for training
+//! views and seeds.
 
 use super::tiles::{TileKey, TileRegistry};
 use super::views::{camera_sees_box, projected_area};
@@ -7,61 +8,155 @@ use brush_render::camera::Camera;
 use glam::Vec3;
 use std::collections::BTreeMap;
 
-/// Boxes (min, max) of the tiles that may become active: every resident tile of the registry over its footprint and
-/// height range, and every tile of `fresh` (heights of rows seeded since the registry last read the splats back), its
-/// range joined with the registry's. Parked tiles and tiles the walker at `centre` has left
-/// ([`TileRegistry::is_left`]) are left out: they take no seeds and stay as they were.
-pub fn candidate_boxes(
-    registry: &TileRegistry,
-    fresh: &BTreeMap<TileKey, (f32, f32)>,
-    centre: Vec3,
-) -> BTreeMap<TileKey, (Vec3, Vec3)> {
-    let size = registry.params().tile_size;
-    let mut ranges: BTreeMap<TileKey, (f32, f32)> = BTreeMap::new();
-    for key in registry.resident_keys() {
-        if let Some(t) = registry.get(key) {
-            ranges.insert(key, (t.y_min, t.y_max));
-        }
+/// Tiles whose footprint lies within this many metres of the camera are active and outside the ranking, so a room at
+/// a corner of tiles trains whole.
+pub const NEAR_TILE_M: f32 = 2.5;
+
+/// An active tile stays active while the camera sees its box up to this many metres beyond `area_view_m`.
+pub const KEEP_MARGIN_M: f32 = 2.0;
+
+/// A tile in view replaces an active one only when it covers this many times its image share.
+pub const CHALLENGE_RATIO: f32 = 1.3;
+
+/// Share of the image below which a kept tile still ranks (its box passed the conservative frustum test).
+const KEPT_FLOOR: f32 = 1e-6;
+
+/// Rows of a tile and the band of their heights: the 5th to the 95th percentile, so a few stray rows do not stretch
+/// the box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Heights {
+    pub lo: f32,
+    pub hi: f32,
+    pub rows: u32,
+}
+
+impl Heights {
+    /// Both sets of rows together: the band that holds both bands, and the rows summed.
+    pub fn widen(self, other: Heights) -> Heights {
+        Heights { lo: self.lo.min(other.lo), hi: self.hi.max(other.hi), rows: self.rows + other.rows }
     }
-    for (&key, &(lo, hi)) in fresh {
-        if registry.get(key).is_some_and(|t| !t.resident) {
-            continue;
-        }
-        let r = ranges.entry(key).or_insert((lo, hi));
-        *r = (r.0.min(lo), r.1.max(hi));
+}
+
+/// Widens `into`'s entries by `add`'s ([`Heights::widen`]); tiles only in `add` are copied.
+pub fn widen_all(into: &mut BTreeMap<TileKey, Heights>, add: &BTreeMap<TileKey, Heights>) {
+    for (&key, &h) in add {
+        into.entry(key).and_modify(|e| *e = e.widen(h)).or_insert(h);
     }
-    ranges
-        .into_iter()
-        .filter(|&(key, _)| !registry.is_left(key, centre))
-        .map(|(key, (lo, hi))| {
-            let min = key.min_xz(size);
-            (key, (Vec3::new(min.x, lo, min.y), Vec3::new(min.x + size, hi, min.y + size)))
+}
+
+/// Per tile of the flat xyz `means`: the 5th and 95th percentile of y (nearest rank) and the row count.
+pub fn tile_heights(means: &[f32], tile_size: f32) -> BTreeMap<TileKey, Heights> {
+    let mut ys: BTreeMap<TileKey, Vec<f32>> = BTreeMap::new();
+    for p in means.chunks_exact(3) {
+        ys.entry(TileKey::of(Vec3::new(p[0], p[1], p[2]), tile_size)).or_default().push(p[1]);
+    }
+    ys.into_iter()
+        .map(|(key, mut y)| {
+            let n = y.len();
+            let rank = |p: f32| ((p * (n - 1) as f32).round() as usize).min(n - 1);
+            let lo = *y.select_nth_unstable_by(rank(0.05), f32::total_cmp).1;
+            let hi = *y.select_nth_unstable_by(rank(0.95), f32::total_cmp).1;
+            (key, Heights { lo, hi, rows: n as u32 })
         })
         .collect()
 }
 
-/// The active tiles for `camera`: the tile under it first (whether it holds rows or not), then the `boxes` it sees
-/// up to `view_m` deep ([`camera_sees_box`]) by the share of its image they cover there ([`projected_area`]), largest
-/// first (ties by key), at most `max` tiles in all (0 counts as 1).
+/// A tile that may become active: its box (footprint by height band) and its rows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Candidate {
+    pub min: Vec3,
+    pub max: Vec3,
+    pub rows: u32,
+}
+
+/// The tiles that may become active: every resident tile of the registry and every tile of `heights` (bands of
+/// resident rows and of rows seeded since), a resident tile without a band taking the registry's height range and
+/// count. Parked tiles and tiles the walker at `centre` has left ([`TileRegistry::is_left`]) are left out: they take
+/// no seeds and stay as they were.
+pub fn candidate_boxes(
+    registry: &TileRegistry,
+    heights: &BTreeMap<TileKey, Heights>,
+    centre: Vec3,
+) -> BTreeMap<TileKey, Candidate> {
+    let size = registry.params().tile_size;
+    let mut bands = heights.clone();
+    for key in registry.resident_keys() {
+        if let (Some(t), false) = (registry.get(key), bands.contains_key(&key)) {
+            bands.insert(key, Heights { lo: t.y_min, hi: t.y_max, rows: t.splats });
+        }
+    }
+    bands
+        .into_iter()
+        .filter(|&(key, _)| registry.get(key).is_none_or(|t| t.resident) && !registry.is_left(key, centre))
+        .map(|(key, h)| {
+            let min = key.min_xz(size);
+            let (lo, hi) = (Vec3::new(min.x, h.lo, min.y), Vec3::new(min.x + size, h.hi, min.y + size));
+            (key, Candidate { min: lo, max: hi, rows: h.rows })
+        })
+        .collect()
+}
+
+/// The knobs of [`rank_active`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ActiveRule {
+    /// How deep the camera looks for tiles, metres.
+    pub view_m: f32,
+    /// Ranked tiles at most, besides the near ones.
+    pub max: u32,
+    /// Rows a ranked tile needs at least.
+    pub min_rows: u32,
+    pub tile_size: f32,
+}
+
+/// The tiles whose footprint lies within [`NEAR_TILE_M`] of `p` horizontally: the one under it first, then by
+/// distance (ties by key).
+pub fn near_tiles(p: Vec3, tile_size: f32) -> Vec<TileKey> {
+    if !p.is_finite() {
+        return Vec::new();
+    }
+    let cell = |c: f32| (c / tile_size).floor() as i32;
+    let span = |c: f32| cell(c - NEAR_TILE_M)..=cell(c + NEAR_TILE_M);
+    let mut near: Vec<(f32, TileKey)> = span(p.x)
+        .flat_map(|x| span(p.z).map(move |z| TileKey { x, z }))
+        .map(|k| (k.footprint_distance(p, tile_size), k))
+        .filter(|&(d, _)| d <= NEAR_TILE_M)
+        .collect();
+    near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    near.into_iter().map(|(_, k)| k).collect()
+}
+
+/// The active tiles for `camera`: the near tiles ([`near_tiles`], rows or not), then at most `rule.max` candidates
+/// with `rule.min_rows` rows or more, by the share of its image their box covers up to `rule.view_m` deep
+/// ([`projected_area`]). Hysteresis keeps the set from flapping: a candidate among `incumbents` (the last active set)
+/// stays in the running while the camera sees its box up to `view_m` + [`KEEP_MARGIN_M`] ([`camera_sees_box`]) and
+/// ranks by its share there times [`CHALLENGE_RATIO`], so another tile replaces it only by covering that much more.
 pub fn rank_active(
     camera: &Camera,
-    boxes: &BTreeMap<TileKey, (Vec3, Vec3)>,
-    view_m: f32,
-    max: u32,
-    tile_size: f32,
+    candidates: &BTreeMap<TileKey, Candidate>,
+    rule: ActiveRule,
+    incumbents: &[TileKey],
 ) -> Vec<TileKey> {
-    let underfoot = TileKey::of(camera.position, tile_size);
-    let mut seen: Vec<(f32, TileKey)> = boxes
+    let near = near_tiles(camera.position, rule.tile_size);
+    let keep_m = rule.view_m + KEEP_MARGIN_M;
+    // (score, incumbent, key)
+    let mut ranked: Vec<(f32, bool, TileKey)> = candidates
         .iter()
-        .filter(|&(&key, &(lo, hi))| key != underfoot && camera_sees_box(camera, lo, hi, view_m))
-        .map(|(&key, &(lo, hi))| (projected_area(camera, lo, hi, view_m), key))
-        .filter(|&(area, _)| area > 0.0)
+        .filter(|&(key, c)| !near.contains(key) && c.rows >= rule.min_rows)
+        .filter_map(|(&key, c)| {
+            if incumbents.contains(&key) {
+                camera_sees_box(camera, c.min, c.max, keep_m).then(|| {
+                    let area = projected_area(camera, c.min, c.max, keep_m).max(KEPT_FLOOR);
+                    (area * CHALLENGE_RATIO, true, key)
+                })
+            } else {
+                let seen = camera_sees_box(camera, c.min, c.max, rule.view_m);
+                let area = if seen { projected_area(camera, c.min, c.max, rule.view_m) } else { 0.0 };
+                (area > 0.0).then_some((area, false, key))
+            }
+        })
         .collect();
-    seen.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    std::iter::once(underfoot)
-        .chain(seen.into_iter().map(|(_, key)| key))
-        .take(max.max(1) as usize)
-        .collect()
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    near.into_iter().chain(ranked.into_iter().take(rule.max as usize).map(|(.., key)| key)).collect()
 }
 
 /// Indices of the `cameras` that see one of `boxes` up to `far` deep ([`camera_sees_box`]), ascending.
@@ -89,7 +184,7 @@ pub struct SeedSort {
 /// get rows to rank.
 pub fn keep_active_seeds(
     registry: &TileRegistry,
-    fresh: &BTreeMap<TileKey, (f32, f32)>,
+    fresh: &BTreeMap<TileKey, Heights>,
     active: &[TileKey],
     seed_means: &[f32],
     keep: &mut [bool],
@@ -109,16 +204,6 @@ pub fn keep_active_seeds(
         }
     }
     sort
-}
-
-/// Per tile of the flat xyz `means`, the lowest and highest y.
-pub fn seed_heights(means: &[f32], tile_size: f32) -> BTreeMap<TileKey, (f32, f32)> {
-    let mut h: BTreeMap<TileKey, (f32, f32)> = BTreeMap::new();
-    for p in means.chunks_exact(3) {
-        let r = h.entry(TileKey::of(Vec3::new(p[0], p[1], p[2]), tile_size)).or_insert((p[1], p[1]));
-        *r = (r.0.min(p[1]), r.1.max(p[1]));
-    }
-    h
 }
 
 #[cfg(test)]

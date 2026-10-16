@@ -30,7 +30,7 @@ impl LiveModel {
         };
         match self.config.area_freeze {
             AreaFreeze::Inactive => self.hold_inactive(splats).await,
-            AreaFreeze::Left => self.hold_rows(splats, keys, false).await,
+            AreaFreeze::Left => self.hold_rows(splats, Held::In(keys)).await,
             AreaFreeze::Off => {}
         }
     }
@@ -39,7 +39,7 @@ impl LiveModel {
     /// visited and, when the left resident tiles differ from the resident ones the mask holds, holds the new set (the
     /// walker left a tile, or came back to one). A held tile parked since (its rows left with it) is no change.
     /// Without area training nothing happens; unless `area_freeze` is left the tiles are marked and nothing is held
-    /// here (inactive holds at the keyframe's end, [`Self::hold_inactive_at_keyframe`]).
+    /// here (inactive holds at the keyframe's end, [`Self::hold_inactive_if_stale`]).
     pub(super) async fn hold_left_rows_at_keyframe(&mut self, splats: &Splats, centre: Vec3) {
         let Some(keys) = self.left_resident_keys(centre) else {
             return;
@@ -52,7 +52,7 @@ impl LiveModel {
             !a.frozen_keys.iter().filter(resident).eq(keys.iter())
         });
         if changed {
-            self.hold_rows(splats, keys, false).await;
+            self.hold_rows(splats, Held::In(keys)).await;
         }
     }
 
@@ -129,15 +129,19 @@ impl LiveModel {
         Some(keys)
     }
 
-    /// Holds the rows of `splats` lying in `keys` in the trainer, or with `outside` the rows lying in none of them
-    /// (one means readback; none when `keys` is empty), and records the tiles and the held row count.
-    pub(super) async fn hold_rows(&mut self, splats: &Splats, keys: BTreeSet<TileKey>, outside: bool) {
+    /// Holds the rows of `splats` that `held` names in the trainer (one means readback; none for no tiles in
+    /// [`Held::In`]), and records the tiles, the held row count and how many of them no step ever trained.
+    pub(super) async fn hold_rows(&mut self, splats: &Splats, held: Held) {
         let (Some(area), Some(trainer)) = (self.area.as_mut(), self.trainer.as_mut()) else {
             return;
         };
-        let mut held = 0;
+        let (keys, outside) = match held {
+            Held::In(keys) => (keys, false),
+            Held::OutsideOf(keys) => (keys, true),
+        };
+        let mut count = 0;
         let mut mask = None;
-        if !keys.is_empty() && splats.num_splats() > 0 {
+        if (outside || !keys.is_empty()) && splats.num_splats() > 0 {
             let t = web_time::Instant::now();
             let means: Vec<f32> = splats
                 .means()
@@ -147,27 +151,38 @@ impl LiveModel {
                 .convert::<f32>()
                 .try_into_vec()
                 .expect("f32 means");
-            let keys: Vec<TileKey> = keys.iter().copied().collect();
-            let mut flags = rows_in(&keys, &means, area.registry.params().tile_size);
-            if outside {
-                flags.iter_mut().for_each(|f| *f = !*f);
-            }
-            held = flags.iter().filter(|&&f| f).count() as u32;
+            let list: Vec<TileKey> = keys.iter().copied().collect();
+            let flags: Vec<bool> =
+                rows_in(&list, &means, area.registry.params().tile_size).into_iter().map(|f| f != outside).collect();
+            count = flags.iter().filter(|&&f| f).count() as u32;
             let n = flags.len();
-            mask = (held > 0).then(|| Tensor::<1, Bool>::from_data(TensorData::new(flags, [n]), &splats.device()));
+            mask = (count > 0).then(|| Tensor::<1, Bool>::from_data(TensorData::new(flags, [n]), &splats.device()));
             log::debug!(
                 target: crate::timing::TARGET,
-                "hold at iter {}: {held} rows {} {} tiles, {:.1} ms",
+                "hold at iter {}: {count} rows {} {} tiles, {:.1} ms",
                 self.iter,
                 if outside { "outside" } else { "in" },
-                keys.len(),
+                list.len(),
                 t.elapsed().as_secs_f64() * 1e3
             );
         }
         trainer.set_frozen_rows(mask);
+        let untrained = match trainer.held_untrained_rows() {
+            Some(c) => c.into_data_async().await.ok().and_then(|d| d.convert::<i64>().try_to_vec::<i64>().ok()),
+            None => None,
+        };
+        area.held_untrained_rows = untrained.and_then(|v| v.first().copied()).map_or(0, |v| v.max(0) as u32);
         area.frozen_keys = keys;
-        area.frozen_rows = held;
+        area.frozen_rows = count;
     }
+}
+
+/// The rows [`LiveModel::hold_rows`] holds.
+pub(super) enum Held {
+    /// The rows lying in these tiles.
+    In(BTreeSet<TileKey>),
+    /// The rows lying in none of these tiles.
+    OutsideOf(BTreeSet<TileKey>),
 }
 
 #[cfg(test)]

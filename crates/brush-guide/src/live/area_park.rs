@@ -48,7 +48,6 @@ impl LiveModel {
             vec![true; means.len() / 3]
         };
         let conflicts = area.registry.note_resident(&means, &seen, self.iter);
-        area.fresh.clear();
         log::debug!(
             target: crate::timing::TARGET,
             "visibility at iter {}: {:.1} ms for {} splats",
@@ -63,6 +62,7 @@ impl LiveModel {
             }
             area.conflicts = conflicts;
         }
+        self.note_heights(&means);
     }
 
     /// After a refine: parked tiles that resident rows drifted into come back ([`RestoreReason::Rows`]) when they lie

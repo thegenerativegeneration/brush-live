@@ -171,8 +171,11 @@ pub struct GuideConfig {
     pub area_freeze: AreaFreeze,
     /// With `area_freeze` inactive: the newest keyframe makes the tiles it sees up to this many metres deep active.
     pub area_view_m: f32,
-    /// With `area_freeze` inactive: at most this many tiles are active, the tile under the camera among them.
+    /// With `area_freeze` inactive: at most this many tiles in view are active, besides the tiles within 2.5 m of the
+    /// camera.
     pub area_active_tiles: u32,
+    /// With `area_freeze` inactive: a tile in view needs this many rows to become active.
+    pub area_active_min_rows: u32,
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.
     pub train_radius_m: f32,
@@ -246,6 +249,7 @@ impl Default for GuideConfig {
             area_freeze: AreaFreeze::Inactive,
             area_view_m: 15.0,
             area_active_tiles: 3,
+            area_active_min_rows: 50,
             train_radius_m: 0.0,
         }
     }
@@ -409,7 +413,7 @@ mod area_tests {
     fn freeze_defaults_to_inactive_and_parses() {
         let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
         assert_eq!(cfg.area_freeze, AreaFreeze::Inactive);
-        assert_eq!((cfg.area_view_m, cfg.area_active_tiles), (15.0, 3));
+        assert_eq!((cfg.area_view_m, cfg.area_active_tiles, cfg.area_active_min_rows), (15.0, 3, 50));
         let modes = [("left", AreaFreeze::Left), ("none", AreaFreeze::Off), ("inactive", AreaFreeze::Inactive)];
         for (json, want) in modes {
             let cfg: GuideConfig =

@@ -323,6 +323,17 @@ impl SplatTrainer {
         record.or(life).or_else(|| self.origin.as_ref().map(crate::origin::SplatOrigin::len))
     }
 
+    /// How many rows [`Self::set_frozen_rows`] holds that no step ever trained (a `[1]` tensor, read back by the
+    /// caller): rows appended back from the host count as trained; before the first step every held row counts.
+    /// `None` without a held mask or without eviction, whose per-row state carries the flag.
+    pub fn held_untrained_rows(&self) -> Option<Tensor<1, Int>> {
+        let held = self.frozen_rows.as_ref()?;
+        Some(match &self.evict.as_ref()?.life {
+            Some(life) => held.clone().bool_and(life.trained.clone().lower_elem(0.5)).int().sum(),
+            None => held.clone().int().sum(),
+        })
+    }
+
     /// Diagnostic: the rows held by [`Self::set_frozen_rows`], row-aligned with the current splats; `None` when none
     /// are held.
     #[doc(hidden)]
@@ -1028,7 +1039,8 @@ impl SplatTrainer {
             }
             if let Some(e) = self.evict.as_mut() {
                 e.life
-                    .get_or_insert_with(|| SplatLife::new(splats.num_splats() as usize, &device));
+                    .get_or_insert_with(|| SplatLife::new(splats.num_splats() as usize, &device))
+                    .mark_trained(frozen.as_ref());
             }
         });
 

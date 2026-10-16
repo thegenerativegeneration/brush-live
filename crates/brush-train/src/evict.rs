@@ -168,11 +168,14 @@ pub fn evict_count(
     recent_demand.saturating_sub(free).min(cap)
 }
 
-/// Per-splat age (refines survived) and importance, row-aligned with the splats.
+/// Per-splat age (refines survived), importance and whether a step ever trained it, row-aligned with the splats.
 pub(crate) struct SplatLife {
     pub age: Tensor<1>,
     /// `+inf` until scored.
     pub importance: Tensor<1>,
+    /// 1 once a step updated the row (it was not frozen), else 0; rows appended back from the host count as trained,
+    /// split children take their parent's.
+    pub trained: Tensor<1>,
 }
 
 impl SplatLife {
@@ -180,6 +183,7 @@ impl SplatLife {
         Self {
             age: Tensor::zeros([n], device),
             importance: Tensor::full([n], f32::INFINITY, device),
+            trained: Tensor::zeros([n], device),
         }
     }
 
@@ -197,14 +201,17 @@ impl SplatLife {
             ],
             0,
         );
+        self.trained = Tensor::cat(vec![self.trained.clone(), Tensor::zeros([n], &device)], 0);
     }
 
     pub(crate) fn keep(&mut self, indices: Tensor<1, Int>) {
         self.age = self.age.clone().select(0, indices.clone());
-        self.importance = self.importance.clone().select(0, indices);
+        self.importance = self.importance.clone().select(0, indices.clone());
+        self.trained = self.trained.clone().select(0, indices);
     }
 
-    /// Sets the age and importance of the last `age.len()` rows.
+    /// Sets the age and importance of the last `age.len()` rows and marks them trained (they come back from the host,
+    /// where the flag is not kept).
     pub(crate) fn set_tail(&mut self, age: &[f32], importance: &[f32]) {
         let (k, len) = (age.len(), self.len());
         assert_eq!(importance.len(), k, "one importance per age");
@@ -219,12 +226,15 @@ impl SplatLife {
             .importance
             .clone()
             .slice_assign(s![len - k..len], tail(importance));
+        self.trained = self.trained.clone().slice_assign(s![len - k..len], Tensor::ones([k], &device));
     }
 
-    /// Appends one child per parent index: age 0, the parent's importance.
+    /// Appends one child per parent index: age 0, the parent's importance and trained flag.
     pub(crate) fn split(&mut self, parents: Tensor<1, Int>) {
         let n = parents.dims()[0];
         let device = self.age.device();
+        let trained = self.trained.clone().select(0, parents.clone());
+        self.trained = Tensor::cat(vec![self.trained.clone(), trained], 0);
         let inherited = self.importance.clone().select(0, parents);
         self.age = Tensor::cat(vec![self.age.clone(), Tensor::zeros([n], &device)], 0);
         self.importance = Tensor::cat(vec![self.importance.clone(), inherited], 0);
@@ -235,6 +245,14 @@ impl SplatLife {
         let seen = views.clone().greater_elem(0.0);
         let mean = sum.div(views.clamp_min(1.0));
         self.importance = self.importance.clone().mask_where(seen, mean);
+    }
+
+    /// Marks the rows a step updated as trained: every row, or the rows not set in `frozen`.
+    pub(crate) fn mark_trained(&mut self, frozen: Option<&Tensor<1, Bool>>) {
+        self.trained = match frozen {
+            Some(f) => self.trained.clone().mask_fill(f.clone().bool_not(), 1.0),
+            None => self.trained.clone().ones_like(),
+        };
     }
 
     pub(crate) fn tick(&mut self) {

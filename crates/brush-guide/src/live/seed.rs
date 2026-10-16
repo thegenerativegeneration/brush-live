@@ -4,7 +4,7 @@
 
 use super::LiveModel;
 use super::area_restore::RestoreReason;
-use crate::area::TileKey;
+use crate::area::{SeedSort, TileKey};
 use crate::keyframe::DecodedKeyframe;
 use crate::mono::{MonoSeed, ScaleFit, mono_seed_for};
 use crate::seed::{SeedInput, Seeds, seed_points, stride_for};
@@ -228,12 +228,12 @@ impl LiveModel {
             // it is now (a dropped tile's area takes seeds again).
             let registry = &self.area.as_ref().expect("area training is on").registry;
             let mut keep = registry.triage_seeds(&seeds.means, pos, usize::MAX).keep;
-            self.keep_active(&seeds.means, &mut keep);
-            return (splats, kept_logged(seeds, &keep));
+            let sort = self.keep_active(&seeds.means, &mut keep);
+            return (splats, kept_logged(seeds, &keep, sort));
         }
         let mut keep = triage.keep;
-        self.keep_active(&seeds.means, &mut keep);
-        (splats, kept_logged(seeds, &keep))
+        let sort = self.keep_active(&seeds.means, &mut keep);
+        (splats, kept_logged(seeds, &keep, sort))
     }
 
     fn seeds_to_splats(&self, means: Vec<f32>, colors: &[Vec3]) -> Splats {
@@ -252,13 +252,13 @@ impl LiveModel {
     }
 }
 
-/// The seeds `keep` flags (see [`keep_seeds`]); logs how many seeds were dropped in all (parked or left tiles, and
-/// tiles outside the active set).
-fn kept_logged(seeds: Seeds, keep: &[bool]) -> Seeds {
+/// The seeds `keep` flags (see [`keep_seeds`]); logs how many were dropped, `sort.dropped` of them for landing in
+/// tiles outside the active set, the rest in parked or left tiles.
+fn kept_logged(seeds: Seeds, keep: &[bool], sort: SeedSort) -> Seeds {
     let kept = keep_seeds(seeds, keep);
     let dropped = keep.len() - kept.colors.len();
     if dropped > 0 {
-        log::info!("area: dropped {dropped} seeds");
+        log::info!("area: dropped {dropped} seeds ({} outside the active tiles)", sort.dropped);
     }
     kept
 }

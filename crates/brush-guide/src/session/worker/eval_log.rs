@@ -134,6 +134,7 @@ mod tests {
             left_splats: 30,
             active_tiles: vec![[0, 1], [1, 1]],
             active_splats: 7,
+            held_untrained_rows: 5,
         });
         r.parked_load_ms = Some(4.5);
         let some = serde_json::to_value(&r).unwrap();
@@ -146,6 +147,8 @@ mod tests {
         assert_eq!(some["area"]["parks_for_cap"].as_u64(), Some(0));
         let active = (some["area"]["active_tiles"][1][0].as_i64(), some["area"]["active_splats"].as_u64());
         assert_eq!(active, (Some(1), Some(7)));
+        assert_eq!(some["area"]["held_untrained_rows"].as_u64(), Some(5));
+        assert_eq!(some["area"]["active_changes"].as_u64(), Some(0));
     }
 
     #[test]

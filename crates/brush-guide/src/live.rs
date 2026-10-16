@@ -314,7 +314,7 @@ impl LiveModel {
                 }
             }
         };
-        self.hold_inactive_at_keyframe(&splats).await;
+        self.hold_inactive_if_stale(&splats).await;
         self.splats = Some(splats);
         if let Some(t) = self.trainer.as_mut() {
             t.set_protect_cone(Some(view_cone(&kf.view.camera)));
@@ -335,6 +335,9 @@ impl LiveModel {
     pub async fn train_step(&mut self) {
         if self.splats.is_none() || self.trainer.is_none() {
             return;
+        }
+        if let Some(splats) = self.splats.clone() {
+            self.hold_inactive_if_stale(&splats).await;
         }
         let pending = self.pending_views();
         let junction = self.area.as_mut().and_then(|a| a.junction.pick());

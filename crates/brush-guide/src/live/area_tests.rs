@@ -68,12 +68,14 @@ pub(in crate::live) fn area_config(radius: f32) -> GuideConfig {
     }
 }
 
-/// [`area_config`] training only the active tiles: up to 2 tiles within 4 m.
+/// [`area_config`] training only the active tiles: the tiles within 2.5 m and up to 2 tiles in view within 8 m, any
+/// with rows.
 pub(in crate::live) fn active_config(radius: f32) -> GuideConfig {
     GuideConfig {
         area_freeze: crate::config::AreaFreeze::Inactive,
-        area_view_m: 4.0,
+        area_view_m: 8.0,
         area_active_tiles: 2,
+        area_active_min_rows: 1,
         ..area_config(radius)
     }
 }

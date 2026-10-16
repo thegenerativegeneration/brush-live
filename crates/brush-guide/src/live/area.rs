@@ -6,7 +6,7 @@
 
 use super::LiveModel;
 use brush_dataset::scene::SceneBatch;
-use crate::area::{AreaCounters, AreaParams, AreaReport, TileKey, TileRegistry, area_views, views_seeing};
+use crate::area::{AreaCounters, AreaParams, AreaReport, Heights, TileKey, TileRegistry, area_views, views_seeing};
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
 use brush_train::rows::SplatRows;
 use burn::tensor::{Tensor, s};
@@ -46,8 +46,14 @@ pub(crate) struct AreaState {
     pub(super) active: Vec<TileKey>,
     /// Boxes (min, max) of the active tiles that hold rows; the training views are the views that see one.
     pub(super) active_boxes: Vec<(Vec3, Vec3)>,
-    /// Height range per tile of the rows seeded since the last visibility readback (which the registry has not seen).
-    pub(super) fresh: BTreeMap<TileKey, (f32, f32)>,
+    /// Height band and rows per tile at the last visibility readback.
+    pub(super) heights: BTreeMap<TileKey, Heights>,
+    /// Height band and rows per tile of the rows seeded since the last visibility readback.
+    pub(super) fresh: BTreeMap<TileKey, Heights>,
+    /// The active set before the current one, to count changes back to it.
+    pub(super) previous_active: Vec<TileKey>,
+    /// Held rows no step ever trained, when the mask was last built.
+    pub(super) held_untrained_rows: u32,
     /// The active tiles the mask was last built for (sorted); `None` before any mask with `area_freeze` inactive.
     pub(super) mask_active: Option<Vec<TileKey>>,
     /// Rows outside the active tiles were appended since the mask was built (restores, seeds on new ground).
@@ -116,7 +122,10 @@ impl AreaState {
             frozen_rows: 0,
             active: Vec::new(),
             active_boxes: Vec::new(),
+            heights: BTreeMap::new(),
             fresh: BTreeMap::new(),
+            previous_active: Vec::new(),
+            held_untrained_rows: 0,
             mask_active: None,
             mask_stale: false,
             active_splats: 0,
@@ -217,6 +226,7 @@ impl LiveModel {
             left_splats: area.registry.left_resident_splats(centre),
             active_tiles: area.active.iter().map(|k| [k.x, k.z]).collect(),
             active_splats: area.active_splats,
+            held_untrained_rows: area.held_untrained_rows,
         })
     }
 

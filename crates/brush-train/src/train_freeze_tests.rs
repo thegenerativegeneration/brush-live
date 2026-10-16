@@ -170,3 +170,44 @@ async fn pending_evictions_follow_the_seed_shortfall() {
     assert_eq!(trainer.pending_evictions(100), 10);
     assert_eq!(trainer.pending_evictions(95), 5);
 }
+
+/// The trainer tells how many held rows no step ever trained: rows held from the first step stay untrained through
+/// steps, rows a step trained count as trained for good, and rows appended back from the host count as trained.
+/// Without eviction state (where the flag lives) there is no count.
+#[tokio::test]
+async fn held_rows_no_step_ever_trained_are_counted() {
+    let device = device().await;
+    let n = NEAR + FAR + 1;
+    let mut trainer = trainer(0.0, &device);
+    trainer.set_frozen_rows(Some(far_rows_mask(n, &device)));
+    let s = trainer.step(batch(), splats(0.9, &device).train()).await.0;
+    assert!(trainer.held_untrained_rows().is_none(), "no eviction state, no flag");
+
+    let mut trainer = super::radius_tests::trainer(0.0, &device);
+    trainer.enable_eviction(crate::evict::EvictConfig {
+        headroom: 0.1,
+        min_age: 0,
+        max_cell_fraction: 1.0,
+        recent_refines: 2,
+    });
+    trainer.set_frozen_rows(Some(far_rows_mask(n, &device)));
+    let s = trainer.step(batch(), s).await.0;
+    let s = trainer.step(batch(), s).await.0;
+    assert_eq!(held_untrained(&trainer).await, Some(FAR as i64));
+    // Taking two held rows out and appending them back: they lived in the trainer, so they count as trained.
+    let take: Vec<bool> = (0..n).map(|i| i == NEAR || i == NEAR + 1).collect();
+    let (s, taken) = trainer.take_rows(s.valid(), &take).await;
+    let s = trainer.append_rows(s, &taken.unwrap());
+    trainer.set_frozen_rows(Some(Tensor::from_data(TensorData::new(vec![true; n], [n]), &device.clone().inner())));
+    assert_eq!(held_untrained(&trainer).await, Some(FAR as i64 - 2), "appended rows count as trained");
+    // Released for one step, every row has trained.
+    trainer.set_frozen_rows(None);
+    let _ = trainer.step(batch(), s.train()).await;
+    trainer.set_frozen_rows(Some(Tensor::from_data(TensorData::new(vec![true; n], [n]), &device.inner())));
+    assert_eq!(held_untrained(&trainer).await, Some(0));
+}
+
+async fn held_untrained(trainer: &SplatTrainer) -> Option<i64> {
+    let count = trainer.held_untrained_rows()?;
+    Some(count.into_data_async().await.unwrap().convert::<i64>().try_to_vec::<i64>().unwrap()[0])
+}
