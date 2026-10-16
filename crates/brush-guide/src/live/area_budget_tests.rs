@@ -10,6 +10,7 @@ use crate::live::area_freeze::Held;
 use crate::live::area_freeze::tests::{by_row, rows_where};
 use crate::live::area_restore::tests::train;
 use glam::Vec3;
+use brush_train::budget::EvictionRelax;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The resident rows per tile of `tile_size`.
@@ -187,9 +188,14 @@ async fn below_the_cap_inactive_at_cap_seeds_where_inactive_does_not() {
 /// at x = 8 looking 4 m along +x (active; the newest camera does not see z = -14). Returns the left, far and active
 /// tiles holding rows.
 async fn walked(name: &str) -> (LiveModel, std::path::PathBuf, [BTreeSet<TileKey>; 3]) {
+    walked_with(name, active_config(2.0)).await
+}
+
+/// [`walked`] with `config` (its seen window set to 1000 steps).
+async fn walked_with(name: &str, config: GuideConfig) -> (LiveModel, std::path::PathBuf, [BTreeSet<TileKey>; 3]) {
     let dir = tmp(name);
     // A seen window of 1000 steps: no tile parks after the refine for being unseen.
-    let config = GuideConfig { area_seen_window_steps: 1000, ..active_config(2.0) };
+    let config = GuideConfig { area_seen_window_steps: 1000, ..config };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
@@ -231,18 +237,31 @@ async fn at_the_cap_left_then_far_inactive_tiles_park_before_any_eviction() {
     assert_eq!(live.num_evicted(), evicted, "the refine still evicted");
     std::fs::remove_dir_all(dir).ok();
 
-    // Asked for every row: the left and far tiles park first, then the eviction falls back (nothing inactive is left
-    // resident, so it is unlimited); the active and near tiles stay, and so does at least one row.
-    let (mut live, dir, [left, far, active]) = walked("budget-room-all").await;
+    // Asked for every row: the active and near tiles stay, and so does at least one row.
+    let (mut live, dir, [_, _, active]) = walked("budget-room-all").await;
     live.last_refine_evicted = u32::MAX;
+    train(&mut live, 1).await;
+    let registry = &live.area.as_ref().unwrap().registry;
+    assert!(active.iter().all(|k| registry.get(*k).is_some_and(|t| t.resident)), "an active tile parked");
+    assert!(live.splats().unwrap().num_splats() > 0);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Parks come before the fallback: at the cap with a seed shortfall to 10 % of `max_splats`, the left and far tiles
+/// park before the refine, and the refine's eviction, still short after them and the fair shares, widens.
+#[tokio::test]
+async fn parks_come_before_the_eviction_fallback() {
+    let config = GuideConfig { evict_headroom: 0.9, evict_min_age: 0, ..active_config(2.0) };
+    let (mut live, dir, [left, far, active]) = walked_with("budget-room-fallback", config).await;
+    live.config.max_splats = live.splats().unwrap().num_splats();
+    live.trainer.as_mut().unwrap().note_seed_shortfall(1);
     train(&mut live, 1).await;
     let r = live.area_report().unwrap();
     let registry = &live.area.as_ref().unwrap().registry;
     let parked = |k: &TileKey| registry.get(*k).is_some_and(|t| !t.resident);
     assert!(left.iter().chain(&far).all(parked), "a left or far tile stayed: {r:?}");
+    assert!(!active.iter().any(parked), "an active tile parked");
     assert_eq!(r.counters.eviction_fallbacks, 1, "{r:?}");
-    assert!(active.iter().all(|k| registry.get(*k).is_some_and(|t| t.resident)), "an active tile parked");
-    assert!(live.splats().unwrap().num_splats() > 0);
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -288,8 +307,8 @@ async fn at_the_cap_with_nothing_to_park_the_eviction_falls_back_and_growth_goes
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// The fallback's last tier: with every resident tile active or near the limit goes, as without area training; with one
-/// tile outside the active set that tile may give rows, held ones included, and the limit stays for the others.
+/// The fallback the refine gets: with every resident tile active or near, no limit, as without area training; with one
+/// tile outside the active set, that tile whole (held rows included).
 #[tokio::test]
 async fn an_all_active_capture_evicts_without_a_limit() {
     for all_active in [true, false] {
@@ -318,14 +337,10 @@ async fn an_all_active_capture_evicts_without_a_limit() {
         live.splats = Some(splats);
         let budget = live.trainer.as_ref().unwrap().row_budget().unwrap().clone();
         let keys = live.area.as_ref().unwrap().budget_keys.clone();
-        assert_eq!(live.area_report().unwrap().counters.eviction_fallbacks, 1);
-        if all_active {
-            assert!(!budget.limit_eviction, "the limit stayed");
-        } else {
-            let g = keys.iter().position(|k| *k == outside).unwrap();
-            assert!(budget.limit_eviction && budget.evict_held);
-            assert_eq!(budget.groups[g].evictable, u32::MAX, "the tile outside the active set was not opened");
-        }
+        assert!(budget.limit_eviction, "the limit goes only when the limited eviction falls short");
+        let g = keys.iter().position(|k| *k == outside).unwrap() as u32;
+        let want = if all_active { EvictionRelax::Unlimited } else { EvictionRelax::Groups(vec![g]) };
+        assert_eq!(budget.fallback, Some(want));
         std::fs::remove_dir_all(dir).ok();
     }
 }

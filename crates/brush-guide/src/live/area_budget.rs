@@ -8,7 +8,7 @@
 //!   held, an eviction that still bites takes only rows of active tiles above their fair share (`max_splats` / active
 //!   tiles), or held rows no step ever trained; when that and the parks fall short, it may take any row outside the
 //!   active and near tiles, held or not, and with every resident tile active or near any row, as without area
-//!   training ([`LiveModel::relax_eviction_if_short`]).
+//!   training ([`LiveModel::set_eviction_fallback`]).
 //! - With `area_freeze` inactive_at_cap the rows outside the active tiles train while the resident rows stay below
 //!   `area_freeze_at` of `max_splats` and are held from there ([`LiveModel::note_cap`]).
 
@@ -90,11 +90,14 @@ impl LiveModel {
     }
 
     /// After a refine: adds the evictions per tile the trainer reports for its row budget to the totals and logs
-    /// them. No-op without area training.
+    /// them, and counts a widened eviction in `eviction_fallbacks`. No-op without area training.
     pub(super) fn note_budget_evictions(&mut self) {
         let (Some(area), Some(trainer)) = (self.area.as_mut(), self.trainer.as_ref()) else {
             return;
         };
+        if trainer.eviction_fell_back() {
+            area.counters.eviction_fallbacks += 1;
+        }
         let mut parts = Vec::new();
         for (key, &n) in area.budget_keys.iter().zip(trainer.budget_evictions()) {
             if n > 0 {
@@ -109,15 +112,15 @@ impl LiveModel {
 
     /// Right before a refine, from the registry as the visibility readback just left it: makes the room the refine
     /// would otherwise evict for, and keeps the resident left tiles' rows within `area_held_fraction` of
-    /// `max_splats` ([`Self::park_room_tiles`]); when the parks and the active tiles' fair shares do not cover the
-    /// eviction, widens it ([`Self::relax_eviction_if_short`]). No-op without area training, a trainer or views.
+    /// `max_splats` ([`Self::park_room_tiles`]); then tells the trainer how its eviction widens when the parks and the
+    /// active tiles' fair shares fall short ([`Self::set_eviction_fallback`]). No-op without area training, a trainer
+    /// or views.
     pub(super) async fn park_for_room(&mut self, splats: Splats) -> Splats {
         let Some(need) = self.room_need(splats.num_splats()) else {
             return splats;
         };
-        let before = splats.num_splats();
         let splats = self.park_room_tiles(splats, need).await;
-        self.relax_eviction_if_short(need.evict, before.saturating_sub(splats.num_splats()));
+        self.set_eviction_fallback();
         splats
     }
 
@@ -205,22 +208,18 @@ impl LiveModel {
         splats
     }
 
-    /// When the trainer's eviction is limited to the active tiles' fair shares and those quotas plus the `freed` rows
-    /// the parks took cover less than `evict`, widens it for the next refine
-    /// ([`brush_train::train::SplatTrainer::relax_eviction`]): it may take any row of the resident tiles neither
-    /// active nor near, held rows included, least important first and outside the newest keyframe's cone; with every
-    /// resident tile active or near, any row not held, as without area training. Counted in `eviction_fallbacks`
-    /// and logged.
-    fn relax_eviction_if_short(&mut self, evict: u32, freed: u32) {
+    /// When the trainer's eviction is limited to the active tiles' fair shares, tells it how to widen when those
+    /// quotas give fewer rows than the refine wants ([`brush_train::train::SplatTrainer::set_eviction_fallback`]),
+    /// which it only knows during the refine (its own growth demand): it may then take rows of the resident tiles
+    /// neither active nor near, held rows included, least important first and outside the newest keyframe's cone;
+    /// with every resident tile active or near, any row not held, as without area training. Refines that widen are
+    /// counted in `eviction_fallbacks` ([`Self::note_budget_evictions`]).
+    fn set_eviction_fallback(&mut self) {
         let near = self.view_cams.last().map(|(p, _)| *p);
-        let (Some(area), Some(trainer), Some(centre)) = (self.area.as_mut(), self.trainer.as_mut(), near) else {
+        let (Some(area), Some(trainer), Some(centre)) = (self.area.as_ref(), self.trainer.as_mut(), near) else {
             return;
         };
-        let Some(budget) = trainer.row_budget().filter(|b| b.limit_eviction && evict > 0) else {
-            return;
-        };
-        let quotas: u64 = budget.groups.iter().map(|g| u64::from(g.evictable)).sum();
-        if u64::from(freed) + quotas >= u64::from(evict) {
+        if !trainer.row_budget().is_some_and(|b| b.limit_eviction) {
             return;
         }
         let mut keep = area.active.clone();
@@ -232,14 +231,7 @@ impl LiveModel {
             .filter(|&(_, k)| !keep.contains(k) && area.registry.get(*k).is_some_and(|t| t.resident))
             .map(|(g, _)| g as u32)
             .collect();
-        let tiles = open.len();
-        let relax = if open.is_empty() { EvictionRelax::Unlimited } else { EvictionRelax::Groups(open) };
-        log::info!(
-            "area: eviction of {evict} beyond parks ({freed}) and fair shares ({quotas}): {}",
-            if tiles == 0 { "unlimited".to_string() } else { format!("{tiles} inactive tiles may give rows") }
-        );
-        trainer.relax_eviction(relax);
-        area.counters.eviction_fallbacks += 1;
+        trainer.set_eviction_fallback(if open.is_empty() { EvictionRelax::Unlimited } else { EvictionRelax::Groups(open) });
     }
 }
 

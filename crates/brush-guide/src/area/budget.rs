@@ -151,7 +151,7 @@ pub fn row_budget(
         })
         .collect();
     debug_assert!(group.iter().all(|&g| g != NO_GROUP));
-    Some((keys, RowBudget { group, groups, limit_eviction: fair.is_some(), evict_held: false }))
+    Some((keys, RowBudget { group, groups, limit_eviction: fair.is_some(), evict_held: false, fallback: None }))
 }
 
 #[cfg(test)]
