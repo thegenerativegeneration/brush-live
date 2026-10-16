@@ -1,0 +1,23 @@
+[package]
+name = "brush-triangle-render"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+brush-recon.path = "../brush-recon"
+brush-render.path = "../brush-render"
+brush-cube.path = "../brush-cube"
+burn = { workspace = true, features = ["autodiff"] }
+burn-wgpu.workspace = true
+burn-cubecl.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

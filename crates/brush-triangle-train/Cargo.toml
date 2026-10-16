@@ -1,0 +1,22 @@
+[package]
+name = "brush-triangle-train"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+brush-recon.path = "../brush-recon"
+brush-triangle-render.path = "../brush-triangle-render"
+burn = { workspace = true, features = ["autodiff"] }
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+brush-render.path = "../brush-render"
+brush-cube.path = "../brush-cube"
+image.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
