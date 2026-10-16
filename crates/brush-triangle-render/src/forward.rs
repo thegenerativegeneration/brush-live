@@ -40,7 +40,7 @@ pub fn required_buffer_bytes(
         (faces, 512),
         (pixels, 128),
         (tiles, 32),
-        (intersections, 128),
+        (intersections, 256),
     ]
     .into_iter()
     .try_fold(0_u64, |sum, (count, bytes)| {
@@ -49,10 +49,12 @@ pub fn required_buffer_bytes(
     .ok_or_else(|| ReconError::input("renderer allocation arithmetic overflow"))
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct ForwardBuffers {
     pub output: CubeTensor,
     pub projected: CubeTensor,
     pub sorted_faces: CubeTensor,
+    pub tile_keys: CubeTensor,
     pub ranges: CubeTensor,
     pub params: CubeTensor,
 }
@@ -247,7 +249,7 @@ pub(crate) async fn forward_gpu(
         &client,
         calculate_cube_count_elemwise(&client, n, dim),
         dim,
-        keys.into_tensor_arg(),
+        keys.clone().into_tensor_arg(),
         ranges.clone().into_tensor_arg(),
     );
     let output = create_tensor(
@@ -269,6 +271,7 @@ pub(crate) async fn forward_gpu(
         output,
         projected,
         sorted_faces,
+        tile_keys: keys,
         ranges,
         params,
     }))
@@ -306,8 +309,12 @@ pub async fn render_triangles(
     cfg: &RenderConfig,
 ) -> Result<RenderResult, ReconError> {
     let Some(forward) = forward_gpu(model, request, cfg).await? else {
-        return Ok(empty(model, request));
+        return Ok(crate::backward::empty_with_gradients(
+            model,
+            request,
+            empty(model, request),
+        ));
     };
-    let image = burn_glue::wrap(forward.output, &model.positions);
+    let image = crate::backward::attach(model, forward);
     Ok(unpack(image, request))
 }

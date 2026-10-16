@@ -1,4 +1,5 @@
 //! Independent native triangle experiment; no Gaussian parameter packing or research code reuse.
+mod backward;
 mod burn_glue;
 pub mod forward;
 mod kernels;

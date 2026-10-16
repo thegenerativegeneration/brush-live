@@ -1,5 +1,7 @@
 //! Resolve pending fusion inputs and bind finished custom buffers without host copies.
+use brush_cube::MainBackend;
 use brush_cube::{CubeTensor, MainBackendBase};
+use burn::backend::tensor::FloatTensor;
 use burn::backend::{
     BackendTensor, DispatchTensorKind, TensorMetadata,
     ir::{BackendIr, InitOperationIr, OperationIr, OperationOutput},
@@ -22,7 +24,15 @@ pub(crate) fn int<const D: usize>(tensor: Tensor<D, Int>) -> CubeTensor {
 pub(crate) fn wrap<const D: usize>(cube: CubeTensor, reference: &Tensor<2>) -> Tensor<D> {
     let mut dispatch = reference.clone().without_autodiff().into_dispatch();
     let fusion = brush_render::burn_glue::unwrap_wgpu_float(reference.clone().without_autodiff());
-    let client = fusion.client.clone();
+    dispatch.kind = DispatchTensorKind::Cube(BackendTensor::Float(bind(cube, fusion)));
+    Tensor::from_dispatch(dispatch)
+}
+
+pub(crate) fn bind(
+    cube: CubeTensor,
+    reference: FloatTensor<MainBackend>,
+) -> FloatTensor<MainBackend> {
+    let client = reference.client.clone();
     let shape = cube.shape();
     let dtype = cube.dtype;
     let handle = MainBackendBase::float_tensor_handle(cube);
@@ -34,6 +44,5 @@ pub(crate) fn wrap<const D: usize>(cube: CubeTensor, reference: &Tensor<2>) -> T
             NoOp::<MainBackendBase>::new(),
         )
         .output();
-    dispatch.kind = DispatchTensorKind::Cube(BackendTensor::Float(bound));
-    Tensor::from_dispatch(dispatch)
+    bound
 }

@@ -2,10 +2,14 @@ use brush_cube::{Vec3A, is_finite_f32};
 use burn::cubecl;
 use burn::cubecl::{cube, prelude::*};
 
+pub mod dual;
 pub mod intersections;
 pub mod project;
+pub mod project_bwd;
 pub mod ranges;
 pub mod rasterize;
+pub mod rasterize_bwd;
+pub mod vertex_reduce;
 
 #[derive(CubeType, Clone, Copy)]
 #[expand(derive(Clone, Copy))]

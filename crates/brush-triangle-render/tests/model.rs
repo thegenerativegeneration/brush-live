@@ -24,7 +24,7 @@ async fn model_has_finite_logits_and_expected_tensor_layout() {
     let d = Device::from(brush_cube::test_helpers::test_device().await).autodiff();
     let m = TriangleModel::from_seed(&seed(), &d).unwrap();
     assert_eq!(m.positions.dims(), [3, 3]);
-    assert_eq!(m.faces.dims(), [1, 3]);
+    assert_eq!(m.faces().dims(), [1, 3]);
     assert_eq!(m.rgb_logits.dims(), [3, 3]);
     assert_eq!(m.weight_logits.dims(), [3]);
     let c = m

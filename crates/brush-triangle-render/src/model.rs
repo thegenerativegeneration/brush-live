@@ -15,7 +15,7 @@ impl TriangleSeed {
     pub fn validate(&self) -> Result<(), ReconError> {
         if self.positions.len() != self.colors.len()
             || self.positions.len() > i32::MAX as usize
-            || self.faces.len() > i32::MAX as usize
+            || self.faces.len() > i32::MAX as usize / 3
             || self.positions.iter().flatten().any(|v| !v.is_finite())
             || self
                 .colors
@@ -45,7 +45,9 @@ impl TriangleSeed {
 #[derive(Clone)]
 pub struct TriangleModel {
     pub positions: Tensor<2>,
-    pub faces: Tensor<2, Int>,
+    pub(crate) faces: Tensor<2, Int>,
+    pub(crate) vertex_offsets: Tensor<1, Int>,
+    pub(crate) vertex_corners: Tensor<1, Int>,
     pub rgb_logits: Tensor<2>,
     pub weight_logits: Tensor<1>,
     vertex_count: usize,
@@ -84,9 +86,29 @@ impl TriangleModel {
         } else {
             seed.faces.iter().flatten().map(|i| *i as i32).collect()
         };
+        let mut adjacency = vec![vec![]; v];
+        for (f, face) in seed.faces.iter().enumerate() {
+            for (corner, &i) in face.iter().enumerate() {
+                adjacency[i as usize].push((f * 3 + corner) as i32);
+            }
+        }
+        let mut offsets = vec![0_i32];
+        let mut corners = vec![];
+        for list in adjacency {
+            corners.extend(list);
+            offsets.push(corners.len() as i32);
+        }
+        if corners.is_empty() {
+            corners.push(0);
+        }
         Ok(Self {
             positions: Tensor::from_data(TensorData::new(positions, [v, 3]), device),
             faces: Tensor::from_data(TensorData::new(faces, [f, 3]), device),
+            vertex_offsets: Tensor::from_data(TensorData::new(offsets, [v + 1]), device),
+            vertex_corners: Tensor::from_data(
+                TensorData::new(corners.clone(), [corners.len()]),
+                device,
+            ),
             rgb_logits: Tensor::from_data(TensorData::new(colors, [v, 3]), device),
             weight_logits: Tensor::from_data(
                 TensorData::new(vec![(0.1_f32 / 0.9).ln(); v], [v]),
@@ -102,6 +124,10 @@ impl TriangleModel {
 
     pub fn num_vertices(&self) -> usize {
         self.vertex_count
+    }
+    /// Fixed connectivity; changing it requires rebuilding the seed/model and adjacency.
+    pub fn faces(&self) -> Tensor<2, Int> {
+        self.faces.clone()
     }
     pub fn num_faces(&self) -> usize {
         self.face_count
