@@ -12,6 +12,7 @@ fn budget() -> RowBudget {
         groups: vec![group(2, true, 1), group(u32::MAX, false, 0)],
         limit_eviction: true,
         evict_held: false,
+        fallback: None,
     }
 }
 
@@ -66,6 +67,7 @@ fn a_group_over_its_cap_gives_its_least_important_rows() {
         groups: vec![group(2, true, 0), group(1, true, 0)],
         limit_eviction: false,
         evict_held: false,
+        fallback: None,
     };
     let scores = [5.0, f32::INFINITY, 1.0, 1.0, 9.0, 3.0, 2.0, 0.0];
     // Group 0: five rows for two; rows 2 and 3 tie at 1.0, then row 0, then 4; the unscored row 1 last.

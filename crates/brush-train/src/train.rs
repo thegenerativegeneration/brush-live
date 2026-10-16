@@ -133,6 +133,8 @@ pub struct SplatTrainer {
     row_budget: Option<RowBudget>,
     /// Rows the last refine evicted per group of its budget ([`Self::budget_evictions`]).
     budget_evicted: Vec<u32>,
+    /// The last refine's limited eviction widened ([`Self::eviction_fell_back`]).
+    eviction_fell_back: bool,
 }
 
 /// `(l1, ssim)` kernel weights for `step` (1-based). The RGB loss is
@@ -264,6 +266,7 @@ impl SplatTrainer {
             frozen_rows: None,
             row_budget: None,
             budget_evicted: Vec::new(),
+            eviction_fell_back: false,
             profile: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
@@ -360,11 +363,17 @@ impl SplatTrainer {
         fits
     }
 
-    /// Widens the eviction of the row budget the next refine applies ([`EvictionRelax`]); no-op without one.
-    pub fn relax_eviction(&mut self, relax: EvictionRelax) {
+    /// How the limited eviction of the next refine's row budget widens when its quotas give fewer rows than it wants
+    /// ([`EvictionRelax`]): a second pick for the rest under the widened budget. No-op without a budget.
+    pub fn set_eviction_fallback(&mut self, fallback: EvictionRelax) {
         if let Some(budget) = self.row_budget.as_mut() {
-            budget.relax(relax);
+            budget.fallback = Some(fallback);
         }
+    }
+
+    /// Whether the last refine's limited eviction fell short of what it wanted and widened ([`Self::set_eviction_fallback`]).
+    pub fn eviction_fell_back(&self) -> bool {
+        self.eviction_fell_back
     }
 
     /// Sets the splat budget (`max_splats`) eviction and growth work towards from now on.

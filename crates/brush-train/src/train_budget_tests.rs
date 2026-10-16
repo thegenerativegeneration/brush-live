@@ -17,7 +17,7 @@ fn group(max_rows: u32, full: bool, evictable: u32) -> GroupBudget {
 /// Rows 0..30 in group 0 and 30..60 in group 1 (of the 60-splat eviction model).
 fn halves(g0: GroupBudget, g1: GroupBudget, limit_eviction: bool) -> RowBudget {
     let group = (0..N).map(|i| u32::from(i >= 30)).collect();
-    RowBudget { group, groups: vec![g0, g1], limit_eviction, evict_held: false }
+    RowBudget { group, groups: vec![g0, g1], limit_eviction, evict_held: false, fallback: None }
 }
 
 /// The importance of the splats left after a refine, in order.
@@ -56,6 +56,7 @@ async fn a_full_group_does_not_grow() {
         groups: vec![group(10_000, true, 0), group(10_000, false, 0)],
         limit_eviction: false,
         evict_held: false,
+        fallback: None,
     };
     let (before, after, stats) = refine_with(Some(budget)).await;
     assert_eq!(stats.num_pruned, 1);
@@ -164,10 +165,11 @@ async fn the_budget_follows_take_and_append() {
     assert!(trainer.row_budget.is_none(), "refine kept the budget");
 }
 
-/// A limited eviction whose quotas give nothing takes, once relaxed for a group, that group's rows by lowest importance,
-/// held rows included; relaxed to unlimited it takes the least important rows that are not held, as without a budget.
+/// A limited eviction whose quotas give nothing falls back: opened for a group, it takes that group's rows by lowest
+/// importance, held rows included; unlimited, the least important rows that are not held, as without a budget. Without
+/// a fallback it takes nothing.
 #[tokio::test]
-async fn a_relaxed_eviction_takes_held_rows_of_the_opened_groups() {
+async fn a_short_limited_eviction_falls_back() {
     let imp: Vec<f32> = (0..N).map(|i| i as f32).collect();
     // Rows 30..60 (group 1) held after a step trained them.
     let held = |s: &Splats| {
@@ -180,10 +182,12 @@ async fn a_relaxed_eviction_takes_held_rows_of_the_opened_groups() {
         trainer.set_frozen_rows(Some(held(&s)));
         trainer.note_seed_shortfall(1);
         trainer.set_row_budget(Some(halves(group(u32::MAX, false, 0), group(u32::MAX, false, 0), true)));
+        let fallback = relax.is_some();
         if let Some(relax) = relax {
-            trainer.relax_eviction(relax);
+            trainer.set_eviction_fallback(relax);
         }
         let (_, stats) = trainer.refine(1, s).await;
+        assert_eq!(trainer.eviction_fell_back(), fallback);
         (stats.num_evicted, kept_importance(&trainer).await)
     };
     assert_eq!(run(None).await.0, 0, "quotas of 0 give nothing");

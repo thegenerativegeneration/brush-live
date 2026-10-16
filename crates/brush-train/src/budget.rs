@@ -31,10 +31,13 @@ pub struct RowBudget {
     /// Held rows ([`crate::train::SplatTrainer::set_frozen_rows`]) are eviction victims too, within their group's
     /// `evictable` ([`EvictionRelax::Groups`]); false: only those no step ever trained.
     pub evict_held: bool,
+    /// How a limited eviction widens when its quotas give fewer rows than it wants
+    /// ([`crate::train::SplatTrainer::set_eviction_fallback`]); `None`: it takes fewer.
+    pub fallback: Option<EvictionRelax>,
 }
 
-/// How [`crate::train::SplatTrainer::relax_eviction`] widens a limited eviction for the next refine, when the room the
-/// caller made does not cover what it must evict.
+/// How a limited eviction widens when its quotas give fewer rows than it wants
+/// ([`crate::train::SplatTrainer::set_eviction_fallback`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EvictionRelax {
     /// These groups may give every row, held rows included (lowest importance first, the protected cone kept).

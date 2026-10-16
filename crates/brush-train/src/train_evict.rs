@@ -22,6 +22,8 @@ impl SplatTrainer {
         budget: Option<&RowBudget>,
         full: Option<Tensor<1, Bool>>,
     ) -> (Tensor<1, Bool>, Vec<usize>) {
+        self.eviction_fell_back = false;
+        let mut fell_back = false;
         let Some(ev) = self.evict.as_mut() else {
             return (dead, Vec::new());
         };
@@ -104,25 +106,20 @@ impl SplatTrainer {
         };
         // Held rows no step ever trained (raw seeds on ground outside the active tiles) do not block the budget.
         let untrained_held = held.as_ref().map(|h| h.clone().bool_and(life.trained.clone().lower_elem(0.5)));
-        let evict_held = budget.is_some_and(|b| b.limit_eviction && b.evict_held);
-        let exclude = match (held, &untrained_held) {
-            (Some(held), Some(u)) if !evict_held => dead.clone().bool_or(held.bool_and(u.clone().bool_not())),
-            _ => dead.clone(),
-        };
-        let quota = budget.and_then(|b| b.quota());
-        let limit = quota.map(|q| (budget.expect("a quota comes with a budget").group.as_slice(), q));
-        let (mask, picked) = select_evictions(
-            life,
-            splats.means(),
-            &means,
-            exclude,
-            ev.protect,
-            &ev.config,
-            want,
-            untrained_held,
-            limit,
-        )
-        .await;
+        let pick = Pick { means: &means, held: held.as_ref(), untrained_held: untrained_held.as_ref() };
+        let (mut mask, mut picked) = pick.victims(life, splats, (ev.protect, &ev.config), dead.clone(), budget, want).await;
+        let fallback = budget.filter(|b| b.limit_eviction).and_then(|b| b.fallback.clone().map(|f| (b, f)));
+        if let Some((b, fallback)) = fallback.filter(|_| picked.len() < want as usize) {
+            let mut wide = b.clone();
+            wide.relax(fallback);
+            let rest = want - picked.len() as u32;
+            let (more_mask, more) = pick.victims(life, splats, (ev.protect, &ev.config), dead.clone().bool_or(mask.clone()), Some(&wide), rest).await;
+            log::info!("evict: limited eviction found {} of {want}; widened, {} more", picked.len(), more.len());
+            mask = mask.bool_or(more_mask);
+            picked.extend(more);
+            picked.sort_unstable();
+            fell_back = true;
+        }
         let count = picked.len();
         if count > 0 {
             ev.recent.backlog = 0;
@@ -130,6 +127,7 @@ impl SplatTrainer {
         log::info!(
             "evict: {count} of {want} wanted (recent backlog {backlog}, seed shortfall {shortfall}, {current} splats)"
         );
+        self.eviction_fell_back = fell_back;
         (dead.bool_or(mask), picked)
     }
 
@@ -157,5 +155,46 @@ impl SplatTrainer {
         let mask = Tensor::<1, Bool>::from_data(TensorData::new(flags, [n]), &dead.device());
         log::info!("evict: {} over their group's cap", picked.len());
         (dead.bool_or(mask), picked)
+    }
+}
+
+/// What one eviction pick shares between the limited pass and the widened one.
+struct Pick<'a> {
+    means: &'a [f32],
+    held: Option<&'a Tensor<1, Bool>>,
+    untrained_held: Option<&'a Tensor<1, Bool>>,
+}
+
+impl Pick<'_> {
+    /// Up to `want` victims not in `dead`: held rows only when no step trained them, or when `budget` lets held rows go
+    /// ([`RowBudget::evict_held`]); within `budget`'s quotas when it limits eviction.
+    async fn victims(
+        &self,
+        life: &crate::evict::SplatLife,
+        splats: &Splats,
+        (protect, config): (Option<crate::evict::ProtectCone>, &crate::evict::EvictConfig),
+        dead: Tensor<1, Bool>,
+        budget: Option<&RowBudget>,
+        want: u32,
+    ) -> (Tensor<1, Bool>, Vec<usize>) {
+        let evict_held = budget.is_some_and(|b| b.limit_eviction && b.evict_held);
+        let exclude = match (self.held, self.untrained_held) {
+            (Some(held), Some(u)) if !evict_held => dead.bool_or(held.clone().bool_and(u.clone().bool_not())),
+            _ => dead,
+        };
+        let quota = budget.and_then(|b| b.quota());
+        let limit = quota.map(|q| (budget.expect("a quota comes with a budget").group.as_slice(), q));
+        select_evictions(
+            life,
+            splats.means(),
+            self.means,
+            exclude,
+            protect,
+            config,
+            want,
+            self.untrained_held.cloned(),
+            limit,
+        )
+        .await
     }
 }
