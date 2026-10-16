@@ -32,6 +32,10 @@ tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 [features]
 debug-validation = []
 
+[[example]]
+name = "triangle_probe"
+test = false
+
 [dev-dependencies]
 assert_approx_eq.workspace = true
 wasm-bindgen-test = "0.3"
