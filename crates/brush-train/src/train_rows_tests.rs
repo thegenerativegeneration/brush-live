@@ -21,7 +21,7 @@ fn splats(n: usize, z: f32, device: &Device) -> Splats {
     )
 }
 
-fn batch() -> SceneBatch {
+pub(super) fn batch() -> SceneBatch {
     let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
         32,
         32,
@@ -46,12 +46,12 @@ fn batch() -> SceneBatch {
 
 /// A trainer built from `args` (after the program name) with eviction, origins and, when `view_cams`, a Mip floor,
 /// after one step and one refine on `n` splats 2 m ahead of the camera.
-async fn trained_with(n: usize, args: &[&str], view_cams: bool) -> (SplatTrainer, Splats) {
+pub(super) async fn trained_with(n: usize, args: &[&str], view_cams: bool) -> (SplatTrainer, Splats) {
     trained_on(|device| splats(n, 2.0, device), args, view_cams).await
 }
 
 /// [`trained_with`] on the splats `base` builds.
-async fn trained_on(
+pub(super) async fn trained_on(
     base: impl FnOnce(&Device) -> Splats,
     args: &[&str],
     view_cams: bool,
@@ -122,10 +122,8 @@ async fn take_then_append_keeps_every_row_and_training_runs() {
         "the step left moments to keep"
     );
     assert_eq!(&moment_after[..k], &kept_moments[..]);
-    assert!(
-        moment_after[k..].iter().all(|&m| m == 0.0),
-        "appended rows start with zero moments"
-    );
+    let taken_moments: Vec<f32> = idx.iter().map(|&i| moment_before[i]).collect();
+    assert_eq!(&moment_after[k..], &taken_moments[..], "appended rows keep their moments");
     // Moments, refine record, life and origin tags stay row-aligned: a step and a refine run on the result.
     let (s, _) = trainer.step(batch(), s.train()).await;
     let (s, _) = trainer.refine(2, s.valid()).await;
@@ -370,6 +368,7 @@ async fn host_bake_matches_the_gpu_fold() {
         age: vec![0.0; 3],
         importance: vec![f32::INFINITY; 3],
         sh_coeffs_per_channel: 1,
+        ..SplatRows::default()
     };
     let host = rows.baked();
     let s = rows.to_splats(&device);

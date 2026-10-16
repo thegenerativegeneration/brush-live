@@ -8,6 +8,7 @@ use burn::tensor::{Device, Int, Tensor, TensorData, s};
 use glam::Affine3A;
 
 /// Per splat: the seeding view's slot + 1; 0 for splats appended without one, which never move.
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct SplatOrigin {
     rows: Tensor<1, Int>,
     /// At least the largest tag in `rows` (keep and split never raise it), so the move's lookup table covers every

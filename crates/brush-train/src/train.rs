@@ -56,6 +56,7 @@ const MIN_SCALE_FREEZE_FRAC: f32 = 0.9;
 /// The three per-parameter Adam states of a [`Splats`] module, owned directly
 /// so the trainer can update LR scaling every step and surgically edit the
 /// momentum tensors during refine — all GPU-side, no record round-trips.
+#[cfg_attr(test, derive(Clone))]
 struct SplatOptim {
     adam: AdamScaled,
     transforms: AdamState<2>,
@@ -334,7 +335,8 @@ impl SplatTrainer {
     }
 
     /// How many rows [`Self::set_frozen_rows`] holds that no step ever trained (a `[1]` tensor, read back by the
-    /// caller): rows appended back from the host count as trained; before the first step every held row counts.
+    /// caller): rows appended back from the host count as their flag says (trained without one); before the first step
+    /// every held row counts.
     /// `None` without a held mask or without eviction, whose per-row state carries the flag.
     pub fn held_untrained_rows(&self) -> Option<Tensor<1, Int>> {
         let held = self.frozen_rows.as_ref()?;
@@ -547,18 +549,19 @@ impl SplatTrainer {
             )
             .unwrap_or_else(|| Tensor::zeros([n], &splats.device().inner()))
         });
-        self.append_raw(splats, new.bake_min_scale(), new_floor, slot)
+        self.append_raw(splats, new.bake_min_scale(), new_floor, slot, None)
     }
 
     /// Appends `new` (raw params, no floor attached) to `splats`, keeping optimizer, refine and life state and origin
-    /// tags aligned; the new rows get zero moments and tag `slot`. When `splats` carry a Mip floor it is kept and
-    /// extended by `new_floor` (zeros when `None`); otherwise `new_floor` is ignored.
+    /// tags aligned; the new rows get the Adam moments `moments` (zeros when `None`) and tag `slot`. When `splats`
+    /// carry a Mip floor it is kept and extended by `new_floor` (zeros when `None`); otherwise `new_floor` is ignored.
     fn append_raw(
         &mut self,
         splats: Splats,
         new: Splats,
         new_floor: Option<Tensor<1>>,
         slot: Option<u32>,
+        moments: Option<rows_impl::MomentTails>,
     ) -> Splats {
         let n = new.num_splats() as usize;
         if n == 0 {
@@ -576,30 +579,19 @@ impl SplatTrainer {
             new.raw_opacities.val(),
         );
 
-        let mut splats = if let Some(optim) = self.optim.as_mut() {
-            map_splats_and_opt(
-                splats,
-                optim,
-                |x| Tensor::cat(vec![x, nt], 0),
-                |x| Tensor::cat(vec![x, ns], 0),
-                |x| Tensor::cat(vec![x, no], 0),
-                |x: Tensor<2>| {
-                    let d1 = x.dims()[1];
-                    Tensor::cat(vec![x, Tensor::zeros([n, d1], &opt_device)], 0)
-                },
-                |x: Tensor<3>| {
-                    let [_, d1, d2] = x.dims();
-                    Tensor::cat(vec![x, Tensor::zeros([n, d1, d2], &opt_device)], 0)
-                },
-                |x: Tensor<1>| Tensor::cat(vec![x, Tensor::zeros([n], &opt_device)], 0),
-            )
-        } else {
-            let mut s = splats;
-            s.transforms = s.transforms.map(|x| Tensor::cat(vec![x, nt], 0));
-            s.sh_coeffs = s.sh_coeffs.map(|x| Tensor::cat(vec![x, ns], 0));
-            s.raw_opacities = s.raw_opacities.map(|x| Tensor::cat(vec![x, no], 0));
-            s
-        };
+        let mut splats = splats;
+        splats.transforms = splats.transforms.map(|x| Tensor::cat(vec![x, nt], 0));
+        splats.sh_coeffs = splats.sh_coeffs.map(|x| Tensor::cat(vec![x, ns], 0));
+        splats.raw_opacities = splats.raw_opacities.map(|x| Tensor::cat(vec![x, no], 0));
+        if let Some(optim) = self.optim.as_mut() {
+            let (t, s, o) = match moments {
+                Some(m) => (Some(m.transforms), Some(m.sh_coeffs), Some(m.opacities)),
+                None => (None, None, None),
+            };
+            optim.transforms.append_rows(n, t);
+            optim.sh_coeffs.append_rows(n, s);
+            optim.opacities.append_rows(n, o);
+        }
 
         if let Some(existing_floor) = existing_floor {
             let new_floor = new_floor.unwrap_or_else(|| Tensor::zeros([n], &opt_device));

@@ -26,6 +26,74 @@ pub struct SplatRows {
     /// `[n]` eviction importance (`+inf` unscored or without eviction state).
     pub importance: Vec<f32>,
     pub sh_coeffs_per_channel: u32,
+    /// `[n]` whether a training step ever updated the row; empty when not known (the trainer then counts the rows as
+    /// trained).
+    pub trained: Vec<bool>,
+    /// The rows' Adam moments; `None` when not known (the trainer then starts them at zero).
+    pub moments: Option<RowMoments>,
+}
+
+/// The Adam moments of splat rows on the host, per parameter group in the trainer's layout.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RowMoments {
+    /// `[n·10]` first moment of the transforms row (means 3, rotations 4, log-scales 3).
+    pub transforms_m1: Vec<f32>,
+    /// `[n·10]` second moment of the transforms row.
+    pub transforms_m2: Vec<f32>,
+    /// `[n·coeffs·3]` first moment of the SH coefficients, layout like `SplatRows::sh_coeffs`.
+    pub sh_m1: Vec<f32>,
+    /// `[n]` second moment of the SH coefficients, one per row (the trainer reduces it over the row).
+    pub sh_m2: Vec<f32>,
+    /// `[n]` first moment of the raw opacity.
+    pub opacity_m1: Vec<f32>,
+    /// `[n]` second moment of the raw opacity.
+    pub opacity_m2: Vec<f32>,
+}
+
+impl RowMoments {
+    /// Zero moments for `n` rows with `coeffs` SH coefficients per channel.
+    pub fn zeros(n: usize, coeffs: usize) -> Self {
+        Self {
+            transforms_m1: vec![0.0; n * 10],
+            transforms_m2: vec![0.0; n * 10],
+            sh_m1: vec![0.0; n * coeffs * 3],
+            sh_m2: vec![0.0; n],
+            opacity_m1: vec![0.0; n],
+            opacity_m2: vec![0.0; n],
+        }
+    }
+
+    /// Per column: name, values and values per row for `coeffs` SH coefficients per channel, in field order.
+    pub fn columns(&self, coeffs: usize) -> [(&'static str, &[f32], usize); 6] {
+        [
+            ("transforms_m1", &self.transforms_m1, 10),
+            ("transforms_m2", &self.transforms_m2, 10),
+            ("sh_m1", &self.sh_m1, coeffs * 3),
+            ("sh_m2", &self.sh_m2, 1),
+            ("opacity_m1", &self.opacity_m1, 1),
+            ("opacity_m2", &self.opacity_m2, 1),
+        ]
+    }
+
+    fn select(&self, coeffs: usize, rows: &[usize]) -> Self {
+        Self {
+            transforms_m1: pick(&self.transforms_m1, 10, rows),
+            transforms_m2: pick(&self.transforms_m2, 10, rows),
+            sh_m1: pick(&self.sh_m1, coeffs * 3, rows),
+            sh_m2: pick(&self.sh_m2, 1, rows),
+            opacity_m1: pick(&self.opacity_m1, 1, rows),
+            opacity_m2: pick(&self.opacity_m2, 1, rows),
+        }
+    }
+
+    fn extend(&mut self, other: &RowMoments) {
+        self.transforms_m1.extend_from_slice(&other.transforms_m1);
+        self.transforms_m2.extend_from_slice(&other.transforms_m2);
+        self.sh_m1.extend_from_slice(&other.sh_m1);
+        self.sh_m2.extend_from_slice(&other.sh_m2);
+        self.opacity_m1.extend_from_slice(&other.opacity_m1);
+        self.opacity_m2.extend_from_slice(&other.opacity_m2);
+    }
 }
 
 fn sigmoid(x: f32) -> f32 {
@@ -54,24 +122,27 @@ impl SplatRows {
     }
 
     /// `Err` naming the first column (in field order) whose length does not fit `len()` rows: `len·3` means and
-    /// log-scales, `len·4` rotations, `len·coeffs·3` SH, a floor that is empty or `len`, and `len` origins, ages and
-    /// importances.
+    /// log-scales, `len·4` rotations, `len·coeffs·3` SH, a floor that is empty or `len`, `len` origins, ages and
+    /// importances, trained flags that are empty or `len`, and with moments their columns
+    /// ([`RowMoments::columns`]).
     pub fn check(&self) -> Result<(), String> {
         let n = self.len();
-        let columns = [
+        let or_empty = |len: usize| if len == 0 { 0 } else { n };
+        let mut columns = vec![
             ("means", self.means.len(), n * 3),
             ("rotations", self.rotations.len(), n * 4),
             ("log_scales", self.log_scales.len(), n * 3),
             ("sh_coeffs", self.sh_coeffs.len(), n * self.coeff_width()),
-            (
-                "min_scale",
-                self.min_scale.len(),
-                if self.min_scale.is_empty() { 0 } else { n },
-            ),
+            ("min_scale", self.min_scale.len(), or_empty(self.min_scale.len())),
             ("origin", self.origin.len(), n),
             ("age", self.age.len(), n),
             ("importance", self.importance.len(), n),
+            ("trained", self.trained.len(), or_empty(self.trained.len())),
         ];
+        if let Some(m) = &self.moments {
+            let coeffs = self.sh_coeffs_per_channel as usize;
+            columns.extend(m.columns(coeffs).map(|(name, v, width)| (name, v.len(), n * width)));
+        }
         match columns.iter().find(|(_, got, want)| got != want) {
             Some((name, got, want)) => Err(format!(
                 "splat rows column {name} has {got} values, {n} rows need {want}"
@@ -101,11 +172,21 @@ impl SplatRows {
             age: pick(&self.age, 1, rows),
             importance: pick(&self.importance, 1, rows),
             sh_coeffs_per_channel: self.sh_coeffs_per_channel,
+            trained: if self.trained.is_empty() {
+                Vec::new()
+            } else {
+                pick(&self.trained, 1, rows)
+            },
+            moments: self
+                .moments
+                .as_ref()
+                .map(|m| m.select(self.sh_coeffs_per_channel as usize, rows)),
         }
     }
 
     /// The rows of every part, in order. When some parts carry a floor and others do not, those get a zero floor,
-    /// which leaves a splat as it is. Panics when non-empty parts differ in SH degree.
+    /// which leaves a splat as it is; likewise parts without trained flags count as trained and parts without moments
+    /// get zero ones. Panics when non-empty parts differ in SH degree.
     pub fn concat(parts: &[SplatRows]) -> SplatRows {
         let parts: Vec<&SplatRows> = parts.iter().filter(|p| !p.is_empty()).collect();
         let Some(first) = parts.first() else {
@@ -117,8 +198,11 @@ impl SplatRows {
             "concatenated rows must share the SH degree"
         );
         let any_floor = parts.iter().any(|p| !p.min_scale.is_empty());
+        let any_trained = parts.iter().any(|p| !p.trained.is_empty());
+        let any_moments = parts.iter().any(|p| p.moments.is_some());
         let mut out = SplatRows {
             sh_coeffs_per_channel: coeffs,
+            moments: any_moments.then(RowMoments::default),
             ..SplatRows::default()
         };
         for p in parts {
@@ -137,6 +221,19 @@ impl SplatRows {
             out.origin.extend_from_slice(&p.origin);
             out.age.extend_from_slice(&p.age);
             out.importance.extend_from_slice(&p.importance);
+            if any_trained {
+                if p.trained.is_empty() {
+                    out.trained.extend(std::iter::repeat_n(true, p.len()));
+                } else {
+                    out.trained.extend_from_slice(&p.trained);
+                }
+            }
+            if let Some(m) = out.moments.as_mut() {
+                match &p.moments {
+                    Some(pm) => m.extend(pm),
+                    None => m.extend(&RowMoments::zeros(p.len(), coeffs as usize)),
+                }
+            }
         }
         out
     }

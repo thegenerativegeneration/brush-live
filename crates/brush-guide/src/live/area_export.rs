@@ -86,7 +86,7 @@ impl LiveModel {
             return Ok((out, e));
         }
         let trainer = self.trainer.as_ref().expect("trainer exists once splats exist");
-        let rows = trainer.read_rows(resident).await;
+        let rows = trainer.read_model_rows(resident).await;
         rows.check().map_err(other)?;
         let coeffs = rows.sh_coeffs_per_channel;
         let tile_size = self.area.as_ref().expect("parked tiles imply area training").registry.params().tile_size;

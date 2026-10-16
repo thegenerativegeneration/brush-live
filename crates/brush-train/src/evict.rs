@@ -75,6 +75,7 @@ pub fn cell_of(p: glam::Vec3) -> glam::IVec3 {
 
 /// Cells newly observed by recent keyframes (see the module docs).
 #[derive(Default)]
+#[cfg_attr(test, derive(Clone))]
 pub struct RecentCells {
     /// Cell → refine count when a keyframe last seeded it.
     stamps: hashbrown::HashMap<glam::IVec3, u32>,
@@ -170,12 +171,13 @@ pub fn evict_count(
 }
 
 /// Per-splat age (refines survived), importance and whether a step ever trained it, row-aligned with the splats.
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct SplatLife {
     pub age: Tensor<1>,
     /// `+inf` until scored.
     pub importance: Tensor<1>,
-    /// 1 once a step updated the row (it was not frozen), else 0; rows appended back from the host count as trained,
-    /// split children take their parent's.
+    /// 1 once a step updated the row (it was not frozen), else 0; rows appended back from the host take the flag they
+    /// carry (trained without one), split children take their parent's.
     pub trained: Tensor<1>,
 }
 
@@ -211,11 +213,12 @@ impl SplatLife {
         self.trained = self.trained.clone().select(0, indices);
     }
 
-    /// Sets the age and importance of the last `age.len()` rows and marks them trained (they come back from the host,
-    /// where the flag is not kept).
-    pub(crate) fn set_tail(&mut self, age: &[f32], importance: &[f32]) {
+    /// Sets the age, importance and trained flag of the last `age.len()` rows (they come back from the host); empty
+    /// `trained` marks them all trained.
+    pub(crate) fn set_tail(&mut self, age: &[f32], importance: &[f32], trained: &[bool]) {
         let (k, len) = (age.len(), self.len());
         assert_eq!(importance.len(), k, "one importance per age");
+        assert!(trained.is_empty() || trained.len() == k, "one trained flag per age, or none");
         assert!(k <= len, "{k} tail rows for {len} rows");
         if k == 0 {
             return;
@@ -227,7 +230,11 @@ impl SplatLife {
             .importance
             .clone()
             .slice_assign(s![len - k..len], tail(importance));
-        self.trained = self.trained.clone().slice_assign(s![len - k..len], Tensor::ones([k], &device));
+        let flags = match trained {
+            [] => Tensor::ones([k], &device),
+            flags => tail(&flags.iter().map(|&t| if t { 1.0 } else { 0.0 }).collect::<Vec<_>>()),
+        };
+        self.trained = self.trained.clone().slice_assign(s![len - k..len], flags);
     }
 
     /// Appends one child per parent index: age 0, the parent's importance and trained flag.
@@ -262,6 +269,7 @@ impl SplatLife {
 }
 
 /// Eviction settings plus the state the trainer carries between refines.
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct Eviction {
     pub config: EvictConfig,
     pub life: Option<SplatLife>,

@@ -52,6 +52,7 @@ fn rows(n: usize, offset: Vec3) -> SplatRows {
             })
             .collect(),
         sh_coeffs_per_channel: 4,
+        ..SplatRows::default()
     }
 }
 

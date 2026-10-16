@@ -172,7 +172,8 @@ async fn pending_evictions_follow_the_seed_shortfall() {
 }
 
 /// The trainer tells how many held rows no step ever trained: rows held from the first step stay untrained through
-/// steps, rows a step trained count as trained for good, and rows appended back from the host count as trained.
+/// steps, rows a step trained count as trained for good, and rows appended back from the host keep their flag (count
+/// as trained without one).
 /// Without eviction state (where the flag lives) there is no count.
 #[tokio::test]
 async fn held_rows_no_step_ever_trained_are_counted() {
@@ -194,12 +195,20 @@ async fn held_rows_no_step_ever_trained_are_counted() {
     let s = trainer.step(batch(), s).await.0;
     let s = trainer.step(batch(), s).await.0;
     assert_eq!(held_untrained(&trainer).await, Some(FAR as i64));
-    // Taking two held rows out and appending them back: they lived in the trainer, so they count as trained.
+    // Taking two held rows out and appending them back: they keep their flag and stay untrained.
     let take: Vec<bool> = (0..n).map(|i| i == NEAR || i == NEAR + 1).collect();
     let (s, taken) = trainer.take_rows(s.valid(), &take).await;
-    let s = trainer.append_rows(s, &taken.unwrap());
-    trainer.set_frozen_rows(Some(Tensor::from_data(TensorData::new(vec![true; n], [n]), &device.clone().inner())));
-    assert_eq!(held_untrained(&trainer).await, Some(FAR as i64 - 2), "appended rows count as trained");
+    let taken = taken.unwrap();
+    assert_eq!(taken.trained, vec![false; 2]);
+    let s = trainer.append_rows(s, &taken);
+    let hold_all = |device: &Device| Some(Tensor::from_data(TensorData::new(vec![true; n], [n]), &device.clone().inner()));
+    trainer.set_frozen_rows(hold_all(&device));
+    assert_eq!(held_untrained(&trainer).await, Some(FAR as i64), "appended rows keep their flag");
+    // Without flags (a version 1 tile file) they count as trained.
+    let (s, taken) = trainer.take_rows(s, &(0..n).map(|i| i >= n - 2).collect::<Vec<_>>()).await;
+    let s = trainer.append_rows(s, &crate::rows::SplatRows { trained: Vec::new(), ..taken.unwrap() });
+    trainer.set_frozen_rows(hold_all(&device));
+    assert_eq!(held_untrained(&trainer).await, Some(FAR as i64 - 2), "rows without flags count as trained");
     // Released for one step, every row has trained.
     trainer.set_frozen_rows(None);
     let _ = trainer.step(batch(), s.train()).await;

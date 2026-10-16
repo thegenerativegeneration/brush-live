@@ -4,6 +4,7 @@ use burn::{
 };
 use tracing::trace_span;
 
+#[cfg_attr(test, derive(Clone))]
 pub(crate) struct RefineRecord {
     // Helper tensors for accumulating the viewspace_xy gradients and the number
     // of observations per gaussian. Used in pruning and densification.

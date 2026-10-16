@@ -18,6 +18,7 @@ fn one_row(origin: Option<u32>, mean: Vec3, rot: Quat) -> SplatRows {
         age: vec![0.0],
         importance: vec![f32::INFINITY],
         sh_coeffs_per_channel: 1,
+        ..SplatRows::default()
     }
 }
 

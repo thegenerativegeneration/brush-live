@@ -261,6 +261,7 @@ pub fn globe_background(
 /// The learned globe: degree-2 SH coefficients `[9, 3]`, with their own tiny
 /// Adam state (reusing `crate::adam_scaled`, the trainer's own optimizer, so
 /// the globe gets the same numerics as every other learned parameter).
+#[cfg_attr(test, derive(Clone))]
 pub struct ShBackground {
     coeffs: Tensor<2>,
     adam: AdamScaled,

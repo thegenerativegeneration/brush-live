@@ -14,6 +14,7 @@ pub(crate) fn rows(n: usize, coeffs: u32) -> SplatRows {
         age: vec![0.0; n],
         importance: vec![f32::INFINITY; n],
         sh_coeffs_per_channel: coeffs,
+        ..SplatRows::default()
     }
 }
 

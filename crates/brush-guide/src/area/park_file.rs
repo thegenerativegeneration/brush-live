@@ -285,6 +285,8 @@ pub fn decode_tile(bytes: &[u8]) -> io::Result<ParkedTile> {
         age: r.f32s(h.n)?,
         importance: r.f32s(h.n)?,
         sh_coeffs_per_channel: h.coeffs,
+        trained: Vec::new(),
+        moments: None,
     };
     if !r.bytes.is_empty() {
         return Err(invalid(format!(

@@ -65,6 +65,27 @@ impl<const D: usize> AdamState<D> {
         self.clamped.take()
     }
 
+    /// Appends `n` rows to both moments: `tail`'s (first, second moment; a second moment with size-1 trailing dims
+    /// broadcasts to this state's), or zeros. No-op before the first step, which starts every row's moments at zero.
+    pub fn append_rows(&mut self, n: usize, tail: Option<(Tensor<D>, Tensor<D>)>) {
+        let Some(m) = self.momentum.as_mut() else {
+            return;
+        };
+        let rows = |old: &Tensor<D>| {
+            let mut dims = old.dims();
+            dims[0] = n;
+            dims
+        };
+        let (dims_1, dims_2) = (rows(&m.moment_1), rows(&m.moment_2));
+        let device = m.moment_1.device();
+        let (tail_1, tail_2) = match tail {
+            Some((t1, t2)) => (t1, t2.expand(dims_2)),
+            None => (Tensor::zeros(dims_1, &device), Tensor::zeros(dims_2, &device)),
+        };
+        m.moment_1 = Tensor::cat(vec![m.moment_1.clone(), tail_1], 0);
+        m.moment_2 = Tensor::cat(vec![m.moment_2.clone(), tail_2], 0);
+    }
+
     /// Apply `map_fn` to both momentum tensors (no-op before the first step).
     /// `map_fn` must be shape-agnostic along trailing dims since `moment_2`
     /// may have size-1 trailing dims under `reduce_moment_2`.

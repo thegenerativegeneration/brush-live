@@ -1,4 +1,4 @@
-use super::SplatRows;
+use super::{RowMoments, SplatRows};
 
 #[test]
 fn select_and_concat_keep_rows_together() {
@@ -13,6 +13,7 @@ fn select_and_concat_keep_rows_together() {
         age: vec![1.0, 2.0, 3.0],
         importance: vec![0.5, f32::INFINITY, 0.7],
         sh_coeffs_per_channel: 1,
+        ..SplatRows::default()
     };
     let picked = rows.select(&[2, 0]);
     assert_eq!(picked.means, vec![6.0, 7.0, 8.0, 0.0, 1.0, 2.0]);
@@ -41,6 +42,7 @@ fn check_names_the_first_column_out_of_length() {
         age: vec![0.0; 2],
         importance: vec![0.0; 2],
         sh_coeffs_per_channel: 4,
+        ..SplatRows::default()
     };
     assert_eq!(good.check(), Ok(()));
     let floored = SplatRows {
@@ -117,4 +119,70 @@ fn check_names_the_first_column_out_of_length() {
         ..good
     };
     assert!(both.check().unwrap_err().contains("origin"));
+}
+
+/// `n` rows of moments for `coeffs` SH coefficients per channel, each value its index plus `offset`.
+fn moments(n: usize, coeffs: usize, offset: f32) -> RowMoments {
+    let ramp = |len: usize| (0..len).map(|v| v as f32 + offset).collect::<Vec<_>>();
+    RowMoments {
+        transforms_m1: ramp(n * 10),
+        transforms_m2: ramp(n * 10),
+        sh_m1: ramp(n * coeffs * 3),
+        sh_m2: ramp(n),
+        opacity_m1: ramp(n),
+        opacity_m2: ramp(n),
+    }
+}
+
+/// The trained flags and moments are rows like the parameters: [`SplatRows::check`] names an out-of-length one, and
+/// select and concat keep them with their rows (parts without them get trained rows with zero moments).
+#[test]
+fn trained_flags_and_moments_are_row_columns() {
+    let good = SplatRows {
+        means: vec![0.0; 6],
+        rotations: vec![0.0; 8],
+        log_scales: vec![0.0; 6],
+        sh_coeffs: vec![0.0; 2 * 4 * 3],
+        raw_opacities: vec![0.0; 2],
+        origin: vec![None; 2],
+        age: vec![0.0; 2],
+        importance: vec![0.0; 2],
+        sh_coeffs_per_channel: 4,
+        trained: vec![true, false],
+        moments: Some(moments(2, 4, 0.0)),
+        ..SplatRows::default()
+    };
+    assert_eq!(good.check(), Ok(()));
+    assert_eq!(SplatRows { trained: vec![], moments: None, ..good.clone() }.check(), Ok(()), "both are optional");
+    let with = |m: RowMoments| SplatRows { moments: Some(m), ..good.clone() };
+    let m = moments(2, 4, 0.0);
+    let broken: [(&str, SplatRows); 7] = [
+        ("trained", SplatRows { trained: vec![true], ..good.clone() }),
+        ("transforms_m1", with(RowMoments { transforms_m1: vec![0.0; 19], ..m.clone() })),
+        ("transforms_m2", with(RowMoments { transforms_m2: vec![0.0; 21], ..m.clone() })),
+        ("sh_m1", with(RowMoments { sh_m1: vec![0.0; 2 * 3], ..m.clone() })),
+        ("sh_m2", with(RowMoments { sh_m2: vec![0.0; 2 * 4 * 3], ..m.clone() })),
+        ("opacity_m1", with(RowMoments { opacity_m1: vec![], ..m.clone() })),
+        ("opacity_m2", with(RowMoments { opacity_m2: vec![0.0; 3], ..m.clone() })),
+    ];
+    for (column, rows) in broken {
+        let err = rows.check().expect_err(column);
+        assert!(err.contains(column), "{column}: {err}");
+    }
+
+    let picked = good.select(&[1]);
+    assert_eq!(picked.trained, vec![false]);
+    let pm = picked.moments.as_ref().unwrap();
+    assert_eq!(pm.transforms_m1, (10..20).map(|v| v as f32).collect::<Vec<_>>());
+    assert_eq!(pm.sh_m1, (12..24).map(|v| v as f32).collect::<Vec<_>>());
+    assert_eq!((pm.sh_m2[0], pm.opacity_m1[0], pm.opacity_m2[0]), (1.0, 1.0, 1.0));
+    assert_eq!(SplatRows::concat(&[good.select(&[0]), picked]), good);
+
+    let bare = SplatRows { trained: vec![], moments: None, ..good.select(&[0]) };
+    let mixed = SplatRows::concat(&[good.clone(), bare]);
+    assert_eq!(mixed.check(), Ok(()));
+    assert_eq!(mixed.trained, vec![true, false, true], "rows without flags count as trained");
+    let mm = mixed.moments.unwrap();
+    assert_eq!(&mm.transforms_m1[..20], &good.moments.as_ref().unwrap().transforms_m1[..]);
+    assert!(mm.transforms_m1[20..].iter().chain(&mm.sh_m1[24..]).chain(&mm.sh_m2[2..]).all(|&v| v == 0.0));
 }
