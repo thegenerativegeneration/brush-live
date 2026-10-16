@@ -8,9 +8,12 @@ license.workspace = true
 brush-recon.path = "../brush-recon"
 brush-render.path = "../brush-render"
 brush-cube.path = "../brush-cube"
+brush-scan.path = "../brush-scan"
+brush-sort.path = "../brush-sort"
 burn = { workspace = true, features = ["autodiff"] }
 burn-wgpu.workspace = true
 burn-cubecl.workspace = true
+burn-fusion.workspace = true
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true

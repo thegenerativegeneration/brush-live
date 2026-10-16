@@ -2,6 +2,7 @@ use brush_recon::ReconError;
 use burn::tensor::{Device, Int, Tensor, TensorData};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, atomic::AtomicU64};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriangleSeed {
@@ -49,6 +50,9 @@ pub struct TriangleModel {
     pub weight_logits: Tensor<1>,
     vertex_count: usize,
     face_count: usize,
+    pub(crate) buffer_peak: Arc<AtomicU64>,
+    pub(crate) visible_faces: Arc<AtomicU64>,
+    pub(crate) intersections: Arc<AtomicU64>,
 }
 
 impl TriangleModel {
@@ -90,6 +94,9 @@ impl TriangleModel {
             ),
             vertex_count: seed.positions.len(),
             face_count: seed.faces.len(),
+            buffer_peak: Arc::new(AtomicU64::new(0)),
+            visible_faces: Arc::new(AtomicU64::new(0)),
+            intersections: Arc::new(AtomicU64::new(0)),
         })
     }
 
