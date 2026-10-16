@@ -84,11 +84,12 @@ async fn only_the_active_tiles_train() {
 }
 
 /// The newest keyframe faces the other end of the wall: its tiles become active and train, the tiles active before
-/// are held from then on.
+/// are held from then on. The 10 m radius keeps every tile resident: at 2 m the far end of the wall parks whenever no
+/// view the loaders drew in a refine window saw it, which takes its held rows out of the trainer.
 #[tokio::test]
 async fn the_mask_follows_the_active_set() {
     let dir = tmp("active-follow");
-    let mut live = LiveModel::new(active_config(2.0), device().await);
+    let mut live = LiveModel::new(active_config(10.0), device().await);
     live.enable_area(dir.join("tiles"));
     facing_wall(&mut live, &dir, 0, -2.3).await;
     let first = active_wall(&live);
@@ -107,7 +108,7 @@ async fn the_mask_follows_the_active_set() {
     assert!(by_row(&held).iter().all(|row| after.contains(row)), "a row of a tile no longer active changed");
     assert_ne!(by_row(&rows_where(&live, now_active).await), by_row(&trains), "the newly active tiles did not train");
     let c = live.area_report().unwrap().counters;
-    assert!(c.active_changes >= 2 && c.active_reversals == 0, "{c:?}");
+    assert!(c.active_changes >= 2 && c.active_reversals == 0 && c.parks == 0, "{c:?}");
     std::fs::remove_dir_all(dir).ok();
 }
 
