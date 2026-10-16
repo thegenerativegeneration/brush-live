@@ -22,6 +22,7 @@
 //! `max_cell_fraction` of its splats, so a spatially correlated low score
 //! cannot wipe a region in one go.
 
+use crate::budget::GroupLimit;
 use crate::config::TrainConfig;
 use crate::lod::top_k_indices;
 use crate::stats::{RefineRecord, trained_only};
@@ -330,7 +331,10 @@ fn in_cone(means: Tensor<2>, cone: ProtectCone) -> Tensor<1, Bool> {
 /// Picks up to `count` splats to evict, lowest importance first, among
 /// those that are scored, at least `min_age` refines old, not in `exclude`
 /// and not in `protect`, taking at most `max_cell_fraction` of any 1 m cell.
-/// Returns the eviction mask and how many it holds.
+/// Rows flagged in `untrained_held` (held, never trained) rank at importance 0, scored or not. With `limit` (each
+/// row's group and the rows each group may give), a row goes only while its group may give one, unless it is flagged
+/// in `untrained_held`. Returns the eviction mask and the rows it holds, ascending.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn select_evictions(
     life: &SplatLife,
     means: Tensor<2>,
@@ -339,30 +343,43 @@ pub(crate) async fn select_evictions(
     protect: Option<ProtectCone>,
     config: &EvictConfig,
     count: u32,
-) -> (Tensor<1, Bool>, u32) {
+    untrained_held: Option<Tensor<1, Bool>>,
+    limit: Option<(&[u32], Vec<u32>)>,
+) -> (Tensor<1, Bool>, Vec<usize>) {
     let n = life.len();
     let device = life.age.device();
+    let importance = match &untrained_held {
+        Some(u) => life.importance.clone().mask_fill(u.clone(), 0.0),
+        None => life.importance.clone(),
+    };
     let mut eligible = life
         .age
         .clone()
         .greater_equal_elem(config.min_age as f32)
-        .bool_and(life.importance.clone().is_finite())
+        .bool_and(importance.clone().is_finite())
         .bool_and(exclude.bool_not());
     if let Some(cone) = protect {
         eligible = eligible.bool_and(in_cone(means.clone(), cone).bool_not());
     }
-    let ranked = life
-        .importance
-        .clone()
-        .mask_fill(eligible.bool_not(), f32::INFINITY);
+    let ranked = importance.mask_fill(eligible.bool_not(), f32::INFINITY);
     let scores = read_f32(ranked).await;
-    let picked = pick_evictions(&scores, means_cpu, count as usize, config.max_cell_fraction);
+    let limit = match limit {
+        Some((group, quota)) => {
+            let free = match untrained_held {
+                Some(u) => read_bool(u).await,
+                None => Vec::new(),
+            };
+            Some(GroupLimit { group, quota, free })
+        }
+        None => None,
+    };
+    let picked = pick_evictions_within(&scores, means_cpu, count as usize, config.max_cell_fraction, limit);
     let mut evict = vec![false; n];
     for &i in &picked {
         evict[i] = true;
     }
     let mask = Tensor::<1, Bool>::from_data(TensorData::new(evict, [n]), &device);
-    (mask, picked.len() as u32)
+    (mask, picked)
 }
 
 pub(crate) async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
@@ -389,11 +406,23 @@ pub(crate) async fn read_bool(t: Tensor<1, Bool>) -> Vec<bool> {
 /// Up to `count` indices in ascending `scores` order, skipping infinite
 /// (ineligible) ones and those whose [`EVICT_CELL_M`] cell (by the flat xyz
 /// `means`) already gave `max_cell_fraction` of its splats, rounded down.
+#[cfg(test)]
 pub(crate) fn pick_evictions(
     scores: &[f32],
     means: &[f32],
     count: usize,
     max_cell_fraction: f32,
+) -> Vec<usize> {
+    pick_evictions_within(scores, means, count, max_cell_fraction, None)
+}
+
+/// [`pick_evictions`] that also skips the rows `limit` does not admit ([`GroupLimit`]).
+pub(crate) fn pick_evictions_within(
+    scores: &[f32],
+    means: &[f32],
+    count: usize,
+    max_cell_fraction: f32,
+    mut limit: Option<GroupLimit>,
 ) -> Vec<usize> {
     let cell = |i: usize| cell_of(glam::Vec3::from_slice(&means[i * 3..i * 3 + 3]));
     let mut quota: hashbrown::HashMap<glam::IVec3, usize> = hashbrown::HashMap::new();
@@ -410,9 +439,15 @@ pub(crate) fn pick_evictions(
         if picked.len() == count || !scores[i].is_finite() {
             break;
         }
+        if limit.as_ref().is_some_and(|l| !l.admits(i)) {
+            continue;
+        }
         let q = quota.get_mut(&cell(i)).expect("every splat has a cell");
         if *q > 0 {
             *q -= 1;
+            if let Some(l) = limit.as_mut() {
+                l.take(i);
+            }
             picked.push(i);
         }
     }

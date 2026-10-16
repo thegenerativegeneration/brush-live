@@ -2,6 +2,7 @@ use std::f32::consts::FRAC_1_SQRT_2;
 
 use crate::{
     adam_scaled::{AdamScaled, AdamState},
+    budget::RowBudget,
     config::TrainConfig,
     evict::{
         EvictConfig, Eviction, ProtectCone, SplatLife, growth_demand, read_bool, read_f32,
@@ -128,6 +129,10 @@ pub struct SplatTrainer {
     last_frozen: Option<Tensor<1, Bool>>,
     /// Rows the caller holds still until the next refine ([`Self::set_frozen_rows`]); `None` holds none.
     frozen_rows: Option<Tensor<1, Bool>>,
+    /// Groups and their budgets for the next refine ([`Self::set_row_budget`]); `None` for none.
+    row_budget: Option<RowBudget>,
+    /// Rows the last refine evicted per group of its budget ([`Self::budget_evictions`]).
+    budget_evicted: Vec<u32>,
 }
 
 /// `(l1, ssim)` kernel weights for `step` (1-based). The RGB loss is
@@ -257,6 +262,8 @@ impl SplatTrainer {
             sh_pruned: 0,
             last_frozen: None,
             frozen_rows: None,
+            row_budget: None,
+            budget_evicted: Vec::new(),
             profile: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
@@ -332,6 +339,37 @@ impl SplatTrainer {
             Some(life) => held.clone().bool_and(life.trained.clone().lower_elem(0.5)).int().sum(),
             None => held.clone().int().sum(),
         })
+    }
+
+    /// Sets the groups and budgets the next refine applies ([`crate::budget`]): rows of a full group neither split,
+    /// clone, stand in for pruned rows nor grow; a group over its `max_rows` loses its least important rows (by
+    /// eviction importance; needs eviction) down to it; with `limit_eviction` the budget eviction takes only within
+    /// each group's `evictable`. Take and append keep it row-aligned (appended rows belong to no group); refine drops
+    /// it. A budget of another length than the rows is dropped (logged) and the refine runs without one. `None`:
+    /// no budget.
+    pub fn set_row_budget(&mut self, budget: Option<RowBudget>) {
+        self.row_budget = budget.filter(|b| Self::budget_fits(b, self.tracked_rows()));
+    }
+
+    /// Whether `budget` has one group per row of `rows` (`None`: nothing to compare against); logs a mismatch.
+    fn budget_fits(budget: &RowBudget, rows: Option<usize>) -> bool {
+        let fits = rows.is_none_or(|n| n == budget.group.len());
+        if !fits {
+            log::error!("row budget ({} rows) out of step with the splats ({rows:?}); no budget", budget.group.len());
+        }
+        fits
+    }
+
+    /// Diagnostic: the row budget the next refine applies ([`Self::set_row_budget`]); `None` when there is none.
+    #[doc(hidden)]
+    pub fn row_budget(&self) -> Option<&RowBudget> {
+        self.row_budget.as_ref()
+    }
+
+    /// Rows the last refine evicted per group of its budget (the budget eviction and the over-cap one together);
+    /// empty when it had none.
+    pub fn budget_evictions(&self) -> &[u32] {
+        &self.budget_evicted
     }
 
     /// Diagnostic: the rows held by [`Self::set_frozen_rows`], row-aligned with the current splats; `None` when none
@@ -457,8 +495,9 @@ impl SplatTrainer {
         }
     }
 
-    /// Adds this refine's evictions to the `dead` prune mask; rows set in `held` are no victims. Returns the
-    /// mask and the number evicted.
+    /// Adds this refine's evictions to the `dead` prune mask; rows set in `held` are no victims unless no step ever
+    /// trained them, and with a `budget` that limits eviction a row goes only within its group's quota. Rows flagged
+    /// in `full` (their group is at its cap) add no growth demand. Returns the mask and the rows evicted, ascending.
     async fn add_evictions(
         &mut self,
         iter: u32,
@@ -466,12 +505,14 @@ impl SplatTrainer {
         refiner: &RefineRecord,
         dead: Tensor<1, Bool>,
         held: Option<Tensor<1, Bool>>,
-    ) -> (Tensor<1, Bool>, u32) {
+        budget: Option<&RowBudget>,
+        full: Option<Tensor<1, Bool>>,
+    ) -> (Tensor<1, Bool>, Vec<usize>) {
         let Some(ev) = self.evict.as_mut() else {
-            return (dead, 0);
+            return (dead, Vec::new());
         };
         let Some(life) = ev.life.as_mut() else {
-            return (dead, 0);
+            return (dead, Vec::new());
         };
         life.tick();
         let window = ev.config.recent_refines;
@@ -479,7 +520,7 @@ impl SplatTrainer {
         if !active {
             ev.recent.backlog = 0;
             if ev.seed_shortfall == 0 {
-                return (dead, 0);
+                return (dead, Vec::new());
             }
         }
         let current = splats.num_splats();
@@ -492,7 +533,7 @@ impl SplatTrainer {
                 .into_scalar_async::<i32>()
                 .await
                 .expect("dead count readback") as u32;
-            let untrained = refiner.untrained();
+            let untrained = radius::either(refiner.untrained(), full);
             let demand =
                 growth_demand(refiner, &self.config, iter, num_dead, untrained.as_ref()).await;
             let limit = crate::evict::growth_limit(self.config.max_splats, ev.config.headroom);
@@ -541,17 +582,21 @@ impl SplatTrainer {
             ev.config.headroom,
         );
         if want == 0 {
-            return (dead, 0);
+            return (dead, Vec::new());
         }
         let means = match means {
             Some(m) => m,
             None => read_f32(splats.means()).await,
         };
-        let exclude = match held {
-            Some(held) => dead.clone().bool_or(held),
-            None => dead.clone(),
+        // Held rows no step ever trained (raw seeds on ground outside the active tiles) do not block the budget.
+        let untrained_held = held.as_ref().map(|h| h.clone().bool_and(life.trained.clone().lower_elem(0.5)));
+        let exclude = match (held, &untrained_held) {
+            (Some(held), Some(u)) => dead.clone().bool_or(held.bool_and(u.clone().bool_not())),
+            _ => dead.clone(),
         };
-        let (mask, count) = select_evictions(
+        let quota = budget.and_then(|b| b.quota());
+        let limit = quota.map(|q| (budget.expect("a quota comes with a budget").group.as_slice(), q));
+        let (mask, picked) = select_evictions(
             life,
             splats.means(),
             &means,
@@ -559,15 +604,44 @@ impl SplatTrainer {
             ev.protect,
             &ev.config,
             want,
+            untrained_held,
+            limit,
         )
         .await;
+        let count = picked.len();
         if count > 0 {
             ev.recent.backlog = 0;
         }
         log::info!(
             "evict: {count} of {want} wanted (recent backlog {backlog}, seed shortfall {shortfall}, {current} splats)"
         );
-        (dead.bool_or(mask), count)
+        (dead.bool_or(mask), picked)
+    }
+
+    /// Adds to the `dead` prune mask, per group of `budget` over its `max_rows`, the least important rows not yet in
+    /// it (by eviction importance) down to that count. Needs eviction state; without it nothing is added. Returns the
+    /// mask and the rows added, ascending.
+    async fn evict_over_cap(&self, dead: Tensor<1, Bool>, budget: &RowBudget) -> (Tensor<1, Bool>, Vec<usize>) {
+        let Some(life) = self.evict.as_ref().and_then(|e| e.life.as_ref()) else {
+            return (dead, Vec::new());
+        };
+        if budget.groups.iter().all(|g| g.max_rows == u32::MAX) {
+            return (dead, Vec::new());
+        }
+        let n = budget.group.len();
+        let scores = read_f32(life.importance.clone()).await;
+        let dead_rows = read_bool(dead.clone()).await;
+        let picked = budget.over_cap(&scores, &dead_rows);
+        if picked.is_empty() {
+            return (dead, picked);
+        }
+        let mut flags = vec![false; n];
+        for &i in &picked {
+            flags[i] = true;
+        }
+        let mask = Tensor::<1, Bool>::from_data(TensorData::new(flags, [n]), &dead.device());
+        log::info!("evict: {} over their group's cap", picked.len());
+        (dead.bool_or(mask), picked)
     }
 
     /// Add `new` splats to `splats`, keeping optimizer and refine state aligned.
@@ -663,6 +737,9 @@ impl SplatTrainer {
             self.refine_record = Some(record.pad(n));
         }
         self.frozen_rows = self.frozen_rows.take().map(|f| radius::pad_unset(f, n));
+        if let Some(budget) = self.row_budget.as_mut() {
+            budget.pad(n);
+        }
         if let Some(life) = self.evict.as_mut().and_then(|e| e.life.as_mut()) {
             life.pad(n);
         }
@@ -1217,22 +1294,40 @@ impl SplatTrainer {
             .bool_or(non_finite_mask)
             .bool_or(sh_diverged);
 
-        let (prune_mask, num_evicted) = self
-            .add_evictions(iter, &splats, &refiner, prune_mask, held)
+        let n = splats.num_splats() as usize;
+        let budget = self.row_budget.take().filter(|b| Self::budget_fits(b, Some(n)));
+        let full = budget
+            .as_ref()
+            .and_then(RowBudget::no_growth)
+            .map(|f| Tensor::<1, Bool>::from_data(TensorData::new(f, [n]), &prune_mask.device()));
+        let (mut prune_mask, mut evicted) = self
+            .add_evictions(iter, &splats, &refiner, prune_mask, held, budget.as_ref(), full.clone())
             .await;
+        let evicted_for_total = evicted.len();
+        if let Some(budget) = &budget {
+            let (mask, over) = self.evict_over_cap(prune_mask.clone(), budget).await;
+            evicted.extend(over);
+            self.budget_evicted = budget.count_by_group(&evicted);
+            prune_mask = mask;
+        } else {
+            self.budget_evicted.clear();
+        }
+        let num_evicted = evicted.len() as u32;
         let life = self.evict.as_mut().and_then(|e| e.life.as_mut());
         let origin = self.origin.as_mut();
-        let (mut splats, refiner, pruned_count) =
-            prune_points(splats, &mut optim, refiner, life, origin, prune_mask).await;
+        let (mut splats, refiner, pruned_count, full) =
+            prune_points(splats, &mut optim, refiner, life, origin, prune_mask, full).await;
         let num_dead = pruned_count.saturating_sub(num_evicted);
         // With the training radius on or rows held, splats no step trained since the last refine neither densify nor
-        // decay.
+        // decay; rows of a full group (`full`) do not densify either.
         let untrained = refiner.untrained();
+        let no_growth = radius::either(untrained.clone(), full);
         let mut split_inds = HashSet::new();
-        // After an eviction, the freed room goes to newly observed cells only.
+        // After an eviction for the total budget, the freed room goes to newly observed cells only (rows a group gave
+        // for its own cap free no room for others).
         let recent_mask = match self.evict.as_mut() {
             Some(e) => {
-                let mask = if num_evicted > 0 {
+                let mask = if evicted_for_total > 0 {
                     let means = read_f32(splats.means()).await;
                     Some(e.recent.mask(&means, e.config.recent_refines))
                 } else {
@@ -1249,7 +1344,7 @@ impl SplatTrainer {
         if num_dead > 0 {
             // Replacement weighting: opacity × visibility.
             let vis_f = refiner.vis_mask().float();
-            let vis_f = match &untrained {
+            let vis_f = match &no_growth {
                 Some(u) => vis_f.mask_fill(u.clone(), 0.0),
                 None => vis_f,
             };
@@ -1271,10 +1366,7 @@ impl SplatTrainer {
         let pre_oversized = split_inds.len();
         if self.config.split_at_screen_size > 0.0 {
             let oversized = refiner.above_screen_size(self.config.split_at_screen_size);
-            let oversized = match &untrained {
-                Some(u) => oversized.bool_and(u.clone().bool_not()),
-                None => oversized,
-            };
+            let oversized = trained_only(oversized, no_growth.as_ref());
             let oversized_inds = oversized.argwhere_async().await;
             if oversized_inds.dims()[0] > 0 {
                 let oversized_inds = oversized_inds
@@ -1305,10 +1397,7 @@ impl SplatTrainer {
         let pre_high_grad = split_inds.len();
         if iter >= self.config.growth_start_iter && iter < self.config.growth_stop_iter {
             let above_threshold = refiner.above_threshold(self.config.growth_grad_threshold);
-            let above_threshold = match &untrained {
-                Some(u) => above_threshold.bool_and(u.clone().bool_not()),
-                None => above_threshold,
-            };
+            let above_threshold = trained_only(above_threshold, no_growth.as_ref());
 
             let threshold_count = above_threshold
                 .clone()
@@ -1588,6 +1677,7 @@ fn map_splats_and_opt(
 //
 // Args:
 //   mask: bool[n]. If True, prune this Gaussian.
+//   extra: a per-row mask kept aligned with the remaining rows.
 async fn prune_points(
     mut splats: Splats,
     optim: &mut SplatOptim,
@@ -1595,7 +1685,8 @@ async fn prune_points(
     life: Option<&mut SplatLife>,
     origin: Option<&mut crate::origin::SplatOrigin>,
     prune: Tensor<1, Bool>,
-) -> (Splats, RefineRecord, u32) {
+    extra: Option<Tensor<1, Bool>>,
+) -> (Splats, RefineRecord, u32, Option<Tensor<1, Bool>>) {
     assert_eq!(
         prune.dims()[0] as u32,
         splats.num_splats(),
@@ -1604,15 +1695,16 @@ async fn prune_points(
 
     let prune_count = prune.dims()[0];
     if prune_count == 0 {
-        return (splats, refiner, 0);
+        return (splats, refiner, 0, extra);
     }
 
     let valid_inds = prune.bool_not().argwhere_async().await;
 
     if valid_inds.dims()[0] == 0 {
         log::warn!("Trying to create empty splat!");
-        return (splats, refiner, 0);
+        return (splats, refiner, 0, extra);
     }
+    let mut extra = extra;
 
     let start_splats = splats.num_splats();
     let new_points = valid_inds.dims()[0] as u32;
@@ -1635,9 +1727,10 @@ async fn prune_points(
         if let Some(origin) = origin {
             origin.keep(inner_valid_inds.clone());
         }
+        extra = extra.map(|e| e.select(0, inner_valid_inds.clone()));
         refiner = refiner.keep(inner_valid_inds);
     }
-    (splats, refiner, start_splats - new_points)
+    (splats, refiner, start_splats - new_points, extra)
 }
 
 /// Sample a background color: base + uniform noise in [-strength, +strength], clamped to [0, 1].
@@ -1807,6 +1900,10 @@ mod radius_tests;
 #[cfg(all(test, not(target_family = "wasm")))]
 #[path = "train_freeze_tests.rs"]
 mod freeze_tests;
+
+#[cfg(all(test, not(target_family = "wasm")))]
+#[path = "train_budget_tests.rs"]
+mod budget_tests;
 
 #[cfg(test)]
 mod loss_weight_tests {

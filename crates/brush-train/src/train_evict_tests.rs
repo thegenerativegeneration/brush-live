@@ -11,9 +11,9 @@ use brush_render::kernels::camera_model::CameraModel;
 use burn::module::Module;
 use clap::Parser;
 
-const N: usize = 60;
+pub(super) const N: usize = 60;
 
-fn splats(n: usize, device: &Device) -> Splats {
+pub(super) fn splats(n: usize, device: &Device) -> Splats {
     Splats::from_raw(
         (0..n).flat_map(|i| [i as f32 * 0.01, 0.0, 2.0]).collect(),
         [1.0, 0.0, 0.0, 0.0].repeat(n),
@@ -25,7 +25,7 @@ fn splats(n: usize, device: &Device) -> Splats {
     )
 }
 
-fn batch() -> SceneBatch {
+pub(super) fn batch() -> SceneBatch {
     let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
         32,
         32,
@@ -50,7 +50,7 @@ fn batch() -> SceneBatch {
 
 /// A trainer at a 60-splat budget with growth and force-splits off, so a
 /// refine changes the count only by pruning; one step taken.
-async fn trainer_at_budget(min_age: u32) -> (SplatTrainer, Splats) {
+pub(super) async fn trainer_at_budget(min_age: u32) -> (SplatTrainer, Splats) {
     let device: Device = brush_cube::test_helpers::test_device().await.into();
     let device = device.autodiff();
     let mut config = TrainConfig::parse_from(["test"]);
@@ -70,7 +70,7 @@ async fn trainer_at_budget(min_age: u32) -> (SplatTrainer, Splats) {
     (trainer, s.valid())
 }
 
-async fn rows<const D: usize>(t: Tensor<D>) -> Vec<Vec<f32>> {
+pub(super) async fn rows<const D: usize>(t: Tensor<D>) -> Vec<Vec<f32>> {
     let n = t.dims()[0];
     let v = t
         .into_data_async()
@@ -83,7 +83,7 @@ async fn rows<const D: usize>(t: Tensor<D>) -> Vec<Vec<f32>> {
 }
 
 /// A permutation of 0..N, so the lowest scores are not the first rows.
-fn importance() -> Vec<f32> {
+pub(super) fn importance() -> Vec<f32> {
     (0..N).map(|i| ((i * 37) % N) as f32).collect()
 }
 
@@ -329,7 +329,7 @@ async fn evictions_stop_once_the_keyframe_window_passes() {
 
 /// Overwrites the record's importance totals as if every splat was seen once with score `imp[i]`
 /// (`f32::NAN` -> not seen this window).
-fn record_importance(trainer: &mut SplatTrainer, imp: &[f32]) {
+pub(super) fn record_importance(trainer: &mut SplatTrainer, imp: &[f32]) {
     let rec = trainer.refine_record.as_mut().expect("record after a step");
     let device = rec.vis_weight.device();
     let seen: Vec<f32> = imp

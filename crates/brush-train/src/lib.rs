@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod budget;
 pub mod config;
 pub mod eval;
 pub mod evict;
