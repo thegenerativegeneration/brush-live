@@ -165,9 +165,9 @@ async fn the_budget_follows_take_and_append() {
     assert!(trainer.row_budget.is_none(), "refine kept the budget");
 }
 
-/// A limited eviction whose quotas give nothing falls back: opened for a group, it takes that group's rows by lowest
-/// importance, held rows included; unlimited, the least important rows that are not held, as without a budget. Without
-/// a fallback it takes nothing.
+/// A limited eviction short of what it wants falls back: group 0 gives its quota of 2 (rows 0 and 1), then, opened, group
+/// 1 gives its least important rows, held ones included (30..34), not group 0's next rows; unlimited, the least important
+/// rows not held (2..6). Without a fallback it takes the 2.
 #[tokio::test]
 async fn a_short_limited_eviction_falls_back() {
     let imp: Vec<f32> = (0..N).map(|i| i as f32).collect();
@@ -181,7 +181,7 @@ async fn a_short_limited_eviction_falls_back() {
         record_importance(&mut trainer, &imp);
         trainer.set_frozen_rows(Some(held(&s)));
         trainer.note_seed_shortfall(1);
-        trainer.set_row_budget(Some(halves(group(u32::MAX, false, 0), group(u32::MAX, false, 0), true)));
+        trainer.set_row_budget(Some(halves(group(u32::MAX, false, 2), group(u32::MAX, false, 0), true)));
         let fallback = relax.is_some();
         if let Some(relax) = relax {
             trainer.set_eviction_fallback(relax);
@@ -190,11 +190,35 @@ async fn a_short_limited_eviction_falls_back() {
         assert_eq!(trainer.eviction_fell_back(), fallback);
         (stats.num_evicted, kept_importance(&trainer).await)
     };
-    assert_eq!(run(None).await.0, 0, "quotas of 0 give nothing");
+    let gone = |kept: &[f32]| imp.iter().copied().filter(|v| !kept.contains(v)).collect::<Vec<_>>();
+    let (n, kept) = run(None).await;
+    assert_eq!((n, gone(&kept)), (2, vec![0.0, 1.0]), "the quota gives 2");
     let (n, kept) = run(Some(EvictionRelax::Groups(vec![1]))).await;
-    assert_eq!(n, 6);
-    assert_eq!(kept, imp.iter().copied().filter(|&v| !(30.0..36.0).contains(&v)).collect::<Vec<_>>());
+    assert_eq!((n, gone(&kept)), (6, vec![0.0, 1.0, 30.0, 31.0, 32.0, 33.0]));
     let (n, kept) = run(Some(EvictionRelax::Unlimited)).await;
-    assert_eq!(n, 6);
-    assert_eq!(kept, imp.iter().copied().filter(|&v| v >= 6.0).collect::<Vec<_>>(), "held rows stay");
+    assert_eq!((n, gone(&kept)), (6, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]), "held rows stay");
+}
+
+/// Opened groups that cannot give enough escalate to no limit: group 1 (rows 58 and 59) gives both, then the least
+/// important rows anywhere (0..4) make up the rest.
+#[tokio::test]
+async fn opened_groups_short_of_the_want_escalate_to_no_limit() {
+    let imp: Vec<f32> = (0..N).map(|i| i as f32).collect();
+    let (mut trainer, s) = trainer_at_budget(0).await;
+    record_importance(&mut trainer, &imp);
+    trainer.note_seed_shortfall(1);
+    let budget = RowBudget {
+        group: (0..N).map(|i| u32::from(i >= 58)).collect(),
+        groups: vec![group(u32::MAX, false, 0), group(u32::MAX, false, 0)],
+        limit_eviction: true,
+        evict_held: false,
+        fallback: Some(EvictionRelax::Groups(vec![1])),
+    };
+    trainer.set_row_budget(Some(budget));
+    let (_, stats) = trainer.refine(1, s).await;
+    assert_eq!(stats.num_evicted, 6);
+    let kept = kept_importance(&trainer).await;
+    let gone: Vec<f32> = imp.iter().copied().filter(|v| !kept.contains(v)).collect();
+    assert_eq!(gone, vec![0.0, 1.0, 2.0, 3.0, 58.0, 59.0]);
+    assert!(trainer.eviction_fell_back());
 }

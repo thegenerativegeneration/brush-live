@@ -133,7 +133,7 @@ pub struct SplatTrainer {
     row_budget: Option<RowBudget>,
     /// Rows the last refine evicted per group of its budget ([`Self::budget_evictions`]).
     budget_evicted: Vec<u32>,
-    /// The last refine's limited eviction widened ([`Self::eviction_fell_back`]).
+    /// The last refine's limited eviction widened and took rows ([`Self::eviction_fell_back`]).
     eviction_fell_back: bool,
 }
 
@@ -371,7 +371,8 @@ impl SplatTrainer {
         }
     }
 
-    /// Whether the last refine's limited eviction fell short of what it wanted and widened ([`Self::set_eviction_fallback`]).
+    /// Whether the last refine's limited eviction fell short of what it wanted, widened ([`Self::set_eviction_fallback`];
+    /// from opened groups on to no limit) and took rows that way.
     pub fn eviction_fell_back(&self) -> bool {
         self.eviction_fell_back
     }

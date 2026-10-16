@@ -1,6 +1,6 @@
 //! Seeding: splats for a new keyframe where the current model is transparent, from its depth, mono depth and
 //! feature points, within the splat budget. With area training, seeds that land in parked tiles bring nearby tiles
-//! back first or are dropped, and a tile at `area_tile_max_splats` takes no seeds.
+//! back first or are dropped, and a tile at its cap (`area_tile_max_fraction` of `max_splats`) takes no seeds.
 
 use super::LiveModel;
 use super::area_restore::RestoreReason;

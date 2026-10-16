@@ -248,20 +248,28 @@ async fn at_the_cap_left_then_far_inactive_tiles_park_before_any_eviction() {
 }
 
 /// Parks come before the fallback: at the cap with a seed shortfall to 10 % of `max_splats`, the left and far tiles
-/// park before the refine, and the refine's eviction, still short after them and the fair shares, widens.
+/// park before the refine, and the refine's eviction, still short after them and the fair shares, widens to the rows
+/// 6 m behind the newest view (within reach of a restore, so they do not park; trained, then held).
 #[tokio::test]
 async fn parks_come_before_the_eviction_fallback() {
     let config = GuideConfig { evict_headroom: 0.9, evict_min_age: 0, ..active_config(2.0) };
     let (mut live, dir, [left, far, active]) = walked_with("budget-room-fallback", config).await;
+    add(&mut live, &dir, 3, Vec3::new(8.0, 0.0, 2.0), Vec3::new(8.0, 0.0, 8.0)).await;
+    train(&mut live, 2).await;
+    add(&mut live, &dir, 4, Vec3::new(8.0, 0.0, 2.0), Vec3::new(12.0, 0.0, 2.0)).await;
+    let behind = |p: Vec3| p.z > 6.0;
+    let behind_rows = rows_where(&live, behind).await.len();
+    assert!(behind_rows > 0);
     live.config.max_splats = live.splats().unwrap().num_splats();
     live.trainer.as_mut().unwrap().note_seed_shortfall(1);
-    train(&mut live, 1).await;
+    train(&mut live, 4).await;
     let r = live.area_report().unwrap();
     let registry = &live.area.as_ref().unwrap().registry;
     let parked = |k: &TileKey| registry.get(*k).is_some_and(|t| !t.resident);
     assert!(left.iter().chain(&far).all(parked), "a left or far tile stayed: {r:?}");
     assert!(!active.iter().any(parked), "an active tile parked");
     assert_eq!(r.counters.eviction_fallbacks, 1, "{r:?}");
+    assert!(rows_where(&live, behind).await.len() < behind_rows, "no row behind the view went");
     std::fs::remove_dir_all(dir).ok();
 }
 

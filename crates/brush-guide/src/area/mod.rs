@@ -58,8 +58,8 @@ pub struct AreaCounters {
     pub parks_for_room: u32,
     /// Seeds dropped because their tile had no room under the per-tile cap.
     pub seeds_over_tile_cap: u32,
-    /// Refines whose eviction widened beyond the active tiles' fair shares because those gave fewer rows than it wanted
-    /// after the parks.
+    /// Refines whose eviction, short of what it wanted after the parks and the active tiles' fair shares, widened and
+    /// took rows that way.
     pub eviction_fallbacks: u32,
 }
 

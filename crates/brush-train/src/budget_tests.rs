@@ -88,8 +88,23 @@ fn a_limited_pick_keeps_each_groups_quota() {
     let scores = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
     let group = [0, 0, 0, 1, 1, NO_GROUP];
     let limit = GroupLimit { group: &group, quota: vec![1, 5], free: vec![false; 6] };
-    assert_eq!(pick_evictions_within(&scores, &means, 6, 1.0, Some(limit)), vec![0, 3, 4]);
+    assert_eq!(pick_evictions_within(&scores, &means, 6, 1.0, Some(limit), &[]), vec![0, 3, 4]);
     let limit = GroupLimit { group: &group, quota: vec![1, 0], free: vec![false, true, false, false, false, true] };
-    assert_eq!(pick_evictions_within(&scores, &means, 6, 1.0, Some(limit)), vec![0, 1, 5]);
-    assert_eq!(pick_evictions_within(&scores, &means, 2, 1.0, None), vec![0, 1]);
+    assert_eq!(pick_evictions_within(&scores, &means, 6, 1.0, Some(limit), &[]), vec![0, 1, 5]);
+    assert_eq!(pick_evictions_within(&scores, &means, 2, 1.0, None, &[]), vec![0, 1]);
+}
+
+/// A pick that continues an earlier one: the earlier rows used up their group's quota and their cell's share, so the
+/// group gives no more and a cell that gave its share gives nothing.
+#[test]
+fn a_continued_pick_keeps_what_the_earlier_one_used() {
+    // Rows 0..10 in cell (0, 0, 0), 10..20 in cell (1, 0, 0); ascending scores.
+    let means: Vec<f32> = (0..20).flat_map(|i| [if i < 10 { 0.5 } else { 1.5 }, 0.5, 0.5]).collect();
+    let scores: Vec<f32> = (0..20).map(|i| i as f32).collect();
+    // A 30 % cell share is 3 rows; rows 0..3 already went, so cell (0, 0, 0) gives nothing more.
+    assert_eq!(pick_evictions_within(&scores, &means, 4, 0.3, None, &[0, 1, 2]), vec![10, 11, 12]);
+    // Group 0 (rows 0..10) had a quota of 2, used by rows 0 and 1: the rest comes from group 1.
+    let group: Vec<u32> = (0..20).map(|i| u32::from(i >= 10)).collect();
+    let limit = GroupLimit { group: &group, quota: vec![2, 100], free: vec![false; 20] };
+    assert_eq!(pick_evictions_within(&scores, &means, 3, 1.0, Some(limit), &[0, 1]), vec![10, 11, 12]);
 }

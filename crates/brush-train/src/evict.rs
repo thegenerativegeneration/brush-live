@@ -333,7 +333,8 @@ fn in_cone(means: Tensor<2>, cone: ProtectCone) -> Tensor<1, Bool> {
 /// and not in `protect`, taking at most `max_cell_fraction` of any 1 m cell.
 /// Rows flagged in `untrained_held` (held, never trained) rank at importance 0, scored or not. With `limit` (each
 /// row's group and the rows each group may give), a row goes only while its group may give one, unless it is flagged
-/// in `untrained_held`. Returns the eviction mask and the rows it holds, ascending.
+/// in `untrained_held`. The rows `prior` (taken earlier in this refine) count against their cell's and group's share.
+/// Returns the eviction mask and the rows it holds, in pick order.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn select_evictions(
     life: &SplatLife,
@@ -345,6 +346,7 @@ pub(crate) async fn select_evictions(
     count: u32,
     untrained_held: Option<Tensor<1, Bool>>,
     limit: Option<(&[u32], Vec<u32>)>,
+    prior: &[usize],
 ) -> (Tensor<1, Bool>, Vec<usize>) {
     let n = life.len();
     let device = life.age.device();
@@ -373,7 +375,7 @@ pub(crate) async fn select_evictions(
         }
         None => None,
     };
-    let picked = pick_evictions_within(&scores, means_cpu, count as usize, config.max_cell_fraction, limit);
+    let picked = pick_evictions_within(&scores, means_cpu, count as usize, config.max_cell_fraction, limit, prior);
     let mut evict = vec![false; n];
     for &i in &picked {
         evict[i] = true;
@@ -413,16 +415,18 @@ pub(crate) fn pick_evictions(
     count: usize,
     max_cell_fraction: f32,
 ) -> Vec<usize> {
-    pick_evictions_within(scores, means, count, max_cell_fraction, None)
+    pick_evictions_within(scores, means, count, max_cell_fraction, None, &[])
 }
 
-/// [`pick_evictions`] that also skips the rows `limit` does not admit ([`GroupLimit`]).
+/// [`pick_evictions`] that also skips the rows `limit` does not admit ([`GroupLimit`]), continuing an eviction that
+/// already took the rows `prior` in this refine: their cells and groups have that much less left to give.
 pub(crate) fn pick_evictions_within(
     scores: &[f32],
     means: &[f32],
     count: usize,
     max_cell_fraction: f32,
     mut limit: Option<GroupLimit>,
+    prior: &[usize],
 ) -> Vec<usize> {
     let cell = |i: usize| cell_of(glam::Vec3::from_slice(&means[i * 3..i * 3 + 3]));
     let mut quota: hashbrown::HashMap<glam::IVec3, usize> = hashbrown::HashMap::new();
@@ -432,6 +436,14 @@ pub(crate) fn pick_evictions_within(
     let fraction = f64::from(max_cell_fraction.clamp(0.0, 1.0));
     for q in quota.values_mut() {
         *q = (*q as f64 * fraction + 1e-6).floor() as usize;
+    }
+    for &i in prior {
+        if let Some(q) = quota.get_mut(&cell(i)) {
+            *q = q.saturating_sub(1);
+        }
+        if let Some(l) = limit.as_mut() {
+            l.take(i);
+        }
     }
     let negated: Vec<f32> = scores.iter().map(|s| -s).collect();
     let mut picked = Vec::with_capacity(count);

@@ -2,7 +2,7 @@
 //! eviction of a group over its cap under a row budget ([`crate::budget`]).
 
 use super::{SplatTrainer, radius};
-use crate::budget::RowBudget;
+use crate::budget::{EvictionRelax, RowBudget};
 use crate::evict::{growth_demand, read_bool, read_f32, recent_demand, select_evictions};
 use crate::stats::{RefineRecord, trained_only};
 use brush_render::gaussian_splats::Splats;
@@ -107,19 +107,42 @@ impl SplatTrainer {
         // Held rows no step ever trained (raw seeds on ground outside the active tiles) do not block the budget.
         let untrained_held = held.as_ref().map(|h| h.clone().bool_and(life.trained.clone().lower_elem(0.5)));
         let pick = Pick { means: &means, held: held.as_ref(), untrained_held: untrained_held.as_ref() };
-        let (mut mask, mut picked) = pick.victims(life, splats, (ev.protect, &ev.config), dead.clone(), budget, want).await;
-        let fallback = budget.filter(|b| b.limit_eviction).and_then(|b| b.fallback.clone().map(|f| (b, f)));
-        if let Some((b, fallback)) = fallback.filter(|_| picked.len() < want as usize) {
-            let mut wide = b.clone();
-            wide.relax(fallback);
+        let (mut mask, mut picked) = pick.victims(life, splats, (ev.protect, &ev.config), dead.clone(), budget, want, &[]).await;
+        // Short of `want` under the fair shares: widen to the fallback, and from opened groups on to no limit, each
+        // pick continuing the last (their cells and groups keep what they gave).
+        let mut tiers = Vec::new();
+        if let Some(b) = budget.filter(|b| b.limit_eviction) {
+            if let Some(fallback) = b.fallback.clone() {
+                let opens_groups = matches!(fallback, EvictionRelax::Groups(_));
+                let mut wide = b.clone();
+                wide.relax(fallback);
+                if opens_groups {
+                    let mut all = wide.clone();
+                    all.relax(EvictionRelax::Unlimited);
+                    tiers.push(wide);
+                    tiers.push(all);
+                } else {
+                    tiers.push(wide);
+                }
+            }
+        }
+        let limited = picked.len();
+        for wide in &tiers {
+            if picked.len() >= want as usize {
+                break;
+            }
             let rest = want - picked.len() as u32;
-            let (more_mask, more) = pick.victims(life, splats, (ev.protect, &ev.config), dead.clone().bool_or(mask.clone()), Some(&wide), rest).await;
-            log::info!("evict: limited eviction found {} of {want}; widened, {} more", picked.len(), more.len());
+            let (more_mask, more) = pick
+                .victims(life, splats, (ev.protect, &ev.config), dead.clone().bool_or(mask.clone()), Some(wide), rest, &picked)
+                .await;
             mask = mask.bool_or(more_mask);
             picked.extend(more);
-            picked.sort_unstable();
+        }
+        if picked.len() > limited {
+            log::info!("evict: limited eviction found {limited} of {want}; widened, {} more", picked.len() - limited);
             fell_back = true;
         }
+        picked.sort_unstable();
         let count = picked.len();
         if count > 0 {
             ev.recent.backlog = 0;
@@ -167,7 +190,8 @@ struct Pick<'a> {
 
 impl Pick<'_> {
     /// Up to `want` victims not in `dead`: held rows only when no step trained them, or when `budget` lets held rows go
-    /// ([`RowBudget::evict_held`]); within `budget`'s quotas when it limits eviction.
+    /// ([`RowBudget::evict_held`]); within `budget`'s quotas when it limits eviction, less what the rows `prior` (taken
+    /// by an earlier pick of this refine) used of their cells' and groups' shares.
     async fn victims(
         &self,
         life: &crate::evict::SplatLife,
@@ -176,6 +200,7 @@ impl Pick<'_> {
         dead: Tensor<1, Bool>,
         budget: Option<&RowBudget>,
         want: u32,
+        prior: &[usize],
     ) -> (Tensor<1, Bool>, Vec<usize>) {
         let evict_held = budget.is_some_and(|b| b.limit_eviction && b.evict_held);
         let exclude = match (self.held, self.untrained_held) {
@@ -194,6 +219,7 @@ impl Pick<'_> {
             want,
             self.untrained_held.cloned(),
             limit,
+            prior,
         )
         .await
     }
