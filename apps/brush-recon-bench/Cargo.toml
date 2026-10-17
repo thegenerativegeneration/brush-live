@@ -1,0 +1,31 @@
+[package]
+name = "brush-recon-bench"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+brush-recon.path = "../../crates/brush-recon"
+brush-triangle-render.path = "../../crates/brush-triangle-render"
+brush-triangle-train.path = "../../crates/brush-triangle-train"
+brush-render.path = "../../crates/brush-render"
+brush-train.path = "../../crates/brush-train"
+brush-dataset.path = "../../crates/brush-dataset"
+brush-serde.path = "../../crates/brush-serde"
+brush-loss.path = "../../crates/brush-loss"
+brush-cube.path = "../../crates/brush-cube"
+burn = { workspace = true, features = ["autodiff"] }
+burn-wgpu.workspace = true
+image.workspace = true
+glam.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

@@ -1246,6 +1246,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "brush-recon-bench"
+version = "1.0.0"
+dependencies = [
+ "brush-cube",
+ "brush-dataset",
+ "brush-loss",
+ "brush-recon",
+ "brush-render",
+ "brush-serde",
+ "brush-train",
+ "brush-triangle-render",
+ "brush-triangle-train",
+ "burn",
+ "burn-wgpu",
+ "clap",
+ "glam 0.30.10",
+ "image",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "brush-render"
 version = "1.0.0"
 dependencies = [

@@ -2,7 +2,18 @@ use brush_recon::ReconError;
 use burn::tensor::{Device, Int, Tensor, TensorData};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, atomic::AtomicU64};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct RendererStats {
+    pub visible_faces: u64,
+    pub culled_faces: u64,
+    pub intersections: u64,
+    pub reserved_peak_bytes: u64,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriangleSeed {
@@ -131,5 +142,14 @@ impl TriangleModel {
     }
     pub fn num_faces(&self) -> usize {
         self.face_count
+    }
+    pub fn renderer_stats(&self) -> RendererStats {
+        let visible_faces = self.visible_faces.load(Ordering::Relaxed);
+        RendererStats {
+            visible_faces,
+            culled_faces: (self.face_count as u64).saturating_sub(visible_faces),
+            intersections: self.intersections.load(Ordering::Relaxed),
+            reserved_peak_bytes: self.buffer_peak.load(Ordering::Relaxed),
+        }
     }
 }
