@@ -61,6 +61,8 @@ Renderer constraints: pinhole cameras, fixed indexed topology, per-vertex RGB/we
 
 Triangle renderer memory is a conservative buffer-reservation bound, not a measured GPU peak. Gaussian reservation is uninstrumented/null. Process footprint is measured separately; its lifetime peak includes warmup/evaluation/artifacts/runtime.
 
+Known review follow-up: the estimator does not yet include the radix sorter's fixed minimum scratch overhead for tiny scenes. Very small custom budgets are therefore not strict allocation bounds. The measured Lenzburg runs use the default 512 MiB budget and are unaffected; do not treat this experimental guard as a general memory sandbox.
+
 ## Verification
 
 ```sh

@@ -68,6 +68,8 @@ At 300 s, high-alpha fraction is 90.28% of all valid native targets and 99.82% i
 
 Process footprint is OS accounting and includes warmup, evaluation, artifacts and runtime. It is not renderer-only GPU memory. Triangle reservation is an upper-bound allocation guard, not a measured device peak; Gaussian reservation is uninstrumented/null. Model counts stayed fixed and state/losses were finite. Snapshot cull/intersection counters refer to the last render, not removed geometry or cumulative training.
 
+Review caveat: `forward.rs::required_buffer_bytes` misses fixed minimum radix-sort scratch overhead on tiny scenes, so unusually small custom budgets are not strict allocation bounds. This is a nonblocking follow-up and does not affect the measured capture/default 512 MiB budget. The guard is not a general memory sandbox.
+
 ## Inspection artifacts and reproduction
 
 Local artifacts are intentionally untracked under `target/vertex-runs/`:
@@ -87,8 +89,45 @@ Use the commands in [the CLI README](../../apps/brush-recon-bench/README.md). Fo
 
 Before the real runs, all seven affected package suites passed: **240 tests passed, 0 failed, 1 existing Gaussian empty-dispatch ignore**. The original synthetic example is an additional explicit test target excluded from default suites. CPU/GPU forward agreement, all-parameter finite differences, shared-vertex reductions, RGB and depth/normal recovery, immutable masks, held-out isolation, native-grid target counts, timing, source safety and snapshot/PLY behavior are covered.
 
-Whole-workspace validation and final independent review are in progress; their final outcomes will be recorded here before handoff. `cargo fmt --all -- --check` currently fails on unchanged baseline files only. Cross-checking `BASE..HEAD` shows no changed file among those format diffs; every changed Rust file passes an explicit rustfmt check. Unrelated files were not reformatted.
+The explicit smoke-example target passed **4 tests**. Full `cargo test --release --workspace --features brush-cube/metal` is blocked at compile time by unchanged `crates/brush-bench-test/tests/fuzz.rs:177`: it supplies 13 arguments to the existing 14-argument `SplatOps::render`. Both the caller and renderer declaration are byte-identical to branch base `df859c1d`; this branch does not introduce that mismatch.
+
+The workspace run excluding `brush-bench-test` reached **380 passes, 3 failures and 2 ignores** before Cargo stopped. These are a partial run, not additive to the affected-package total above. All three failures are unchanged `brush-guide-ffi/tests/ffi.rs` cases that cannot read the absent superproject fixture `datasets/segment-1/wire/0.bin` from this linked-worktree layout:
+
+- `keyframes_in_acks_status_scores_pause_and_splat_out`
+- `pause_after_warm_up_holds_keyframes_every_time`
+- `pause_during_warm_up_returns_and_resume_lets_keyframes_through`
+
+They fail at the recorded-frame read (`ffi.rs:21`), not in the new triangle backend. No fixture links were created outside the worktree, no unrelated tests were patched, and **no full-workspace green result is claimed**. Broader integration remains blocked until the legacy caller/fixture setup is repaired separately.
+
+`cargo fmt --all -- --check` fails on unchanged baseline files only. Cross-checking `BASE..HEAD` shows no changed file among those format diffs; every changed Rust file passes an explicit rustfmt check. Unrelated files were not reformatted. The local rustup `rust-objcopy` emits a missing-`libLLVM.dylib` stripping warning; builds/test executables still ran.
+
+Independent read-only whole-branch review: **PASS, ready to merge relative to the existing baseline; no Critical or Important findings**. The reviewer inspected implementation/tests/spec/ledger and local comparison JSON, but did not independently rerun tests, access/recalibrate T7 data, or certify legal provenance. Its one Minor finding is the tiny-scene radix-scratch reservation issue above, retained for follow-up. This review does not establish production readiness or change the experiment's negative replacement recommendation.
 
 ## Decision
 
 Keep Gaussian `brush-live` as the working engine. This milestone establishes a tested native vertex backend and reproducible real-data experiment, not a drop-in quality replacement. Before live integration, investigate appearance/coverage artifacts, preservation of local depth accuracy, and measured bottlenecks; validate any changes on fresh development data rather than tuning against these held-outs. Adaptive topology, mesh connectivity refinement and live guidance remain separate future scope.
+
+## Implementation decisions and remaining costs
+
+These decisions were recorded during execution rather than silently changing the plan:
+
+| Decision | Remaining cost/limitation |
+|---|---|
+| Exercise generic contracts with real adapters in Task 9 rather than a self-testing dummy backend in Task 2 | Interface defects could have surfaced later; real-adapter tests now cover the path. |
+| Empty logical models use sentinel storage plus explicit logical counts | Consumers must never treat physical sentinel dimensions as scene counts. |
+| Keep short host projection/binning orchestration in `forward.rs` | Split that file if orchestration grows. |
+| Report estimated renderer reservations separately from measured process footprint | Reservations can reject feasible scenes; tiny custom budgets also have the known fixed-scratch accounting gap. |
+| Register the concrete Cube/Wgpu custom backward directly at the dynamic Tensor boundary | Other backends need another bridge. |
+| Use exact scalar tangent arithmetic for projection VJPs | Nine tangent evaluations can cost performance; this is analytical, not finite-difference training. |
+| Put freeze/isolation orchestration with the app/manifest task | Caller-level isolation tests arrived later; they are now present. |
+| Introduce experimental snapshots with the real adapters | The experimental schema may require future version changes; optimizer state is not saved. |
+| Read one finite-state scalar per Adam group/update, never bulk parameter/gradient arrays | Synchronization can limit throughput. |
+| Require a frozen manifest for `run` | Every new subset/configuration needs an explicit preflight. |
+| Give the generic runner a backend factory | Callers supply a constructor closure so warmup can be discarded honestly. |
+| Add a training-only reprojection gate at relative median error 0.15 | A noisy usable capture may be conservatively rejected; no silent window replacement. |
+| Time synchronized optimization intervals rather than end-to-end elapsed time | Full runtime is longer and reported separately. |
+| Pass frozen initial geometry explicitly to native-grid evaluation | One extra experiment-context argument avoids resampling/moving ROI support. |
+| Save initial/final parameters; label sampled training-loss minimum diagnostic | Reproducing that intermediate model requires fixed-step replay. |
+| Save last-render cull diagnostics, not cumulative claims | Those counters and process lifetime peaks are not renderer-only measured GPU peaks. |
+
+The final reviewer did not independently replicate tests/GPU execution, survey physical calibration, certify legal provenance, or judge outside-scope paper/live/iOS/adaptive behavior. Executor logs/artifacts provide the reported evidence; depth remains sensor-relative, performance remains single-run/accounting-specific, and later distribution/reuse needs its own licensing review. Unchanged baseline formatting, the fuzz caller mismatch, missing FFI fixtures and the original checkout's eight user edits were deliberately left alone. The branch/worktree are retained without merge/push; diagnostic logs and native artifacts remain available locally.
