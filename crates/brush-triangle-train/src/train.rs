@@ -34,6 +34,33 @@ impl Default for TrainConfig {
         }
     }
 }
+impl TrainConfig {
+    pub fn validate(&self) -> Result<(), ReconError> {
+        self.loss.validate()?;
+        schedule(0., &self.schedule)?;
+        ReferenceConfig {
+            sigma: self.render.sigma,
+            weight_floor: self.render.weight_floor,
+            near_m: self.render.near_m,
+        }
+        .validate()?;
+        if [
+            self.vertex_lr,
+            self.rgb_lr,
+            self.weight_lr,
+            self.max_vertex_step_m,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.)
+            || self.render.buffer_budget_bytes == 0
+        {
+            return Err(ReconError::input(
+                "invalid optimizer learning rate, vertex step cap or renderer budget",
+            ));
+        }
+        Ok(())
+    }
+}
 pub struct TriangleTrainer {
     pub model: TriangleModel,
     pub config: TrainConfig,
@@ -50,6 +77,7 @@ impl TriangleTrainer {
         seed: TriangleSeed,
         config: TrainConfig,
     ) -> Result<Self, ReconError> {
+        config.validate()?;
         seed.validate()?;
         if seed.faces.is_empty()
             || model.num_vertices() != seed.positions.len()

@@ -54,6 +54,11 @@ pub struct RunArgs {
 }
 
 pub async fn execute(cli: Cli) -> Result<(), brush_recon::ReconError> {
+    let cli_started = std::time::Instant::now();
+    let started_unix_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| brush_recon::ReconError::input(format!("system clock: {e}")))?
+        .as_secs();
     use crate::{
         gaussian::GaussianBackend,
         io,
@@ -87,12 +92,16 @@ pub async fn execute(cli: Cli) -> Result<(), brush_recon::ReconError> {
                 warmup_steps: args.warmup_steps,
             };
             let loading = std::time::Instant::now();
-            let frozen = load_frozen(&args.manifest)?;
+            let manifest_path = args
+                .manifest
+                .canonicalize()
+                .map_err(|e| brush_recon::ReconError::io(&args.manifest, e))?;
+            let frozen = load_frozen(&manifest_path)?;
             let source_load_seconds = loading.elapsed().as_secs_f64();
             let output = io::validate_output(&frozen.split.manifest.source, &args.output)?;
             let (device, environment) = crate::runtime::initialize().await?;
             io::create_output(&output)?;
-            let record = match args.backend {
+            let attempt = match args.backend {
                 BackendChoice::Triangle => {
                     run_backend(
                         || {
@@ -104,8 +113,9 @@ pub async fn execute(cli: Cli) -> Result<(), brush_recon::ReconError> {
                         },
                         &frozen.split,
                         &config,
+                        &frozen.seed,
                     )
-                    .await?
+                    .await
                 }
                 BackendChoice::Gaussian => {
                     let seed = frozen
@@ -121,31 +131,31 @@ pub async fn execute(cli: Cli) -> Result<(), brush_recon::ReconError> {
                         || GaussianBackend::new(frozen.seed.clone(), device.clone(), seed),
                         &frozen.split,
                         &config,
+                        &frozen.seed,
                     )
-                    .await?
+                    .await
+                }
+            };
+            let record = match attempt {
+                Ok(record) => record,
+                Err(error) => {
+                    let source_verification_error = verify_sources(&frozen.split.manifest)
+                        .err()
+                        .map(|e| e.to_string());
+                    io::json(
+                        &output.join("failure.json"),
+                        &serde_json::json!({"error":error.to_string(),"manifest":manifest_path,"source_verification_error":source_verification_error,"environment":environment,"started_unix_s":started_unix_s}),
+                    )?;
+                    return Err(error);
                 }
             };
             verify_sources(&frozen.split.manifest)?;
-            let extension = match record.backend {
-                brush_recon::BackendKind::Triangle => "state.json",
-                brush_recon::BackendKind::Gaussian => "ply",
-            };
-            io::write_new(
-                &output.join(format!("initial.{extension}")),
-                &record.initial_state.payload,
-            )?;
-            io::write_new(
-                &output.join(format!("final.{extension}")),
-                &record.final_state.payload,
-            )?;
-            io::json(
-                &output.join("capture-manifest.json"),
-                &frozen.split.manifest,
-            )?;
+            crate::report::save_artifacts(&record, &output)?;
+            crate::report::copy_frozen_assets(&manifest_path, &frozen.split.manifest, &output)?;
             let (revision, dirty) = io::provenance()?;
             io::json(
                 &output.join("run.json"),
-                &serde_json::json!({"run":record,"manifest":args.manifest,"source_load_seconds":source_load_seconds,"environment":environment,"git_revision":revision,"dirty_patch_sha256":dirty,"renderer_memory_note":"triangle bytes are a conservative reservation bound; Gaussian renderer bytes are not instrumented"}),
+                &serde_json::json!({"run":record,"manifest":manifest_path,"source_load_seconds":source_load_seconds,"environment":environment,"git_revision":revision,"dirty_patch_sha256":dirty,"started_unix_s":started_unix_s,"cli_seconds_before_final_report":cli_started.elapsed().as_secs_f64(),"renderer_memory_note":"triangle bytes are a conservative reservation bound; Gaussian renderer bytes are not instrumented"}),
             )?;
             println!("{}", output.join("run.json").display());
         }

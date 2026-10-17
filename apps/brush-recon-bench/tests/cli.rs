@@ -195,6 +195,7 @@ async fn runner_discards_warmup_and_draws_only_training_ids_in_order() {
             budget: RunBudget::Steps { steps: 2 },
             warmup_steps: 1,
         },
+        &f.seed,
     )
     .await
     .unwrap();
@@ -241,4 +242,7 @@ fn actual_cli_accepts_bare_manifest_and_paths_with_spaces() {
         serde_json::from_slice(&fs::read(output.join("run.json")).unwrap()).unwrap();
     assert_eq!(report["run"]["curve"].as_array().unwrap().len(), 2);
     assert_eq!(report["run"]["curve"][0]["frame_id"], 174);
+    let copied = load_frozen(&output.join("capture-manifest.json")).unwrap();
+    assert_eq!(copied.split.train.len(), 32);
+    assert_eq!(copied.split.holdout.len(), 8);
 }

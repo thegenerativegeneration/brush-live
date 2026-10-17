@@ -24,6 +24,25 @@ impl Default for LossConfig {
         }
     }
 }
+impl LossConfig {
+    pub fn validate(&self) -> Result<(), ReconError> {
+        if !self.depth_weight.is_finite()
+            || self.depth_weight < 0.
+            || !self.seed_weight.is_finite()
+            || self.seed_weight < 0.
+            || !self.missing_depth_m.is_finite()
+            || self.missing_depth_m < 0.
+            || self.min_confidence > 2
+            || !self.min_depth_m.is_finite()
+            || self.min_depth_m <= 0.
+            || !self.max_depth_m.is_finite()
+            || self.max_depth_m < self.min_depth_m
+        {
+            return Err(ReconError::input("invalid metric loss configuration"));
+        }
+        Ok(())
+    }
+}
 pub struct LossTerms {
     pub total: Tensor<1>,
     pub rgb: Tensor<1>,

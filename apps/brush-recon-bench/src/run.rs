@@ -69,6 +69,9 @@ pub struct RunRecord {
     pub initialization_seconds: f64,
     pub warmup_seconds: f64,
     pub wall_seconds: f64,
+    pub evaluation_seconds: f64,
+    pub initial_evaluation: crate::metrics::Evaluation,
+    pub final_evaluation: crate::metrics::Evaluation,
     #[serde(skip)]
     pub initial_state: ExperimentalState,
     #[serde(skip)]
@@ -78,6 +81,7 @@ pub async fn run_backend<B: ReconstructionBackend, F: FnMut() -> B>(
     mut factory: F,
     split: &CaptureSplit,
     config: &RunConfig,
+    initial_seed: &brush_triangle_render::TriangleSeed,
 ) -> Result<RunRecord, ReconError> {
     config.budget.validate()?;
     if split.train.is_empty() {
@@ -107,6 +111,11 @@ pub async fn run_backend<B: ReconstructionBackend, F: FnMut() -> B>(
     backend.initialize(&split.train).await?;
     backend.synchronize().await?;
     let initialization_seconds = init.elapsed().as_secs_f64();
+    let eval_start = Instant::now();
+    let initial_evaluation =
+        crate::metrics::evaluate(&backend, &split.holdout, initial_seed).await?;
+    backend.synchronize().await?;
+    let mut evaluation_seconds = eval_start.elapsed().as_secs_f64();
     let initial_state = backend.export_state().await?;
     let initial_stats = backend.stats();
     let mut elapsed = Duration::ZERO;
@@ -129,6 +138,10 @@ pub async fn run_backend<B: ReconstructionBackend, F: FnMut() -> B>(
             .checked_add(1)
             .ok_or_else(|| ReconError::input("training iteration overflow"))?;
     }
+    let eval_start = Instant::now();
+    let final_evaluation = crate::metrics::evaluate(&backend, &split.holdout, initial_seed).await?;
+    backend.synchronize().await?;
+    evaluation_seconds += eval_start.elapsed().as_secs_f64();
     let stats = backend.stats();
     if stats.vertices != initial_stats.vertices
         || stats.triangles != initial_stats.triangles
@@ -150,5 +163,8 @@ pub async fn run_backend<B: ReconstructionBackend, F: FnMut() -> B>(
         wall_seconds: wall.elapsed().as_secs_f64(),
         initial_state,
         final_state,
+        evaluation_seconds,
+        initial_evaluation,
+        final_evaluation,
     })
 }

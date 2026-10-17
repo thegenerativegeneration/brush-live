@@ -2,7 +2,9 @@
 pub mod cli;
 pub mod gaussian;
 pub mod io;
+pub mod metrics;
 pub mod preflight;
+pub mod report;
 pub mod run;
 pub mod runtime;
 pub mod triangle;
