@@ -1,5 +1,10 @@
 //! Offline adapters; intentionally independent of GuideSession and the phone protocol.
+pub mod cli;
 pub mod gaussian;
+pub mod io;
+pub mod preflight;
+pub mod run;
+pub mod runtime;
 pub mod triangle;
 
 pub(crate) fn training_ids(

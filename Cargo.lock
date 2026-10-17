@@ -1262,6 +1262,7 @@ dependencies = [
  "burn-wgpu",
  "clap",
  "glam 0.30.10",
+ "half",
  "image",
  "serde",
  "serde_json",

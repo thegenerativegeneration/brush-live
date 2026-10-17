@@ -54,6 +54,8 @@ pub struct FrozenAssets {
     pub loss_config: serde_json::Value,
     pub schedule_config: serde_json::Value,
     pub render_config: serde_json::Value,
+    pub triangle_train_config: serde_json::Value,
+    pub gaussian_train_config: serde_json::Value,
     pub rng_seed: u64,
     pub git_revision: String,
     pub dirty_patch_sha256: String,

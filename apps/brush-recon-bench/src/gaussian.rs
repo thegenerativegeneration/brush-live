@@ -46,23 +46,27 @@ pub struct GaussianBackend {
     trainer: Option<SplatTrainer>,
     iterations: u64,
 }
+pub fn controlled_config() -> TrainConfig {
+    let mut config = TrainConfig::parse_from(["brush-recon-bench"]);
+    config.total_train_iters = u32::MAX;
+    config.lr_mean_end = config.lr_mean;
+    config.ssim_weight = 0.;
+    config.ssim_every = 0;
+    config.lpips_loss_weight = 0.;
+    config.background_noise_strength = 0.;
+    config.background_color = vec![0.; 3];
+    config.sh_background = false;
+    config.match_alpha_weight = 0.;
+    config.mean_noise_weight = 0.;
+    config.opac_decay = 0.;
+    config.min_scale_factor = 0.;
+    config.growth_stop_iter = 0;
+    config.refine_every = u32::MAX;
+    config
+}
 impl GaussianBackend {
     pub fn new(seed: TriangleSeed, device: Device, rng_seed: u64) -> Self {
-        let mut config = TrainConfig::parse_from(["brush-recon-bench"]);
-        config.total_train_iters = u32::MAX;
-        config.lr_mean_end = config.lr_mean;
-        config.ssim_weight = 0.;
-        config.ssim_every = 0;
-        config.lpips_loss_weight = 0.;
-        config.background_noise_strength = 0.;
-        config.background_color = vec![0.; 3];
-        config.sh_background = false;
-        config.match_alpha_weight = 0.;
-        config.mean_noise_weight = 0.;
-        config.opac_decay = 0.;
-        config.min_scale_factor = 0.;
-        config.growth_stop_iter = 0;
-        config.refine_every = u32::MAX;
+        let config = controlled_config();
         Self {
             seed,
             device,
