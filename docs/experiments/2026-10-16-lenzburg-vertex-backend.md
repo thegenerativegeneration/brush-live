@@ -72,16 +72,22 @@ Review caveat: `forward.rs::required_buffer_bytes` misses fixed minimum radix-so
 
 ## Inspection artifacts and reproduction
 
-Local artifacts are intentionally untracked under `target/vertex-runs/`:
+The run artifacts were untracked local files under `target/vertex-runs/`:
 
 - `lenzburg-preflight/manifest.json`, seed/masks and training ROI/depth previews.
 - `lenzburg-triangle-smoke/`, `lenzburg-gaussian-smoke/`.
 - `lenzburg-triangle-60/`, `lenzburg-gaussian-60/`, `lenzburg-gaussian-300/`, `lenzburg-triangle-300/`.
 - Each completed run contains `run.json`, `metrics.json`, `curve.json`, initial/final PLY, frozen input assets, target/mask/prediction images and native depth arrays. Triangle raw states restore parameters, not optimizer history; mesh PLY does not encode the training coverage/weight model.
 
-![Target, triangles and Gaussian control after 300 seconds; frames 178, 193, 213](../../target/vertex-runs/lenzburg-comparison-300.png)
-
-The contact sheet is local/untracked; all columns are rotated 90° clockwise for readability only. Metrics use unchanged native image orientation. Frames were chosen as the first, middle and last listed examples, not by reconstruction score. Black unsupported regions, faceting/fragmentation and unconstrained streak artifacts must not be hidden by ROI-only scores. This constrained Gaussian control is not the normal adaptive/full-scene Brush configuration.
+**Update 2026-10-17:** the worktree's entire `target/` directory, including all of the above and the
+`lenzburg-comparison-300.png` contact sheet, has been deleted from disk (about 30 GB was freed) and is not
+recoverable from the repository or the Trash. The numbers in this report, and the derived records
+`results-summary.json` / `comparison-status.json` under `.superpowers/sdd/2026-10-16-vertex-backend/`, were
+preserved before the loss and remain the evidence of record. The contact sheet showed target vs triangles vs
+Gaussian control after 300 s on frames 178/193/213, rotated 90° clockwise for readability (metrics use
+unchanged native orientation); frames were the first/middle/last listed hold-outs, not chosen by score. It
+showed the black unsupported regions, faceting/fragmentation and unconstrained streak artifacts this report
+describes. Re-running the commands below reproduces all artifacts.
 
 Use the commands in [the CLI README](../../apps/brush-recon-bench/README.md). For the measured implementation, build revision `0a5ebd41`, reuse the frozen manifest, and run each backend separately at 60/300 seconds with fresh output directories. Never resume 60 s into 300 s, overwrite an old run, or change the masks/thresholds to improve held-out results.
 
@@ -107,6 +113,8 @@ Independent read-only whole-branch review: **PASS, ready to merge relative to th
 
 Keep Gaussian `brush-live` as the working engine. This milestone establishes a tested native vertex backend and reproducible real-data experiment, not a drop-in quality replacement. Before live integration, investigate appearance/coverage artifacts, preservation of local depth accuracy, and measured bottlenecks; validate any changes on fresh development data rather than tuning against these held-outs. Adaptive topology, mesh connectivity refinement and live guidance remain separate future scope.
 
+A follow-up [source audit](2026-10-16-lenzburg-vertex-backend-source-audit.md) compares the pinned Triangle Splatting+/MeshSplatting implementations line by line against this prototype. It finds no renderer-math defect relative to our specification, and attributes the quality gap to reference-method components that were out of scope (densification, pruning, global Delaunay init, SH, SSIM/normal losses, supersampling) — including the omission the paper itself calls essential once opacity is forced (pruning). It also explains the slower triangle steps as prototype orchestration overhead (per-render/per-step device readbacks, no early exit, quadratic backward reduction), not an inherent property of triangle splatting.
+
 ## Implementation decisions and remaining costs
 
 These decisions were recorded during execution rather than silently changing the plan:
@@ -130,4 +138,4 @@ These decisions were recorded during execution rather than silently changing the
 | Save initial/final parameters; label sampled training-loss minimum diagnostic | Reproducing that intermediate model requires fixed-step replay. |
 | Save last-render cull diagnostics, not cumulative claims | Those counters and process lifetime peaks are not renderer-only measured GPU peaks. |
 
-The final reviewer did not independently replicate tests/GPU execution, survey physical calibration, certify legal provenance, or judge outside-scope paper/live/iOS/adaptive behavior. Executor logs/artifacts provide the reported evidence; depth remains sensor-relative, performance remains single-run/accounting-specific, and later distribution/reuse needs its own licensing review. Unchanged baseline formatting, the fuzz caller mismatch, missing FFI fixtures and the original checkout's eight user edits were deliberately left alone. The branch/worktree are retained without merge/push; diagnostic logs and native artifacts remain available locally.
+The final reviewer did not independently replicate tests/GPU execution, survey physical calibration, certify legal provenance, or judge outside-scope paper/live/iOS/adaptive behavior. Executor logs/artifacts provide the reported evidence; depth remains sensor-relative, performance remains single-run/accounting-specific, and later distribution/reuse needs its own licensing review. Unchanged baseline formatting, the fuzz caller mismatch, missing FFI fixtures and the original checkout's eight user edits were deliberately left alone. The branch/worktree are retained without merge/push; diagnostic logs remain available locally under `.superpowers/sdd/2026-10-16-vertex-backend/` (the native run artifacts in `target/vertex-runs/` were later deleted with the worktree's `target/` directory; see the artifact-status update above).
