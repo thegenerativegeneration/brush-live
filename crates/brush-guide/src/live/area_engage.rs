@@ -16,19 +16,19 @@ impl LiveModel {
     /// the walker is noted at a keyframe and after a pose update. The switch marks the mask stale, recomputes the
     /// training views and the floor's cameras and rebuilds both loaders, or during a keyframe (its view not yet in)
     /// leaves that to the keyframe's own rebuild. Logged and recorded with the keyframes received. No-op once engaged
-    /// or without area training.
-    pub(super) fn note_engaged(&mut self) {
+    /// or without area training. Returns whether it recomputed the views and rebuilt the loaders.
+    pub(super) fn note_engaged(&mut self) -> bool {
         let Some(&(centre, _)) = self.view_cams.last() else {
-            return;
+            return false;
         };
         let received = self.view_cams.len() as u32;
         let Some(area) = self.area.as_mut().filter(|a| !a.engaged) else {
-            return;
+            return false;
         };
         let left = area.registry.left_keys(centre).len();
         let parked = area.registry.parked_keys().len();
         if left == 0 && parked == 0 {
-            return;
+            return false;
         }
         area.engaged = true;
         area.counters.engaged_at_keyframe = received;
@@ -36,13 +36,14 @@ impl LiveModel {
         log::info!("area: training engages at keyframe {received} ({left} tiles left, {parked} parked)");
         if self.views.len() != self.view_cams.len() {
             area.loaders_stale = true;
-            return;
+            return false;
         }
         self.refresh_area_views();
         if !self.views.is_empty() {
             self.refresh_floor_cams();
             self.rebuild_all_loaders();
         }
+        true
     }
 }
 

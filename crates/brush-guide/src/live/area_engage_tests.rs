@@ -121,15 +121,15 @@ async fn a_keyframe_that_leaves_a_tile_engages_area_training_for_good() {
     assert_eq!(engaged_at(&live), 2);
     assert!(!live.area.as_ref().unwrap().registry.left_keys(Vec3::new(5.5, 0.0, 5.0)).is_empty());
     assert!(live.area_report().unwrap().at_cap);
-    assert!(live.trainer.as_ref().unwrap().frozen_rows().is_some(), "nothing held at the cap once engaged");
+    assert!(live.trainer.as_ref().unwrap().frozen_rows().is_some(), "rows held at the cap once engaged");
     let views = live.training_views();
     assert_eq!(views, vec![1], "keyframe 0 does not see keyframe 1's wall");
     assert_eq!(live.all_members, views);
     assert!(live.recent_members.iter().chain(&live.pending_views()).all(|v| views.contains(v)));
     assert_eq!(live.all_loader_builds - builds, 1);
     train(&mut live, 6).await;
-    assert!(budgeted(&live), "no row budget once engaged");
-    assert!(caps_tiles(&mut live), "no per-tile cap once engaged");
+    assert!(budgeted(&live), "row budget once engaged");
+    assert!(caps_tiles(&mut live), "per-tile cap once engaged");
     facing_wall(&mut live, &dir, 2, 5.6).await;
 
     facing_wall(&mut live, &dir, 3, 2.5).await;
@@ -157,9 +157,11 @@ async fn a_pose_update_that_leaves_a_tile_engages_area_training() {
     live.enable_area(dir.join("tiles"));
     facing_wall(&mut live, &dir, 0, 0.0).await;
     assert_eq!(engaged_at(&live), 0);
+    let builds = live.all_loader_builds;
     let (h, _) = crate::live::area::tests::keyframe_toward(0, Vec3::new(6.0, 0.0, 5.0), Vec3::new(6.0, 0.0, 0.0));
     live.update_poses(&[crate::live::ViewPose::from_arkit(0, &h.pose).unwrap()]);
     assert_eq!(engaged_at(&live), 1);
+    assert_eq!(live.all_loader_builds - builds, 1);
     train(&mut live, 6).await;
     assert!(budgeted(&live));
     std::fs::remove_dir_all(dir).ok();

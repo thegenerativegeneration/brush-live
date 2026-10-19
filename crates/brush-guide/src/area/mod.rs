@@ -62,7 +62,8 @@ pub struct AreaCounters {
     /// Refines whose eviction, short of what it wanted after the parks and the active tiles' fair shares, widened and
     /// took rows that way.
     pub eviction_fallbacks: u32,
-    /// Keyframes received when area training engaged (`area_engage_on_leave`); 0 before it engaged.
+    /// Keyframes received when area training engaged (`area_engage_on_leave`); 0 means not engaged yet, or engaged from
+    /// the start (`area_engage_on_leave` off).
     pub engaged_at_keyframe: u32,
 }
 

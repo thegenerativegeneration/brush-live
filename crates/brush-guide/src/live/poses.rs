@@ -99,15 +99,17 @@ impl LiveModel {
             }
         }
         let camera = self.views[newest].camera;
-        self.note_engaged();
         self.refresh_active(&camera, &[]);
+        let refreshed = self.note_engaged();
         if let Some(area) = self.area.as_mut() {
             // Rows moved with their views and may lie in other tiles now: the next step holds them afresh.
             area.mask_stale = true;
         }
-        self.refresh_area_views();
-        self.refresh_floor_cams();
-        self.rebuild_all_loaders();
+        if !refreshed {
+            self.refresh_area_views();
+            self.refresh_floor_cams();
+            self.rebuild_all_loaders();
+        }
         stats
     }
 }
