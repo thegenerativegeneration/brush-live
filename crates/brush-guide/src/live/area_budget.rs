@@ -1,7 +1,6 @@
 //! The splat budget of area training in the live model:
-//! - Per tile (`area_tile_max_fraction` of `max_splats`): seeds into a full tile are dropped; at a refine the trainer
-//!   gets a row budget
-//!   ([`crate::area::row_budget`]) under which a full tile's rows do not densify and a tile over the cap evicts its
+//! - Per tile (`area_tile_max_fraction` of `max_splats`; off by default): seeds into a full tile are dropped; at a
+//!   refine the trainer gets a row budget ([`crate::area::row_budget`]) under which a full tile's rows do not densify and a tile over the cap evicts its
 //!   least important rows down to it.
 //! - At the total cap (`max_splats`): before a refine, the tiles the walker has left park first, then far tiles
 //!   neither active nor near nor in view ([`LiveModel::park_for_room`]). While rows outside the active tiles are

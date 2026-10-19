@@ -1,6 +1,6 @@
-//! The per-tile splat budget (`area_tile_max_fraction` of `max_splats`) and room at the total cap: host-side row counts
-//! per tile, which seeds a full tile turns away, which tiles park for room after the left ones, and the row budget the
-//! trainer applies at a refine ([`brush_train::budget`]).
+//! The per-tile splat budget (`area_tile_max_fraction` of `max_splats`; off by default) and room at the total cap:
+//! host-side row counts per tile, which seeds a full tile turns away, which tiles park for room after the left ones,
+//! and the row budget the trainer applies at a refine ([`brush_train::budget`]).
 
 use super::active::Heights;
 use super::tiles::{TileKey, TileRegistry, pick_until};

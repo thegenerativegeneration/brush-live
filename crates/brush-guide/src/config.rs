@@ -186,10 +186,11 @@ pub struct GuideConfig {
     /// With `area_freeze` inactive_at_cap: the share of `max_splats` at which the rows outside the active tiles are
     /// held (released again below this share − 0.05).
     pub area_freeze_at: f32,
-    /// Most splats one tile holds, as a share of `max_splats` (0.4: 10k of 25k): seeds into a full tile are dropped,
-    /// its rows do not densify, and a tile over it evicts its least important rows down to it at the next refine. A
-    /// tile still filling up can overshoot by one refine's growth before that. 0: no per-tile cap (held rows no step
-    /// ever trained stay eviction victims at the total cap either way).
+    /// Per-tile cap as a share of `max_splats`; 0 (default): no per-tile cap, tiles share the total budget. Above 0
+    /// (0.4: 10k of 25k), once area training has engaged: seeds into a full tile are dropped, its rows do not
+    /// densify, and a tile over it evicts its least important rows down to it at the next refine (a tile still
+    /// filling up can overshoot by one refine's growth). Held rows no step ever trained stay eviction victims at the
+    /// total cap either way.
     pub area_tile_max_fraction: f32,
     /// Area training engages once the walker has left a tile (a visited tile lies beyond `area_radius_m` plus
     /// `area_hysteresis_m`) or a tile parked, and stays on until the session resets. Until then the engine trains as
@@ -271,7 +272,7 @@ impl Default for GuideConfig {
             area_active_tiles: 3,
             area_active_min_rows: 50,
             area_freeze_at: 0.9,
-            area_tile_max_fraction: 0.4,
+            area_tile_max_fraction: 0.0,
             area_engage_on_leave: true,
             train_radius_m: 0.0,
         }
@@ -446,9 +447,10 @@ mod area_tests {
         let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
         assert_eq!(cfg.area_freeze, AreaFreeze::InactiveAtCap);
         assert_eq!((cfg.area_view_m, cfg.area_active_tiles, cfg.area_active_min_rows), (15.0, 3, 50));
-        assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_fraction), (0.9, 0.4));
+        assert_eq!(cfg.area_freeze_at, 0.9);
         assert!(cfg.area_engage_on_leave);
-        assert_eq!(GuideConfig { max_splats: 25_000, ..cfg.clone() }.area_tile_cap(), 10_000);
+        let capped = GuideConfig { area_tile_max_fraction: 0.4, max_splats: 25_000, ..cfg.clone() };
+        assert_eq!(capped.area_tile_cap(), 10_000);
         assert_eq!(GuideConfig { area_tile_max_fraction: 0.0, ..cfg }.area_tile_cap(), 0);
         let modes = [
             ("left", AreaFreeze::Left),
@@ -461,10 +463,22 @@ mod area_tests {
                 serde_json::from_str(&format!(r#"{{"area_freeze": "{json}"}}"#)).expect("parses");
             assert_eq!(cfg.area_freeze, want);
         }
+        let cfg: GuideConfig =
+            serde_json::from_str(r#"{"area_tile_max_fraction": 0.25, "max_splats": 20000}"#).expect("parses");
+        assert_eq!(cfg.area_tile_cap(), 5_000);
         let cfg: GuideConfig = serde_json::from_str(r#"{"area_view_m": 20, "area_active_tiles": 5}"#).expect("parses");
         assert_eq!((cfg.area_view_m, cfg.area_active_tiles), (20.0, 5));
         let cfg: GuideConfig =
             serde_json::from_str(r#"{"area_freeze_at": 0.8, "area_tile_max_fraction": 0}"#).expect("parses");
         assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_fraction), (0.8, 0.0));
+    }
+
+    #[test]
+    fn the_default_config_has_no_per_tile_cap() {
+        let cfg = GuideConfig::default();
+        assert_eq!(cfg.area_tile_max_fraction, 0.0);
+        assert_eq!(cfg.area_tile_cap(), 0);
+        let parsed: GuideConfig = serde_json::from_str("{}").expect("parses");
+        assert_eq!(parsed.area_tile_cap(), 0);
     }
 }

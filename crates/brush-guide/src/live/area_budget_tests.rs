@@ -355,10 +355,12 @@ async fn an_all_active_capture_evicts_without_a_limit() {
 
 /// The row budget the refine gets: while the rows outside the active tiles are held an eviction may take each active
 /// tile's rows above `max_splats` / active tiles and nothing of other tiles; with inactive_at_cap below the cap or
-/// `area_freeze` left it is not limited, and left without a per-tile cap there is no budget.
+/// `area_freeze` left it is not limited, and left without a per-tile cap there is no budget. Runs with a per-tile cap
+/// (0.4) so the left case has a budget to check.
 #[tokio::test]
 async fn the_eviction_keeps_each_active_tiles_fair_share() {
     let (mut live, dir, [_, _, active]) = walked("budget-fair").await;
+    live.config.area_tile_max_fraction = 0.4;
     let all = rows_where(&live, |_| true).await;
     let rows = counts(&live, 1.0).await;
     let n_active = live.area.as_ref().unwrap().active.len() as u32;
