@@ -64,6 +64,8 @@ pub struct AreaCounters {
     pub eviction_fallbacks: u32,
     /// Keyframes received when area training engaged (`area_engage_on_leave`); 0 before it engaged.
     pub engaged_at_keyframe: u32,
+    /// Keyframes received when the per-tile cap began to apply (at the session's first park); 0 before.
+    pub tile_cap_from_keyframe: u32,
 }
 
 /// Area training's state for the eval log: tile and splat counts, counters, and every tile's state.
@@ -97,7 +99,7 @@ pub struct AreaReport {
     pub tile_splats: Vec<[i32; 3]>,
     /// `[x, z, rows]`: rows refines evicted per tile under a row budget since the start, tiles with evictions only.
     pub tile_evictions: Vec<[i32; 3]>,
-    /// The per-tile cap in effect (`area_tile_max_fraction` of `max_splats`); 0: none. Held rows no step ever trained
-    /// are eviction victims at the total cap with or without it.
+    /// The per-tile cap in effect (`area_tile_max_fraction` of `max_splats` from the session's first park on); 0:
+    /// none. Held rows no step ever trained are eviction victims at the total cap with or without it.
     pub tile_cap: u32,
 }

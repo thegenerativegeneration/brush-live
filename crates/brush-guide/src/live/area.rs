@@ -84,6 +84,9 @@ pub(crate) struct AreaState {
     pub(super) sight_reps: Vec<usize>,
     /// Area training is engaged ([`super::area_engage`]); until then the engine trains as with it off.
     pub(super) engaged: bool,
+    /// The per-tile cap applies: from the session's first park on, or from the start when area training engages from
+    /// the first keyframe ([`LiveModel::tile_cap`]).
+    pub(super) tile_capped: bool,
 }
 
 /// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
@@ -159,6 +162,7 @@ impl AreaState {
             sight: Vec::new(),
             sight_reps: Vec::new(),
             engaged: false,
+            tile_capped: false,
         }
     }
 }
@@ -176,6 +180,7 @@ impl LiveModel {
         self.area = match prepared {
             Ok(()) => AreaParams::from_config(&self.config).map(|p| AreaState {
                 engaged: !self.config.area_engage_on_leave,
+                tile_capped: !self.config.area_engage_on_leave,
                 ..AreaState::new(p)
             }),
             Err(e) => {
@@ -274,7 +279,7 @@ impl LiveModel {
             at_cap: area.at_cap,
             tile_splats: tile_splats(&area.registry),
             tile_evictions: area.tile_evictions.iter().map(|(k, &n)| [k.x, k.z, n as i32]).collect(),
-            tile_cap: self.config.area_tile_cap(),
+            tile_cap: self.tile_cap(),
         })
     }
 

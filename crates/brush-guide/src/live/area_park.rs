@@ -279,6 +279,7 @@ impl LiveModel {
     fn write_tiles(&mut self, rows: &SplatRows, tile_size: f32) -> (BTreeSet<usize>, u32) {
         let dir = self.tiles_dir.clone().expect("area training has a tiles directory");
         let (mut parked, mut tiles) = (BTreeSet::new(), 0);
+        let received = self.view_cams.len() as u32;
         for (key, idx) in group_rows(&rows.means, tile_size) {
             if self.area.as_ref().is_none_or(|a| a.parking_off) {
                 break;
@@ -304,6 +305,12 @@ impl LiveModel {
             area.registry.mark_parked(key, n, self.iter);
             area.file_bytes.insert(key, bytes);
             area.counters.parks += 1;
+            if !area.tile_capped {
+                area.tile_capped = true;
+                area.counters.tile_cap_from_keyframe = received;
+                let cap = self.config.area_tile_cap();
+                log::info!("area: per-tile cap of {cap} splats applies from keyframe {received}");
+            }
             parked.extend(idx);
             tiles += 1;
             log::info!(
