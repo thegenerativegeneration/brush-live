@@ -41,8 +41,9 @@ impl LiveModel {
     /// With `area_freeze` inactive_at_cap: at `resident` rows from `area_freeze_at` × `max_splats` on the rows
     /// outside the active tiles are held and the views that see an active tile train, below
     /// (`area_freeze_at` − [`FREEZE_RELEASE`]) × `max_splats` every row and every view trains again. A switch marks
-    /// the mask stale, recomputes the training views and the Mip floor's cameras, rebuilds both loaders and is logged.
-    /// No-op in other modes or without area training.
+    /// the mask stale, recomputes the training views and the Mip floor's cameras, rebuilds both loaders and is logged;
+    /// during a keyframe (its view not yet in) the keyframe does that once its view is in. No-op in other modes or
+    /// without area training.
     pub(super) fn note_cap(&mut self, resident: u32) {
         if self.config.area_freeze != AreaFreeze::InactiveAtCap {
             return;
@@ -58,6 +59,10 @@ impl LiveModel {
             area.mask_stale = true;
             let what = if at_cap { "held" } else { "train again" };
             log::info!("area: rows outside the active tiles {what} at {resident} of {max} splats");
+            if self.views.len() != self.view_cams.len() {
+                area.loaders_stale = true;
+                return;
+            }
             self.refresh_area_views();
             if !self.views.is_empty() {
                 self.refresh_floor_cams();

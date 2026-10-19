@@ -38,7 +38,12 @@ impl LiveModel {
     /// After a new view: rebuilds the recent loader every `RECENT_LOADER_REBUILD_EVERY` views (each of the first
     /// ones) or when one of its views left the area, and the all-views loader when `all_loader_rebuild_every` views
     /// joined or left its training views. With area training off no view leaves, so these are the count rules alone.
+    /// After an inactive_at_cap switch during the keyframe both are rebuilt.
     pub(super) fn rebuild_loaders(&mut self) {
+        if self.area.as_mut().is_some_and(|a| std::mem::take(&mut a.loaders_stale)) {
+            self.rebuild_all_loaders();
+            return;
+        }
         let n = self.views.len();
         let training = self.training_views();
         if n <= RECENT_LOADER_REBUILD_EVERY

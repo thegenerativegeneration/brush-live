@@ -340,6 +340,17 @@ async fn at_the_cap_the_active_views_train_and_each_flip_rebuilds_the_loaders_on
     assert_eq!(step_at(&mut live, 0.9).await, (vec![0, 4], true, 1));
     assert_eq!(step_at(&mut live, 0.86).await, (vec![0, 4], true, 0));
     assert_eq!(step_at(&mut live, 0.84).await, (every, false, 1));
+    // A keyframe that reaches the cap switches before its view joins: the loaders are rebuilt once, with it.
+    let n = live.splats().unwrap().num_splats() as f32;
+    live.config.max_splats = (n / 0.9).floor() as u32;
+    let builds = live.all_loader_builds;
+    facing_wall(&mut live, &dir, 5, 0.1).await;
+    assert!(live.area_report().unwrap().at_cap);
+    let views = live.training_views();
+    assert_eq!((views.first(), views.last()), (Some(&0), Some(&5)), "{views:?}");
+    assert!(views.len() < 6 && live.all_members == views, "{views:?} {:?}", live.all_members);
+    assert!(live.recent_members.iter().chain(&live.pending_views()).all(|v| views.contains(v)));
+    assert_eq!(live.all_loader_builds - builds, 1);
     assert_eq!(live.area_report().unwrap().counters.parks, 0);
     std::fs::remove_dir_all(dir).ok();
 }

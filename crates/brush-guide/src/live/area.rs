@@ -70,6 +70,9 @@ pub(crate) struct AreaState {
     pub(super) active_changed: bool,
     /// With `area_freeze` inactive_at_cap: the rows outside the active tiles are held ([`LiveModel::note_cap`]).
     pub(super) at_cap: bool,
+    /// inactive_at_cap switched while a keyframe was being added (its camera noted, its view not yet in): the
+    /// keyframe's loader rebuild builds both loaders afresh ([`LiveModel::rebuild_loaders`]).
+    pub(super) loaders_stale: bool,
     /// The tiles of the groups of the row budget last handed to the trainer, in group order.
     pub(super) budget_keys: Vec<TileKey>,
     /// Rows refines evicted per tile under a row budget, since the start.
@@ -147,6 +150,7 @@ impl AreaState {
             active_splats: 0,
             active_changed: false,
             at_cap: false,
+            loaders_stale: false,
             budget_keys: Vec::new(),
             tile_evictions: BTreeMap::new(),
             sight: Vec::new(),
