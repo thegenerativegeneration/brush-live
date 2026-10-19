@@ -10,7 +10,7 @@ pub mod tiles;
 pub mod views;
 
 pub use active::{
-    ActiveRule, Candidate, Heights, SeedSort, candidate_boxes, keep_active_seeds, near_radius, near_tiles, rank_active,
+    ActiveRule, Candidate, Heights, SeedSort, candidate_boxes, keep_active_seeds, near_radius, resident_boxes, near_tiles, rank_active,
     tile_heights,
     views_seeing, widen_all,
 };

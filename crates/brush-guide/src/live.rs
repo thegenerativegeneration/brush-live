@@ -23,6 +23,7 @@ mod area_export;
 mod area_freeze;
 mod area_park;
 mod area_restore;
+mod area_sight;
 mod draw;
 mod loaders;
 mod poses;
@@ -313,12 +314,12 @@ impl LiveModel {
                 let near = self.area.as_ref().map(|a| a.registry.parked_within_radius(pos)).unwrap_or_default();
                 let current = self.restore_tiles(current, &near, RestoreReason::Distance, pos).await;
                 let (current, new) = self.seed_from_mask(current, &kf, size).await;
+                // Set before appending so the new splats' Mip floor sees this view.
+                self.push_floor_cams();
                 let trainer = self
                     .trainer
                     .as_mut()
                     .expect("trainer exists once splats exist");
-                // Set before appending so the new splats' Mip floor sees this view.
-                trainer.set_view_cams(self.view_cams.clone());
                 match new {
                     Some(new) => trainer.append_splats_from(current, new, slot),
                     None => current,
@@ -334,6 +335,7 @@ impl LiveModel {
         self.views.push(kf.view);
         self.last_id = Some(kf.id);
         self.refresh_area_views();
+        self.refresh_floor_cams();
         self.refresh_junction_views();
         self.rebuild_loaders();
         self.end_deferral_streaks();
@@ -424,6 +426,7 @@ impl LiveModel {
         crate::timing::sync_splats(&splats).await;
         self.note_visibility(&splats).await;
         let splats = self.park_for_room(splats).await;
+        self.refresh_floor_cams();
         let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
         let t = web_time::Instant::now();
         let before = splats.num_splats();

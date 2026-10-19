@@ -84,6 +84,13 @@ pub fn candidate_boxes(
     heights: &BTreeMap<TileKey, Heights>,
     centre: Vec3,
 ) -> BTreeMap<TileKey, Candidate> {
+    let mut c = resident_candidates(registry, heights);
+    c.retain(|&key, _| !registry.is_left(key, centre));
+    c
+}
+
+/// Every resident tile of the registry and every tile of `heights` that is not parked, with its box and rows.
+fn resident_candidates(registry: &TileRegistry, heights: &BTreeMap<TileKey, Heights>) -> BTreeMap<TileKey, Candidate> {
     let size = registry.params().tile_size;
     let mut bands = heights.clone();
     for key in registry.resident_keys() {
@@ -93,13 +100,20 @@ pub fn candidate_boxes(
     }
     bands
         .into_iter()
-        .filter(|&(key, _)| registry.get(key).is_none_or(|t| t.resident) && !registry.is_left(key, centre))
+        .filter(|&(key, _)| registry.get(key).is_none_or(|t| t.resident))
         .map(|(key, h)| {
             let min = key.min_xz(size);
             let (lo, hi) = (Vec3::new(min.x, h.lo, min.y), Vec3::new(min.x + size, h.hi, min.y + size));
             (key, Candidate { min: lo, max: hi, rows: h.rows })
         })
         .collect()
+}
+
+/// Boxes (min, max) of every tile holding resident rows, left tiles included, in key order: the tiles of
+/// [`candidate_boxes`] before it leaves out the left ones. A box spans the tile's band of `heights`, so a stray row far
+/// above or below the band lies outside it.
+pub fn resident_boxes(registry: &TileRegistry, heights: &BTreeMap<TileKey, Heights>) -> Vec<(Vec3, Vec3)> {
+    resident_candidates(registry, heights).into_values().map(|c| (c.min, c.max)).collect()
 }
 
 /// The knobs of [`rank_active`].

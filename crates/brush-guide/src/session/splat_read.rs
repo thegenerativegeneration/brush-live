@@ -2,7 +2,7 @@
 //! inputs of the voxel aggregation.
 
 use crate::scores::voxel::{GaussianScore, SplatGeom, ViewCone};
-use brush_dataset::scene::SceneView;
+use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::Tensor;
 use glam::{Quat, Vec3};
@@ -69,16 +69,13 @@ impl SplatRead {
     }
 }
 
-pub(super) fn view_cones(views: &[SceneView]) -> Vec<ViewCone> {
-    views
+pub(super) fn view_cones(cameras: &[Camera]) -> Vec<ViewCone> {
+    cameras
         .iter()
-        .map(|v| {
-            let c = &v.camera;
-            ViewCone {
-                position: c.position,
-                forward: c.rotation * Vec3::Z,
-                cos_half_fov: (0.5 * c.fov_x.max(c.fov_y) as f32).cos(),
-            }
+        .map(|c| ViewCone {
+            position: c.position,
+            forward: c.rotation * Vec3::Z,
+            cos_half_fov: (0.5 * c.fov_x.max(c.fov_y) as f32).cos(),
         })
         .collect()
 }

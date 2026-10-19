@@ -202,3 +202,26 @@ fn seeds_land_in_active_tiles_and_on_new_ground_only() {
     assert_eq!(keep, vec![true, false, false, true, false]);
     assert_eq!(outside, SeedSort { dropped: 2, new_ground: 1 });
 }
+
+/// Task 19: every tile holding resident rows has a box, left ones included: a tile's band where it has one, else the
+/// registry's height range; parked tiles have none.
+#[test]
+fn resident_boxes_cover_left_and_banded_tiles_but_not_parked_ones() {
+    let mut r = registry_with(&[(0, 0), (0, 1), (5, 0)]);
+    r.mark_parked(key(0, 1), 2, 0);
+    r.note_walker(Vec3::new(55.0, 0.0, 5.0));
+    let heights = BTreeMap::from([
+        (key(0, 0), Heights { lo: -1.0, hi: 1.0, rows: 4 }),
+        (key(2, 2), Heights { lo: 0.5, hi: 2.0, rows: 3 }),
+    ]);
+    let boxes = resident_boxes(&r, &heights);
+    assert_eq!(
+        boxes,
+        vec![
+            (Vec3::new(0.0, -1.0, 0.0), Vec3::new(10.0, 1.0, 10.0)),
+            (Vec3::new(20.0, 0.5, 20.0), Vec3::new(30.0, 2.0, 30.0)),
+            (Vec3::new(50.0, 0.0, 0.0), Vec3::new(60.0, 3.0, 10.0)),
+        ]
+    );
+    assert!(!candidate_boxes(&r, &heights, Vec3::new(6.0, 1.5, 2.0)).contains_key(&key(5, 0)), "(5, 0) is left");
+}

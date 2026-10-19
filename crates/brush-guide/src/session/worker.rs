@@ -450,6 +450,7 @@ impl Worker {
             adam_clamped: self.live.adam_clamped(),
             masked_by_radius: self.live.masked_by_radius().await,
             area_views: self.live.area_view_count(),
+            sight_views: self.live.sight_view_count(),
             parked_load_ms: self.live.area_view_count().map(|_| load_ms),
             area: self.live.area_report(),
             extras,
@@ -608,7 +609,7 @@ impl Worker {
         let t_read = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let geoms = read.geoms();
-        let cones = view_cones(self.live.views());
+        let cones = view_cones(&self.live.sight_cameras());
         let t_prep = t.elapsed().as_secs_f64();
         let t = Instant::now();
         let cells = self

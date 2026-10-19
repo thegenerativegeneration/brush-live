@@ -102,8 +102,9 @@ pub struct SplatTrainer {
     step_count: u32,
     max_sh_degree: u32,
     rng: rand::rngs::StdRng,
-    /// Per-train-view (world center, focal in px at native res) for the
-    /// Mip-Splatting 3D filter. Empty disables it. The floor itself lives on
+    /// (world center, focal in px at native res) of the cameras the
+    /// Mip-Splatting 3D filter's floor is computed from: every train view, or
+    /// the caller's subset (those that see the splats). Empty disables it. The floor itself lives on
     /// the splats (recomputed at each refine), not here.
     view_cams: Vec<(glam::Vec3, f32)>,
     /// Keeps the splat count within `max_splats` by evicting; `None` caps growth as Brush does.
@@ -431,10 +432,16 @@ impl SplatTrainer {
         self.bounds
     }
 
-    /// Supply per-train-view (world center, focal-px at native res) to enable
-    /// the Mip-Splatting 3D filter (gated on `config.min_scale_factor > 0`).
+    /// Supply (world center, focal-px at native res) of the cameras the floor
+    /// is computed from, every train view or those that see the splats, to
+    /// enable the Mip-Splatting 3D filter (gated on `config.min_scale_factor > 0`).
     pub fn set_view_cams(&mut self, view_cams: Vec<(glam::Vec3, f32)>) {
         self.view_cams = view_cams;
+    }
+
+    /// The (world center, focal-px) the Mip floor is computed from, as last set by [`Self::set_view_cams`].
+    pub fn view_cams(&self) -> &[(glam::Vec3, f32)] {
+        &self.view_cams
     }
 
     /// Turns on eviction (see [`crate::evict`]). Call before training starts.

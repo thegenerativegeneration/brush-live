@@ -91,7 +91,6 @@ impl LiveModel {
         }
         let newest = self.views.len() - 1;
         if let Some(t) = self.trainer.as_mut() {
-            t.set_view_cams(self.view_cams.clone());
             if moves.iter().any(|(i, _)| *i as usize == newest) {
                 t.set_protect_cone(Some(view_cone(&self.views[newest].camera)));
             }
@@ -106,6 +105,7 @@ impl LiveModel {
             area.mask_stale = true;
         }
         self.refresh_area_views();
+        self.refresh_floor_cams();
         self.rebuild_all_loaders();
         stats
     }

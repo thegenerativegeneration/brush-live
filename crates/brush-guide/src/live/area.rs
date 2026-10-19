@@ -71,6 +71,8 @@ pub(crate) struct AreaState {
     pub(super) budget_keys: Vec<TileKey>,
     /// Rows refines evicted per tile under a row budget, since the start.
     pub(super) tile_evictions: BTreeMap<TileKey, u32>,
+    /// The views that see the resident model, ascending ([`super::area_sight`]).
+    pub(super) sight: Vec<usize>,
 }
 
 /// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
@@ -142,6 +144,7 @@ impl AreaState {
             at_cap: false,
             budget_keys: Vec::new(),
             tile_evictions: BTreeMap::new(),
+            sight: Vec::new(),
         }
     }
 }
@@ -166,6 +169,7 @@ impl LiveModel {
         self.tiles_dir = Some(tiles_dir);
         if !self.views.is_empty() {
             self.refresh_area_views();
+            self.refresh_floor_cams();
             self.rebuild_all_loaders();
         }
     }
