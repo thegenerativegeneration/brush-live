@@ -314,8 +314,8 @@ impl LiveModel {
                 let near = self.area.as_ref().map(|a| a.registry.parked_within_radius(pos)).unwrap_or_default();
                 let current = self.restore_tiles(current, &near, RestoreReason::Distance, pos).await;
                 let (current, new) = self.seed_from_mask(current, &kf, size).await;
-                // Set before appending so the new splats' Mip floor sees this view.
-                self.push_floor_cams();
+                // Set before appending so the new splats' Mip floor sees this view and the tiles just restored.
+                self.refresh_floor_cams();
                 let trainer = self
                     .trainer
                     .as_mut()

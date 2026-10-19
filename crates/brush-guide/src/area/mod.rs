@@ -2,6 +2,7 @@
 //! and restored when it comes back (spec `docs/superpowers/specs/2026-10-14-area-training-design.md`).
 
 pub mod active;
+pub mod buckets;
 pub mod budget;
 pub mod park_file;
 pub mod ply_stream;

@@ -451,6 +451,7 @@ impl Worker {
             masked_by_radius: self.live.masked_by_radius().await,
             area_views: self.live.area_view_count(),
             sight_views: self.live.sight_view_count(),
+            sight_voters: self.live.sight_voter_count(),
             parked_load_ms: self.live.area_view_count().map(|_| load_ms),
             area: self.live.area_report(),
             extras,

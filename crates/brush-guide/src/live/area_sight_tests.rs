@@ -1,6 +1,6 @@
 use super::*;
 use crate::live::area::tests::{add, area_config, device, tmp};
-use crate::live::area_restore::tests::{drift_rows, parked_origin, train};
+use crate::live::area_restore::tests::{correction, drift_rows, parked_origin, train};
 use glam::Vec3;
 
 fn floor_count(live: &LiveModel) -> usize {
@@ -50,17 +50,66 @@ async fn area_off_takes_every_view() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// A resident row behind every floor camera (in a tile no view sees) still gets a finite, positive floor at refine.
+/// Rows resident next to keyframe 0's corrected camera, which sees no resident tile: their floor comes from keyframe
+/// 1's camera alone (`sqrt(factor) · |p − cam1| / f1`), not from keyframe 0's nearer one.
 #[tokio::test]
-async fn a_row_no_floor_camera_sees_keeps_a_finite_floor() {
-    let (mut live, dir) = parked_origin("sight-finite").await;
+async fn a_dropped_camera_plays_no_part_in_the_floor() {
+    let (mut live, dir) = parked_origin("sight-floor-exact").await;
+    // Keyframe 0 moves next to the rows below (1 m from them, 1.6 m from keyframe 1), looking away from every
+    // resident tile, and 2.2 m from keyframe 1: outside the area's 2 m radius.
+    let near = Vec3::new(21.6, 0.0, 3.5);
+    live.update_poses(&[correction(0, near, Vec3::new(40.0, 0.0, 3.5))]);
     drift_rows(&mut live, vec![20.5, 0.0, 3.5, 20.6, 0.0, 3.5]).await;
+    // Steps 16 to 20; the refine at 20 floors the splats last.
     train(&mut live, 5).await;
-    assert_eq!(floor_count(&live), 1);
+    assert_eq!(live.trainer.as_ref().unwrap().view_cams().len(), 1, "keyframe 0 sees no resident tile");
     let splats = live.splats().unwrap();
     let means: Vec<f32> = splats.means().into_data_async().await.unwrap().try_to_vec().unwrap();
-    assert!(means.chunks(3).any(|p| p[2] > 3.0), "the drifted rows stay resident");
     let floor: Vec<f32> = splats.min_scale.clone().unwrap().into_data_async().await.unwrap().try_to_vec().unwrap();
-    assert!(floor.iter().all(|f| f.is_finite() && *f > 0.0), "{floor:?}");
+    let (cam1, f1) = live.view_cams[1];
+    let factor = live.train_config.min_scale_factor.sqrt();
+    let mut drifted = 0;
+    for (p, f) in means.chunks(3).zip(&floor) {
+        let p = Vec3::new(p[0], p[1], p[2]);
+        if p.z < 3.0 {
+            continue;
+        }
+        drifted += 1;
+        let want = factor * p.distance(cam1) / f1;
+        assert!(
+            (f - want).abs() <= 1e-3 * want,
+            "floor {f} at {p}, want {want} (cam 0 would give {})",
+            factor * p.distance(near) / f1
+        );
+    }
+    assert!(drifted >= 2, "{drifted} drifted rows");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// The newest view always floors the splats, even when no view sees a resident tile and the area holds no view.
+#[tokio::test]
+async fn the_newest_view_always_floors() {
+    let (mut live, dir) = parked_origin("sight-guard").await;
+    live.update_poses(&[correction(1, Vec3::new(20.0, 0.0, 2.0), Vec3::new(20.0, 0.0, 30.0))]);
+    live.area.as_mut().unwrap().views.clear();
+    live.refresh_sight();
+    live.push_floor_cams();
+    let cams = live.trainer.as_ref().unwrap().view_cams().to_vec();
+    assert_eq!(cams, vec![live.view_cams[1]]);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Views in one pose bucket vote once in the score round, while every one of them floors the splats.
+#[tokio::test]
+async fn a_bucket_votes_once_and_floors_with_all_its_views() {
+    let (mut live, dir) = parked_origin("sight-buckets").await;
+    train(&mut live, 5).await;
+    // Keyframe 2 repeats keyframe 1's pose; keyframe 3 stands in the next cell.
+    add(&mut live, &dir, 2, Vec3::new(20.0, 0.0, 2.0), Vec3::new(20.0, 0.0, 0.0)).await;
+    add(&mut live, &dir, 3, Vec3::new(20.6, 0.0, 2.0), Vec3::new(20.6, 0.0, 0.0)).await;
+    assert_eq!(live.trainer.as_ref().unwrap().view_cams().len(), 3, "keyframes 1 to 3");
+    assert_eq!(live.sight_view_count(), Some(3));
+    let xs: Vec<f32> = live.sight_cameras().iter().map(|c| c.position.x).collect();
+    assert_eq!(xs.len(), 2, "keyframe 2 votes through keyframe 1: {xs:?}");
     std::fs::remove_dir_all(dir).ok();
 }

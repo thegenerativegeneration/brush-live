@@ -40,7 +40,10 @@ impl GaussianScore {
     }
 }
 
-/// A keyframe camera approximated as a cone for "does this camera see the voxel".
+/// How far a [`ViewCone`] sees, metres: the sight rule's depth (`live::area_sight`).
+pub const CONE_FAR_M: f32 = 100.0;
+
+/// A keyframe camera approximated as a cone for "does this camera see the voxel", up to [`CONE_FAR_M`].
 pub struct ViewCone {
     pub position: Vec3,
     pub forward: Vec3,
@@ -51,7 +54,7 @@ impl ViewCone {
     pub fn sees(&self, p: Vec3) -> bool {
         let d = p - self.position;
         let len = d.length();
-        len > 1e-4 && d.dot(self.forward) >= self.cos_half_fov * len
+        len > 1e-4 && len <= CONE_FAR_M && d.dot(self.forward) >= self.cos_half_fov * len
     }
 }
 

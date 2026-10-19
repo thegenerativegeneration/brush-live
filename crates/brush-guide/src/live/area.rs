@@ -73,6 +73,8 @@ pub(crate) struct AreaState {
     pub(super) tile_evictions: BTreeMap<TileKey, u32>,
     /// The views that see the resident model, ascending ([`super::area_sight`]).
     pub(super) sight: Vec<usize>,
+    /// The views among `sight` that vote in the score round: one per pose bucket, and the newest view.
+    pub(super) sight_reps: Vec<usize>,
 }
 
 /// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
@@ -145,6 +147,7 @@ impl AreaState {
             budget_keys: Vec::new(),
             tile_evictions: BTreeMap::new(),
             sight: Vec::new(),
+            sight_reps: Vec::new(),
         }
     }
 }

@@ -67,6 +67,8 @@ pub(super) struct EvalRecord {
     /// Views whose cameras floor the splats and orient the score round with area training on: those that see a
     /// resident tile and the area's views; `None` with area training off (every view).
     pub sight_views: Option<u32>,
+    /// The views among `sight_views` that orient the score round's normals: one per pose bucket, and the newest view.
+    pub sight_voters: Option<u32>,
     /// Milliseconds the full model took to assemble (resident splats plus every parked tile read from disk) with
     /// area training on.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +117,7 @@ mod tests {
             masked_by_radius: Some(120),
             area_views: Some(42),
             sight_views: Some(17),
+            sight_voters: Some(5),
             area: None,
             parked_load_ms: None,
             extras: false,
@@ -188,6 +191,7 @@ mod tests {
         assert_eq!(lines[0]["masked_by_radius"].as_u64(), Some(120));
         assert_eq!(lines[0]["area_views"].as_u64(), Some(42));
         assert_eq!(lines[0]["sight_views"].as_u64(), Some(17));
+        assert_eq!(lines[0]["sight_voters"].as_u64(), Some(5));
         assert_eq!((lines[0]["lpips_ms"].as_f64(), lines[0]["seam_ms"].as_f64()), (Some(12.0), Some(0.0)));
         std::fs::remove_dir_all(dir).ok();
     }

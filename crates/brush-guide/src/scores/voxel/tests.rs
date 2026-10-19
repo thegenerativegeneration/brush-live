@@ -384,3 +384,11 @@ mod legacy;
 mod lifecycle;
 mod normals;
 mod range;
+
+/// A cone sees up to `CONE_FAR_M` (the sight rule's 100 m) along its axis, not beyond.
+#[test]
+fn a_cone_sees_no_farther_than_the_sight_rule() {
+    let c = cam([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+    assert!(c.sees(Vec3::new(0.0, 0.0, 99.0)));
+    assert!(!c.sees(Vec3::new(0.0, 0.0, 101.0)));
+}
