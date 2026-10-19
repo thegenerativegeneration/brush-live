@@ -127,8 +127,9 @@ impl LiveModel {
     ///    `area_restore_inconsistency_m` apart is dropped ([`Self::drop_parked`]).
     /// 3. The planned tiles park; if that fell short (parking off, a skipped park), the restore is deferred.
     /// 4. The rows, moved by their views' pose corrections since the park, are appended (their Adam moments, floor,
-    ///    age, importance and trained flags kept, zero moments from a version 1 file, the importance unscored after
-    ///    more than `STALE_WINDOWS` seen windows), the file goes, and the rows' box joins the junction.
+    ///    age, importance and trained flags kept, zero moments from a version 1 file, the first moments decayed by
+    ///    β1 per step parked as steps without a gradient would leave them, the importance unscored after more than
+    ///    `STALE_WINDOWS` seen windows), the file goes, and the rows' box joins the junction.
     async fn restore_one(&mut self, splats: Splats, dir: &Path, key: TileKey, centre: Vec3) -> (Splats, Restore) {
         let max_splats = self.config.max_splats;
         let keyframes = self.views.len() as u32;
@@ -180,6 +181,9 @@ impl LiveModel {
         let parked_at = area.registry.get(key).map_or(self.iter, |t| t.parked_at_step);
         if self.iter.saturating_sub(parked_at) > STALE_WINDOWS * area.registry.params().seen_window {
             tile.rows.importance.fill(f32::INFINITY);
+        }
+        if let Some(m) = tile.rows.moments.as_mut() {
+            m.decay_first(self.iter.saturating_sub(parked_at));
         }
         let splats = trainer.append_rows(splats, &tile.rows);
         area.registry.mark_restored(key, keyframes, self.iter);

@@ -63,6 +63,15 @@ impl RowMoments {
         }
     }
 
+    /// Scales the first moments by β1^`steps`: what `steps` steps without a gradient leave of them. The second
+    /// moments stay.
+    pub fn decay_first(&mut self, steps: u32) {
+        let f = crate::adam_scaled::BETA_1.powi(steps.min(i32::MAX as u32) as i32);
+        for v in [&mut self.transforms_m1, &mut self.sh_m1, &mut self.opacity_m1] {
+            v.iter_mut().for_each(|x| *x *= f);
+        }
+    }
+
     /// Per column: name, values and values per row for `coeffs` SH coefficients per channel, in field order.
     pub fn columns(&self, coeffs: usize) -> [(&'static str, &[f32], usize); 6] {
         [

@@ -5,6 +5,7 @@
 //! with its moments is corrected like a row that stayed and was held still, which is what it would have been.
 
 use super::{SplatTrainer, map_splats_and_opt};
+use crate::adam_scaled::AdamState;
 use crate::evict::SplatLife;
 use crate::origin::slot_of;
 use crate::rows::{RowMoments, SplatRows};
@@ -82,6 +83,18 @@ impl SplatTrainer {
                 .register(pick(life.age.clone(), at))
                 .register(pick(life.importance.clone(), at))
                 .register(pick(life.trained.clone(), at));
+        }
+        if let Some(o) = self.optim.as_ref().filter(|_| with_moments) {
+            let groups = [
+                ("transforms", moment_rows(&o.transforms)),
+                ("SH", moment_rows(&o.sh_coeffs)),
+                ("opacity", moment_rows(&o.opacities)),
+            ];
+            for (name, rows) in groups {
+                if let Some((m1, m2)) = rows {
+                    assert!(m1 == n && m2 == n, "{name} moments ({m1}, {m2} rows) out of step with {n} splats");
+                }
+            }
         }
         let moments = self.optim.as_ref().filter(|_| with_moments).and_then(|o| {
             Some([
@@ -287,11 +300,16 @@ impl SplatTrainer {
     }
 }
 
-/// `[N, a, b]` as `[N, 1]`: one value per row, the mean over the trailing dims (the value itself when they are 1).
+/// The row counts of `state`'s first and second moment; `None` before the first step.
+fn moment_rows<const D: usize>(state: &AdamState<D>) -> Option<(usize, usize)> {
+    state.momentum.as_ref().map(|m| (m.moment_1.dims()[0], m.moment_2.dims()[0]))
+}
+
+/// The reduced SH second moment `[N, 1, 1]` as `[N, 1]`.
 fn per_row(t: Tensor<3>) -> Tensor<2> {
     let [n, a, b] = t.dims();
-    let flat = t.reshape([n, a * b]);
-    if a * b == 1 { flat } else { flat.mean_dim(1) }
+    debug_assert_eq!((a, b), (1, 1), "the SH second moment is reduced per row");
+    t.reshape([n, 1])
 }
 
 fn index_tensor(rows: &[usize], device: &burn::tensor::Device) -> Tensor<1, Int> {

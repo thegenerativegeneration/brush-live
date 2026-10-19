@@ -98,10 +98,13 @@ impl<const D: usize> AdamState<D> {
     }
 }
 
+/// Adam's first-moment decay per step.
+pub const BETA_1: f32 = 0.9;
+
 impl AdamScaled {
     pub fn new(epsilon: f32) -> Self {
         Self {
-            beta_1: 0.9,
+            beta_1: BETA_1,
             beta_2: 0.999,
             epsilon,
         }
@@ -290,6 +293,44 @@ mod tests {
             .expect("f32")[0];
         let bound = MAX_NORMALIZED_STEP * lr as f32;
         assert!(moved <= bound * 1.001, "moved {moved}, bound {bound}");
+    }
+
+    /// Task 17b repro of a burn fusion bug: tensors reshaped and then row-selected in one transaction, as the
+    /// trainer's row read first registered the moments, read the reduced second moment back shifted by one row, the
+    /// last value taken from another tensor. Fails as of 2026-10-16 (alone, in a fresh process); one reduce and select
+    /// on its own reads back correctly. The row read now selects before it reshapes.
+    #[tokio::test]
+    #[ignore = "fails: burn fusion row shift (repro)"]
+    async fn a_reduced_second_moment_selects_its_own_rows() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let adam = AdamScaled::new(1e-15);
+        let mut state = AdamState::<3>::new(None, true);
+        let n: usize = 75;
+        let grad = |k: f32| {
+            Tensor::<1>::from_floats((0..n * 12).map(|i| ((i * 31) % 17) as f32 * k - 0.5 * k).collect::<Vec<_>>().as_slice(), &device)
+                .reshape([n, 4, 3])
+        };
+        let mut param = Tensor::<3>::zeros([n, 4, 3], &device);
+        for k in [1e-3, 2e-3] {
+            param = adam.step(1e-2, param, &grad(k), None, &mut state, None);
+        }
+        let m = state.momentum.expect("stepped");
+        let full: Vec<f32> = m.moment_2.clone().into_data_async().await.unwrap().try_to_vec().unwrap();
+        let idx: Vec<i32> = (0..n as i32).filter(|i| i % 3 == 0).collect();
+        let at = Tensor::<1, Int>::from_data(TensorData::new(idx.clone(), [idx.len()]), &device);
+        // As the trainer's row read registered them: reshaped, then selected, in one transaction.
+        let tx = burn::tensor::Transaction::default()
+            .register(param.flatten::<2>(1, 2).select(0, at.clone()))
+            .register(m.moment_1.flatten::<2>(1, 2).select(0, at.clone()))
+            .register(m.moment_2.flatten::<2>(1, 2).mean_dim(1).select(0, at.clone()))
+            .register(full_like_rows(n, &device).unsqueeze_dim::<2>(1).select(0, at));
+        let picked: Vec<f32> = tx.execute_async().await.unwrap().remove(2).try_to_vec().unwrap();
+        let want: Vec<f32> = idx.iter().map(|&i| full[i as usize]).collect();
+        assert_eq!(picked, want);
+    }
+
+    fn full_like_rows(n: usize, device: &Device) -> Tensor<1> {
+        Tensor::<1>::from_floats((0..n).map(|i| i as f32).collect::<Vec<_>>().as_slice(), device)
     }
 
     async fn bits<const D: usize>(t: Tensor<D>) -> Vec<u32> {

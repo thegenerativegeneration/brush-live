@@ -186,3 +186,20 @@ fn trained_flags_and_moments_are_row_columns() {
     assert_eq!(&mm.transforms_m1[..20], &good.moments.as_ref().unwrap().transforms_m1[..]);
     assert!(mm.transforms_m1[20..].iter().chain(&mm.sh_m1[24..]).chain(&mm.sh_m2[2..]).all(|&v| v == 0.0));
 }
+
+/// A row parked for k steps comes back with its first moments scaled by β1^k, as k steps without a gradient would leave
+/// them; second moments stay.
+#[test]
+fn decay_first_scales_only_the_first_moments() {
+    let m = moments(2, 4, 1.0);
+    let mut d = m.clone();
+    d.decay_first(3);
+    let f = 0.9f32.powi(3);
+    for ((name, got, _), (_, was, _)) in d.columns(4).iter().zip(m.columns(4)) {
+        let scale = if name.ends_with("m1") { f } else { 1.0 };
+        assert!(got.iter().zip(was).all(|(g, w)| (g - w * scale).abs() <= 1e-6 * w.abs()), "{name}");
+    }
+    let mut z = m.clone();
+    z.decay_first(0);
+    assert_eq!(z, m);
+}

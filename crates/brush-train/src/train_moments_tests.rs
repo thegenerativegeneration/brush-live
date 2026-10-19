@@ -6,6 +6,7 @@ use super::tests::{batch, trained_on, trained_with};
 use crate::rows::{RowMoments, SplatRows};
 use brush_render::gaussian_splats::{SplatRenderMode, inverse_sigmoid};
 use burn::module::Module;
+use clap::Parser;
 use rand::SeedableRng;
 
 /// A copy of `t` that steps on independently. Its RNG starts afresh (`StdRng` cannot be copied), which a step with
@@ -134,7 +135,7 @@ async fn restored_rows_step_like_their_unparked_twin() {
     let zero = updates(&zeroed, &step_once(&mut control, zero_restored).await.select(&tail));
     let (got, zero) = (deviation(&got, &want), deviation(&zero, &want));
     eprintln!("restored {got:?}\nzero moments {zero:?}");
-    assert!(got.iter().all(|(_, d)| *d < 0.02), "restored rows stepped unlike their twin: {got:?}");
+    assert!(got.iter().all(|(_, d)| *d < 0.01), "restored rows stepped unlike their twin: {got:?}");
     assert!(zero.iter().any(|(_, d)| *d > 0.2), "zero moments step like the twin, the test proves nothing: {zero:?}");
 }
 
@@ -164,4 +165,39 @@ async fn appended_rows_keep_their_moments_and_trained_flags() {
     let back = all.select(&[n, n + 1, n + 2]);
     assert_eq!(back.moments, Some(RowMoments::zeros(3, rows.sh_coeffs_per_channel as usize)));
     assert_eq!(back.trained, vec![true; 3]);
+}
+
+/// The engine's SH second moment is reduced on the compact rows and gathered back to the splats every step
+/// (`burn_glue`): after the first step, which leaves m1 = 0.1·g and m2 = 0.001·mean(g²), every row's second moment is
+/// 0.1·mean(m1²) of its own first moment, not a neighbour's.
+#[tokio::test]
+async fn the_first_step_reduces_each_rows_own_sh_gradient() {
+    let device: Device = brush_cube::test_helpers::test_device().await.into();
+    let device = device.autodiff();
+    let n = 60;
+    let base = Splats::from_raw(
+        (0..n).flat_map(|i| [i as f32 * 0.01, (i % 7) as f32 * 0.01, 2.0 + i as f32 * 0.003]).collect(),
+        [1.0, 0.0, 0.0, 0.0].repeat(n),
+        vec![-3.0; n * 3],
+        (0..n * 12).map(|i| ((i * 7919) % 13) as f32 * 0.05 - 0.3).collect(),
+        (0..n).map(|i| inverse_sigmoid(0.2 + 0.01 * i as f32)).collect(),
+        SplatRenderMode::Default,
+        &device,
+    );
+    let config = TrainConfig::parse_from(["test"]);
+    let bounds = get_splat_bounds(base.clone(), BOUND_PERCENTILE).await;
+    let mut trainer = SplatTrainer::new(&config, &device, bounds);
+    let (s, _) = trainer.step(batch(), base.train()).await;
+    let rows = trainer.read_rows(&s.valid()).await;
+    assert_eq!(rows.sh_coeffs_per_channel, 4);
+    let m = rows.moments.expect("a step ran");
+    let mut seen = 0;
+    for i in 0..n {
+        let m1 = &m.sh_m1[i * 12..(i + 1) * 12];
+        let want = 0.1 * m1.iter().map(|v| v * v).sum::<f32>() / 12.0;
+        let got = m.sh_m2[i];
+        assert!((got - want).abs() <= 1e-4 * want.max(got) + 1e-37, "row {i}: m2 {got}, 0.1·mean(m1²) {want}");
+        seen += usize::from(want > 0.0);
+    }
+    assert!(seen > n / 2, "{seen} of {n} rows had an SH gradient: the test proves little");
 }

@@ -167,7 +167,10 @@ fn truncated_or_foreign_files_are_errors() {
 /// Every prefix is an error, never a panic, and so are unknown versions, unknown flags and trailing bytes.
 #[test]
 fn every_prefix_and_every_unknown_header_is_an_error() {
-    let bytes = encode_tile(&tile(rows(3, Vec3::ZERO)));
+    let mut r = rows(3, Vec3::ZERO);
+    r.moments = Some(wide_moments(3, 4));
+    r.trained = vec![true, false, true];
+    let bytes = encode_tile(&tile(r));
     for end in 0..bytes.len() {
         let err = decode_tile(&bytes[..end]).unwrap_err();
         assert_eq!(
@@ -191,6 +194,13 @@ fn every_prefix_and_every_unknown_header_is_an_error() {
     let mut trailing = bytes.clone();
     trailing.push(0);
     assert!(decode_tile(&trailing).is_err());
+    // The trained column follows the header, one pose and 66 bytes per row of degree-1 rows with a floor.
+    let trained_at = HEADER_BYTES + 32 + 3 * 66;
+    assert_eq!(&bytes[trained_at..trained_at + 3], &[1, 0, 1]);
+    let mut two = bytes.clone();
+    two[trained_at + 1] = 2;
+    let err = decode_tile(&two).unwrap_err();
+    assert!(err.to_string().contains("trained flag 2"), "{err}");
 }
 
 #[test]

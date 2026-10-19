@@ -323,6 +323,24 @@ async fn a_restored_tile_equals_the_parked_one() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// Task 17b: a tile restored k steps after its park comes back with its first moments scaled by β1^k (what k steps
+/// without a gradient leave of them), its second moments as stored.
+#[tokio::test]
+async fn a_restore_decays_the_first_moments_by_the_steps_parked() {
+    let (mut live, dir, key, taken) = one_tile_parked("restore-decay", area_config(2.0)).await;
+    live.iter += 7;
+    let b = restore_one(&mut live, key, taken.len()).await.moments.expect("restored moments");
+    let t = taken.moments.expect("parked moments");
+    let f = 0.9f32.powi(7);
+    for ((name, got, _), (_, was, _)) in b.columns(4).iter().zip(t.columns(4)) {
+        let scale = if name.ends_with("m1") { f } else { 1.0 };
+        for (x, y) in got.iter().zip(was) {
+            assert!((x - y * scale).abs() <= (y * scale).abs() / 128.0, "{name}: {x} vs {y}·{scale}");
+        }
+    }
+    std::fs::remove_dir_all(dir).ok();
+}
+
 /// A tile parked for more than 10 seen windows comes back unscored (importance `+inf`); a shorter park keeps it.
 #[tokio::test]
 async fn a_long_park_resets_the_importance() {
