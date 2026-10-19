@@ -1,7 +1,7 @@
 //! The splat budget of area training in the live model:
-//! - Per tile (`area_tile_max_fraction` of `max_splats`, from the session's first park on, [`LiveModel::tile_cap`]):
-//!   seeds into a full tile are dropped; at a refine the trainer gets a row budget ([`crate::area::row_budget`]) under
-//!   which a full tile's rows do not densify and a tile over the cap evicts its
+//! - Per tile (`area_tile_max_fraction` of `max_splats`): seeds into a full tile are dropped; at a refine the trainer
+//!   gets a row budget
+//!   ([`crate::area::row_budget`]) under which a full tile's rows do not densify and a tile over the cap evicts its
 //!   least important rows down to it.
 //! - At the total cap (`max_splats`): before a refine, the tiles the walker has left park first, then far tiles
 //!   neither active nor near nor in view ([`LiveModel::park_for_room`]). While rows outside the active tiles are
@@ -72,22 +72,11 @@ impl LiveModel {
         }
     }
 
-    /// The per-tile cap in effect: `area_tile_max_fraction` of `max_splats` once a tile parked in this session (or
-    /// from the start when area training engages from the first keyframe), else 0. A session that never parks
-    /// trains its tiles without a cap; once parking starts, the cap keeps one area from taking the budget of the
-    /// others.
-    pub(super) fn tile_cap(&self) -> u32 {
-        match &self.area {
-            Some(a) if a.tile_capped => self.config.area_tile_cap(),
-            _ => 0,
-        }
-    }
-
     /// Per seed (flat xyz), whether a tile has room for it under the per-tile cap, counting the registry's rows,
     /// the rows seeded since its last readback and the seeds before it ([`keep_under_tile_cap`]); the seeds turned
-    /// away are counted. `None` without area training, before it engages or without a per-tile cap in effect.
+    /// away are counted. `None` without area training, before it engages or without a per-tile cap.
     pub(super) fn tile_cap_keep(&mut self, seed_means: &[f32]) -> Option<Vec<bool>> {
-        let cap = self.tile_cap();
+        let cap = self.config.area_tile_cap();
         let area = self.area.as_mut().filter(|a| a.engaged && cap > 0)?;
         let counts = tile_counts(&area.registry, &area.fresh);
         let mut keep = vec![true; seed_means.len() / 3];
@@ -102,7 +91,7 @@ impl LiveModel {
     /// training engages ([`super::area_engage`]); no-op without area training.
     pub(super) fn set_row_budget(&mut self, means: &[f32]) {
         let holds = self.holds_inactive();
-        let cap = self.tile_cap();
+        let cap = self.config.area_tile_cap();
         let (Some(area), Some(trainer)) = (self.area.as_mut(), self.trainer.as_mut()) else {
             return;
         };

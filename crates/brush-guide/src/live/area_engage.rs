@@ -3,7 +3,6 @@
 //! on until the session resets. Until then the engine trains as with area training off: every view trains and floors
 //! the splats, every view's camera votes in the score round, nothing is held or parked, and seeds, growth and
 //! eviction see no per-tile cap, row budget or quota. The active set is still ranked and reported.
-//! Once engaged, the per-tile cap still waits for the session's first park ([`LiveModel::tile_cap`]).
 
 use super::LiveModel;
 

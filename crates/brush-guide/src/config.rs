@@ -188,15 +188,13 @@ pub struct GuideConfig {
     pub area_freeze_at: f32,
     /// Most splats one tile holds, as a share of `max_splats` (0.4: 10k of 25k): seeds into a full tile are dropped,
     /// its rows do not densify, and a tile over it evicts its least important rows down to it at the next refine. A
-    /// tile still filling up can overshoot by one refine's growth before that. Applies from the session's first park
-    /// on (from the start with `area_engage_on_leave` false). 0: no per-tile cap (held rows no step ever trained stay
-    /// eviction victims at the total cap either way).
+    /// tile still filling up can overshoot by one refine's growth before that. 0: no per-tile cap (held rows no step
+    /// ever trained stay eviction victims at the total cap either way).
     pub area_tile_max_fraction: f32,
     /// Area training engages once the walker has left a tile (a visited tile lies beyond `area_radius_m` plus
     /// `area_hysteresis_m`) or a tile parked, and stays on until the session resets. Until then the engine trains as
     /// with area training off: every view trains, nothing is held or parked, and no per-tile cap, row budget or
-    /// eviction quota applies (the active set is still ranked and reported). false: engaged, and the per-tile cap in
-    /// effect, from the first keyframe.
+    /// eviction quota applies (the active set is still ranked and reported). false: engaged from the first keyframe.
     pub area_engage_on_leave: bool,
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.

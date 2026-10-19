@@ -101,7 +101,7 @@ async fn until_a_tile_is_left_the_engine_trains_as_with_area_off() {
 
 /// At the cap, keyframe 1 (5.5 m on) leaves the origin's tiles: area training engages within the keyframe (the
 /// loaders are built once, with its view in), the rows outside the active tiles are held, the active views train,
-/// the next refine gets a row budget. Keyframe 3 comes back
+/// the next refine gets a row budget and seeds meet the per-tile cap. Keyframe 3 comes back
 /// (2.5 m: nothing left within radius 2 + hysteresis 3), yet area training stays on. A reset turns it off again.
 #[tokio::test]
 async fn a_keyframe_that_leaves_a_tile_engages_area_training_for_good() {
@@ -129,13 +129,14 @@ async fn a_keyframe_that_leaves_a_tile_engages_area_training_for_good() {
     assert_eq!(live.all_loader_builds - builds, 1);
     train(&mut live, 6).await;
     assert!(budgeted(&live), "no row budget once engaged");
+    assert!(caps_tiles(&mut live), "no per-tile cap once engaged");
     facing_wall(&mut live, &dir, 2, 5.6).await;
 
     facing_wall(&mut live, &dir, 3, 2.5).await;
     assert!(live.area.as_ref().unwrap().registry.left_keys(Vec3::new(2.5, 0.0, 5.0)).is_empty());
     train(&mut live, 6).await;
     assert_eq!(engaged_at(&live), 2, "area training switched back");
-    assert!(budgeted(&live));
+    assert!(budgeted(&live) && caps_tiles(&mut live));
 
     live.reset();
     assert_eq!(engaged_at(&live), 0);
@@ -146,8 +147,8 @@ async fn a_keyframe_that_leaves_a_tile_engages_area_training_for_good() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// A pose update that moves the only keyframe 6 m away leaves the tiles it visited: area training engages, so at
-/// the cap the next refine is budgeted.
+/// A pose update that moves the only keyframe 6 m away leaves the tiles it visited: area training engages and the
+/// views are recomputed.
 #[tokio::test]
 async fn a_pose_update_that_leaves_a_tile_engages_area_training() {
     let dir = tmp("engage-poses");
@@ -159,84 +160,7 @@ async fn a_pose_update_that_leaves_a_tile_engages_area_training() {
     let (h, _) = crate::live::area::tests::keyframe_toward(0, Vec3::new(6.0, 0.0, 5.0), Vec3::new(6.0, 0.0, 0.0));
     live.update_poses(&[crate::live::ViewPose::from_arkit(0, &h.pose).unwrap()]);
     assert_eq!(engaged_at(&live), 1);
-    at_the_cap(&mut live);
     train(&mut live, 6).await;
-    assert!(budgeted(&live), "engaged at the cap: no row budget");
-    std::fs::remove_dir_all(dir).ok();
-}
-
-/// Whether the row budget [`LiveModel::set_row_budget`] hands the trainer for the resident rows caps any tile. The
-/// budget is taken back afterwards.
-async fn caps_tile_rows(live: &mut LiveModel) -> bool {
-    let splats = live.splats().unwrap().clone();
-    let means: Vec<f32> = splats.means().into_data_async().await.unwrap().try_to_vec().unwrap();
-    live.set_row_budget(&means);
-    let budget = live.trainer.as_ref().unwrap().row_budget();
-    let capped = budget.is_some_and(|b| b.groups.iter().any(|g| g.max_rows != u32::MAX));
-    live.trainer.as_mut().unwrap().set_row_budget(None);
-    live.area.as_mut().unwrap().budget_keys.clear();
-    capped
-}
-
-fn tile_cap_from(live: &LiveModel) -> u32 {
-    live.area_report().unwrap().counters.tile_cap_from_keyframe
-}
-
-/// Keyframe 1 (5.5 m on) engages area training at the cap with parking off: rows are held and budgeted, but no tile
-/// is capped (seeds, growth, shrink) and the report shows no cap. Parking on, the first park turns the per-tile cap on
-/// at that keyframe count; it stays on when the walker comes back, and a reset turns it off again.
-#[tokio::test]
-async fn the_per_tile_cap_applies_from_the_first_park_until_reset() {
-    let dir = tmp("engage-tile-cap");
-    let mut live = LiveModel::new(engage_config(2.0, 3.0), device().await);
-    live.enable_area(dir.join("tiles"));
-    facing_wall(&mut live, &dir, 0, 0.0).await;
-    train(&mut live, 6).await;
-    at_the_cap(&mut live);
-    live.area.as_mut().unwrap().parking_off = true;
-    facing_wall(&mut live, &dir, 1, 5.5).await;
-    assert_eq!(engaged_at(&live), 2);
-    train(&mut live, 12).await;
-    let r = live.area_report().unwrap();
-    assert_eq!((r.counters.parks, r.counters.seeds_over_tile_cap, r.counters.tile_cap_from_keyframe), (0, 0, 0));
-    assert_eq!(r.tile_cap, 0, "the report shows the cap in effect");
-    assert!(budgeted(&live), "engaged at the cap: the held rows' fair shares still budget the refine");
-    assert!(!caps_tiles(&mut live), "seeds meet a per-tile cap before any park");
-    assert!(!caps_tile_rows(&mut live).await, "rows meet a per-tile cap before any park");
-
-    live.area.as_mut().unwrap().parking_off = false;
-    let mut steps = 0;
-    while live.area_report().unwrap().counters.parks == 0 && steps < 40 {
-        train(&mut live, 1).await;
-        steps += 1;
-    }
-    assert!(live.area_report().unwrap().counters.parks > 0, "nothing parked");
-    assert_eq!(tile_cap_from(&live), 2);
-    assert_eq!(live.area_report().unwrap().tile_cap, live.config.area_tile_cap());
-    assert!(caps_tiles(&mut live) && caps_tile_rows(&mut live).await, "no per-tile cap after a park");
-
-    facing_wall(&mut live, &dir, 2, 2.5).await;
-    train(&mut live, 6).await;
-    assert_eq!(tile_cap_from(&live), 2);
-    assert!(caps_tiles(&mut live) && caps_tile_rows(&mut live).await, "the per-tile cap switched back");
-
-    live.reset();
-    facing_wall(&mut live, &dir, 10, 0.0).await;
-    assert_eq!(tile_cap_from(&live), 0);
-    assert_eq!(live.area_report().unwrap().tile_cap, 0);
-    assert!(!caps_tiles(&mut live));
-    std::fs::remove_dir_all(dir).ok();
-}
-
-/// Engaged from the first keyframe (`area_engage_on_leave` false), the per-tile cap applies from the first keyframe.
-#[tokio::test]
-async fn engaged_from_the_start_the_per_tile_cap_applies_from_the_start() {
-    let dir = tmp("engage-tile-cap-start");
-    let config = GuideConfig { area_engage_on_leave: false, ..engage_config(2.0, 3.0) };
-    let mut live = LiveModel::new(config, device().await);
-    live.enable_area(dir.join("tiles"));
-    facing_wall(&mut live, &dir, 0, 0.0).await;
-    assert!(caps_tiles(&mut live) && caps_tile_rows(&mut live).await);
-    assert_eq!(live.area_report().unwrap().tile_cap, live.config.area_tile_cap());
+    assert!(budgeted(&live));
     std::fs::remove_dir_all(dir).ok();
 }
