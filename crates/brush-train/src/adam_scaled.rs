@@ -295,7 +295,7 @@ mod tests {
         assert!(moved <= bound * 1.001, "moved {moved}, bound {bound}");
     }
 
-    /// Task 17b repro of a burn fusion bug: tensors reshaped and then row-selected in one transaction, as the
+    /// Repro of a burn fusion bug (issue #78): tensors reshaped and then row-selected in one transaction, as the
     /// trainer's row read first registered the moments, read the reduced second moment back shifted by one row, the
     /// last value taken from another tensor. Fails as of 2026-10-16 (alone, in a fresh process); one reduce and select
     /// on its own reads back correctly. The row read now selects before it reshapes.

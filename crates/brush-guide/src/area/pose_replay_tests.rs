@@ -62,7 +62,7 @@ fn a_splat_follows_its_view_rigidly() {
     assert!(quat(&rows).dot(new.1 * old.1.inverse()).abs() > 1.0 - 1e-5);
 }
 
-/// Review Focus 4.
+/// Two corrections recorded while a tile is parked compose: the restored row lands at the latest pose.
 #[test]
 fn two_corrections_while_parked_compose_to_the_latest_pose() {
     let p0 = (Vec3::new(1.0, 0.0, 2.0), Quat::from_rotation_y(0.1));
@@ -131,7 +131,7 @@ fn group(origin: Option<u32>, n: usize) -> SplatRows {
     ])
 }
 
-/// User decision D1 and Review Focus 5: one view carrying the tile far is consistent; two views disagreeing by
+/// One view carrying the tile far is consistent; two views disagreeing by
 /// more than the limit are not; a stray view with a few rows does not decide.
 #[test]
 fn one_view_moving_far_is_consistent_two_views_disagreeing_are_not() {

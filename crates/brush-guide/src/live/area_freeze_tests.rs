@@ -1,4 +1,4 @@
-//! Task 10b: the rows of a tile the walker has left stay as they were while resident; tiles never visited and
+//! The rows of a tile the walker has left stay as they were while resident; tiles never visited and
 //! restored tiles train; the trainer's mask stays row-aligned through parks, restores, appends and refines.
 
 use super::*;

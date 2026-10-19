@@ -1,4 +1,4 @@
-//! Task 17c: the per-tile cap (seeds into a full tile dropped, a full tile does not grow, a tile over the cap shrinks
+//! The per-tile cap (seeds into a full tile dropped, a full tile does not grow, a tile over the cap shrinks
 //! to it), room at the total cap (left tiles, then far tiles neither active nor near, park before an eviction; the
 //! eviction keeps each active tile's fair share), and `area_freeze` inactive_at_cap.
 

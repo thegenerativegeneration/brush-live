@@ -1,4 +1,4 @@
-//! Task 17a: with `area_freeze` inactive only the active tiles (the tiles near the newest keyframe and those it
+//! With `area_freeze` inactive only the active tiles (the tiles near the newest keyframe and those it
 //! looks at) train, the training views are the keyframes that see one, and keyframes seed only into active tiles and
 //! new ground. The scenes put the camera 5 m from a wall at z = 0 to 1 that spans 1 m tiles x = -4 to 2, so no wall
 //! tile is near (2.5 m) and the two ranked tiles decide.
@@ -161,7 +161,7 @@ async fn without_an_active_box_the_radius_views_train() {
 }
 
 /// Keyframe 1 faces the wall's right end and the ground beyond it with one ranked tile: its seeds in tiles that hold
-/// rows outside the active set are dropped, those on new ground land. With `area_freeze` left (Task 10b) seeds land
+/// rows outside the active set are dropped, those on new ground land. With `area_freeze` left seeds land
 /// in tiles with rows too, so the scene does seed there.
 #[tokio::test]
 async fn seeds_outside_the_active_tiles_are_dropped_but_new_ground_seeds() {

@@ -1,4 +1,4 @@
-//! Task 17b: rows taken out of the trainer carry their Adam moments and trained flags, and rows appended back resume
+//! Rows taken out of the trainer carry their Adam moments and trained flags, and rows appended back resume
 //! with them.
 
 use super::super::*;

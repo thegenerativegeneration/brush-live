@@ -1,4 +1,4 @@
-//! Task 17a (Task 14b review): one `restore_tiles` call that brings back many tiles appends them one after another
+//! One `restore_tiles` call that brings back many tiles appends them one after another
 //! onto the same splats; the model must hold each tile's rows exactly as its file does.
 
 use super::*;

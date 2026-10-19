@@ -1,4 +1,4 @@
-//! Task 14b: the rows held still in left tiles keep at most `area_held_fraction` of `max_splats`; after a refine the
+//! The rows held still in left tiles keep at most `area_held_fraction` of `max_splats`; after a refine the
 //! farthest held tiles park, even in view, until the rest fit, and they park as they were held.
 
 use super::tests::{by_row, rows_where};
@@ -92,7 +92,7 @@ async fn area_off_has_no_cap() {
     train(&mut live, 10).await;
     assert!(live.area_report().is_none());
     assert!(live.trainer.as_ref().unwrap().frozen_rows().is_none());
-    assert_eq!(std::fs::read_dir(dir.join("tiles")).unwrap().count(), 0, "a tile parked");
+    assert!(!dir.join("tiles").exists(), "a tile parked");
     std::fs::remove_dir_all(dir).ok();
 }
 

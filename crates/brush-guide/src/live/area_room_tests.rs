@@ -1,4 +1,4 @@
-//! Task 10b on restores: left tiles make room for a restore, a deferral streak notes its shortfall once and ends
+//! Restores: left tiles make room for a restore, a deferral streak notes its shortfall once and ends
 //! with a keyframe that does not defer the tile again; the seeds re-sort after a seeds-pass restore drops a tile; a
 //! new restore empties the junction's batch cache.
 
@@ -98,7 +98,7 @@ async fn a_deferral_streak_notes_its_shortfall_once() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Task 10 follow-up 1: when a seeds-pass restore drops the tile the seeds hit (its file is unreadable), the seeds
+/// When a seeds-pass restore drops the tile the seeds hit (its file is unreadable), the seeds
 /// are sorted again against the registry as it is now, so the keyframe's rows land in the dropped tile's ground (a
 /// tile the walker has not left).
 #[tokio::test]
@@ -123,7 +123,7 @@ async fn seeds_land_where_a_seeds_pass_restore_dropped_the_tile() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Task 10 follow-up 4: a restore while a junction runs starts it over with an empty batch cache.
+/// A restore while a junction runs starts it over with an empty batch cache.
 #[tokio::test]
 async fn a_new_restore_empties_the_junction_cache() {
     let (mut live, dir) = parked_origin("junction-restart").await;

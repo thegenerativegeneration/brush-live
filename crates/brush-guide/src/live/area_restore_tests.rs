@@ -27,7 +27,7 @@ pub(in crate::live) async fn parked_origin(name: &str) -> (LiveModel, std::path:
     parked_origin_with(name, area_config(2.0)).await
 }
 
-/// No resident row lies in a parked tile (Review Focus 2).
+/// No resident row lies in a parked tile.
 pub(in crate::live) async fn assert_no_resident_row_in_parked_tiles(live: &LiveModel) {
     let parked = live.area.as_ref().unwrap().registry.parked_keys();
     let means: Vec<f32> = live.splats().unwrap().means().into_data_async().await.unwrap().try_to_vec().unwrap();
@@ -64,7 +64,7 @@ async fn coming_back_restores_by_distance_and_starts_a_junction() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Radius 2 m and hysteresis 5 m: from 6 m the origin tiles are beyond the radius but not left (Task 10b: seeds on
+/// Radius 2 m and hysteresis 5 m: from 6 m the origin tiles are beyond the radius but not left (seeds in
 /// left tiles are dropped).
 pub(in crate::live) fn not_left_from_6m() -> GuideConfig {
     GuideConfig { area_hysteresis_m: 5.0, ..area_config(2.0) }
@@ -88,7 +88,7 @@ async fn seeds_in_a_near_parked_tile_restore_it_before_seeding() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// User decision D2: a parked tile seen from beyond radius + far_seed stays parked and gets no seeds.
+/// A parked tile seen from beyond radius + far_seed stays parked and gets no seeds.
 #[tokio::test]
 async fn far_seeds_leave_a_parked_tile_parked() {
     let config = GuideConfig { area_far_seed_m: 1.0, ..not_left_from_6m() };
@@ -101,7 +101,7 @@ async fn far_seeds_leave_a_parked_tile_parked() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Review Focus 2 / M3: seeds below the restore threshold that land in a parked tile are dropped, not appended.
+/// Seeds below the restore threshold that land in a parked tile are dropped, not appended.
 #[tokio::test]
 async fn few_seeds_in_a_parked_tile_are_dropped_not_appended() {
     let config = GuideConfig { area_restore_min_seeds: 1_000_000, ..not_left_from_6m() };
@@ -122,7 +122,7 @@ pub(in crate::live) async fn drift_rows(live: &mut LiveModel, means: Vec<f32>) {
     live.splats = Some(live.trainer.as_mut().unwrap().append_rows(s, &rows));
 }
 
-/// Review Focus 2: resident rows that drift into a parked tile within radius + hysteresis bring the tile back once,
+/// Resident rows that drift into a parked tile within radius + hysteresis bring the tile back once,
 /// not a second copy. (Beyond that they join its file: `area_park_tests`.)
 #[tokio::test]
 async fn resident_rows_in_a_near_parked_tile_restore_it_once() {
@@ -173,7 +173,7 @@ async fn a_pose_correction_while_parked_moves_the_restored_splats() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// User decision D1 and Review Focus 5: a loop closure that moves the parked tile's only view by 2 m is applied
+/// A loop closure that moves the parked tile's only view by 2 m is applied
 /// on restore, not treated as stale. Two corrections while parked compose: the restored rows move once, by both.
 #[tokio::test]
 async fn a_large_consistent_correction_is_applied_on_restore() {
@@ -200,7 +200,7 @@ async fn a_large_consistent_correction_is_applied_on_restore() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// User decision D1: views that disagree by more than the limit about where the tile is drop it.
+/// Views that disagree by more than the limit about where the tile is drop it.
 #[tokio::test]
 async fn views_disagreeing_about_a_parked_tile_drop_it() {
     use crate::area::park_file::{SlotPose, read_tile, write_tile};
@@ -236,7 +236,7 @@ async fn views_disagreeing_about_a_parked_tile_drop_it() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Review Focus 4: a restore at the cap keeps the trainer within `max_splats` and loses no row to eviction:
+/// A restore at the cap keeps the trainer within `max_splats` and loses no row to eviction:
 /// the restore is deferred (or room is made by parking unseen far tiles), never paid for by evicting.
 #[tokio::test]
 async fn a_restore_at_the_cap_stays_within_the_budget() {
@@ -284,7 +284,7 @@ async fn restore_one(live: &mut LiveModel, key: TileKey, n: usize) -> SplatRows 
 
 /// The user requirement, read before any refine touches them: a parked and restored tile comes back as it was
 /// taken, means exact, rotations normalised and the other columns within fp16, with its origins, ages, importance,
-/// Mip floor and trained flags, and its Adam moments within bf16 (Task 17b).
+/// Mip floor and trained flags, and its Adam moments within bf16.
 #[tokio::test]
 async fn a_restored_tile_equals_the_parked_one() {
     let (mut live, dir, key, taken) = one_tile_parked("restore-equal", area_config(2.0)).await;
@@ -323,7 +323,7 @@ async fn a_restored_tile_equals_the_parked_one() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Task 17b: a tile restored k steps after its park comes back with its first moments scaled by β1^k (what k steps
+/// A tile restored k steps after its park comes back with its first moments scaled by β1^k (what k steps
 /// without a gradient leave of them), its second moments as stored.
 #[tokio::test]
 async fn a_restore_decays_the_first_moments_by_the_steps_parked() {
@@ -443,7 +443,7 @@ async fn seeds_never_land_in_a_tile_parked_for_room() {
 
 /// Review I3: a restore at the cap is deferred without reading the tile file, logged once per streak, and comes
 /// back within a few keyframes once a refine makes room (here by parking the area the walker left). The area at x = 20
-/// counts as restored at keyframe 2, so for one keyframe it cannot be parked for room (left tiles could be, Task 10b).
+/// counts as restored at keyframe 2, so for one keyframe it cannot be parked for room (left tiles could be).
 #[tokio::test]
 async fn a_deferred_restore_comes_back_once_room_is_made() {
     let config = GuideConfig { area_min_resident_keyframes: 2, ..area_config(2.0) };

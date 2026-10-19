@@ -51,7 +51,7 @@ pub(in crate::live) fn keyframe_toward(id: u64, pos: Vec3, target: Vec3) -> (Key
 
 /// Small tiles and radius, no hysteresis or windows, a refine every 5 steps, and the all-views loader rebuilt on
 /// every added area view (the default waits for 10). Left tiles are held and the views within the radius train
-/// (`area_freeze` left, Tasks 8–14b); [`active_config`] trains the active tiles instead. Area training is engaged
+/// (`area_freeze` left); [`active_config`] trains the active tiles instead. Area training is engaged
 /// from the first keyframe (`area_engage_on_leave` false).
 pub(in crate::live) fn area_config(radius: f32) -> GuideConfig {
     GuideConfig {
@@ -134,6 +134,26 @@ async fn area_off_trains_every_view() {
     }
     assert!(live.area.is_none());
     assert_eq!(live.training_views(), vec![0, 1]);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// With radius 0 `enable_area` and `reset` leave the disk alone: no tiles directory is created, an existing one keeps
+/// its files.
+#[tokio::test]
+async fn area_off_leaves_the_tiles_dir_untouched() {
+    let dir = tmp("off-disk");
+    std::fs::remove_dir_all(&dir).ok();
+    let mut live = LiveModel::new(area_config(0.0), device().await);
+    live.enable_area(dir.join("tiles"));
+    live.reset();
+    assert!(!dir.join("tiles").exists(), "area off created a tiles directory");
+    let kept = dir.join("kept");
+    std::fs::create_dir_all(&kept).unwrap();
+    std::fs::write(kept.join("0_0.bin"), b"other").unwrap();
+    live.enable_area(kept.clone());
+    live.reset();
+    assert!(live.area.is_none());
+    assert_eq!(std::fs::read_dir(&kept).unwrap().count(), 1, "area off emptied a directory");
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -298,7 +318,7 @@ async fn the_area_always_holds_the_newest_view() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Review Focus 1: a tile file left from an earlier capture in a reused session directory is wiped, and so is
+/// A tile file left from an earlier capture in a reused session directory is wiped, and so is
 /// everything on reset.
 #[tokio::test]
 async fn enable_area_wipes_stale_tiles_and_reset_wipes_again() {

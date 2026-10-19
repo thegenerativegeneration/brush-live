@@ -130,7 +130,7 @@ async fn take_then_append_keeps_every_row_and_training_runs() {
     assert!(s.num_splats() > 0);
 }
 
-/// Review Focus 3.
+/// Taking every row is refused (the trainer keeps them all); taking none returns nothing.
 #[tokio::test]
 async fn taking_every_row_is_refused() {
     let (mut trainer, s) = trained(20).await;

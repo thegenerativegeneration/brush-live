@@ -168,10 +168,14 @@ pub struct GuideConfig {
     pub area_junction_steps: u32,
     /// Largest disagreement, metres, between a restored tile and the fresh geometry that still restores it as is.
     pub area_restore_inconsistency_m: f32,
-    /// Seeds in a parked tile are restored only when the tile lies within `area_radius_m` plus this many metres.
+    /// Seeds in a parked tile are restored only when the tile lies within `area_radius_m` plus this many metres. Only
+    /// tiles the walker never visited (parked for room) can use the band beyond `area_hysteresis_m`: seeds in a
+    /// visited tile farther than `area_radius_m` + `area_hysteresis_m` (a left tile) are dropped, so a visited tile
+    /// comes back only within that distance.
     pub area_far_seed_m: f32,
-    /// Rows held still in tiles the walker has left keep at most this share of `max_splats`; at each refine the
-    /// farthest held tiles park, even in view, until the rest fit. 1.0 or more: no cap.
+    /// The resident rows in tiles the walker has left (held or training, whatever `area_freeze` does with them) keep
+    /// at most this share of `max_splats`; at each refine of an engaged engine the farthest left tiles park, even in
+    /// view, until the rest fit. 1.0 or more: no cap.
     pub area_held_fraction: f32,
     /// Which resident rows area training holds still until they park (see [`AreaFreeze`]).
     pub area_freeze: AreaFreeze,

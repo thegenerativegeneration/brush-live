@@ -166,23 +166,23 @@ impl AreaState {
 impl LiveModel {
     /// Turns area training on with `tiles_dir` holding parked tiles: the directory is emptied (a reused session
     /// directory may hold tiles of an earlier capture) and created. Area training stays off when `area_radius_m` is
-    /// 0, or when the directory cannot be prepared (logged). Meant for a model without keyframes; with views it
-    /// recomputes the area and rebuilds the loaders.
+    /// 0 (the directory is then left alone), or when the directory cannot be prepared (logged). `tiles_dir` is kept
+    /// either way for [`Self::reset`]. Meant for a model without keyframes; with views it recomputes the area and
+    /// rebuilds the loaders.
     pub fn enable_area(&mut self, tiles_dir: PathBuf) {
-        let prepared = match std::fs::remove_dir_all(&tiles_dir) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-            _ => std::fs::create_dir_all(&tiles_dir),
-        };
-        self.area = match prepared {
-            Ok(()) => AreaParams::from_config(&self.config).map(|p| AreaState {
-                engaged: !self.config.area_engage_on_leave,
-                ..AreaState::new(p)
-            }),
-            Err(e) => {
-                log::warn!("area training off: cannot prepare {}: {e}", tiles_dir.display());
-                None
+        self.area = AreaParams::from_config(&self.config).and_then(|p| {
+            let prepared = match std::fs::remove_dir_all(&tiles_dir) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => std::fs::create_dir_all(&tiles_dir),
+            };
+            match prepared {
+                Ok(()) => Some(AreaState { engaged: !self.config.area_engage_on_leave, ..AreaState::new(p) }),
+                Err(e) => {
+                    log::warn!("area training off: cannot prepare {}: {e}", tiles_dir.display());
+                    None
+                }
             }
-        };
+        });
         self.tiles_dir = Some(tiles_dir);
         if !self.views.is_empty() {
             self.refresh_area_views();

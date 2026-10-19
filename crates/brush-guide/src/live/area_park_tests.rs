@@ -51,7 +51,7 @@ async fn tiles_left_behind_park_and_stay_in_the_eval_model() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Review Focus 3: when every tile is out of range, the tile under the newest keyframe's seeds still holds rows,
+/// When every tile is out of range, the tile under the newest keyframe's seeds still holds rows,
 /// and a park that would take every row is skipped.
 #[tokio::test]
 async fn parking_never_empties_the_trainer() {
@@ -131,7 +131,7 @@ async fn parked_tiles_load_with_current_pose_corrections() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Carry-over from Task 8: a park rebuilds the all-views loader when it still holds views that left the area, so
+/// A park rebuilds the all-views loader when it still holds views that left the area, so
 /// no stale view keeps training toward a tile that just parked.
 #[tokio::test]
 async fn a_park_drops_departed_views_from_the_all_views_loader() {
@@ -223,7 +223,7 @@ async fn resident_rows_in_a_far_parked_tile_join_its_file() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Task 10 follow-up 2: rows drifted into a far parked tile whose file cannot be read stay resident and the tile is
+/// Rows drifted into a far parked tile whose file cannot be read stay resident and the tile is
 /// dropped (its ground takes seeds again), instead of a read failing at every refine.
 #[tokio::test]
 async fn an_unreadable_far_tile_is_dropped_when_rows_drift_into_it() {
@@ -245,7 +245,7 @@ async fn an_unreadable_far_tile_is_dropped_when_rows_drift_into_it() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Task 14b: the eval model holds 40 parked tiles (more parts than a Metal kernel binds buffers): every resident and
+/// The eval model holds 40 parked tiles (more parts than a Metal kernel binds buffers): every resident and
 /// parked mean comes back as stored.
 #[tokio::test]
 async fn the_eval_model_holds_forty_parked_tiles() {

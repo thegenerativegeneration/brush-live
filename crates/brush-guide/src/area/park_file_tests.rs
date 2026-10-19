@@ -114,7 +114,7 @@ fn a_tile_round_trips_within_fp16() {
     assert_eq!(b.sh_coeffs_per_channel, 4);
 }
 
-/// Review Focus 5.
+/// Means hundreds of metres from the origin round-trip bit for bit.
 #[test]
 fn means_far_from_the_origin_round_trip_exactly() {
     let t = tile(rows(16, Vec3::new(512.3, 0.0, -733.9)));
@@ -303,7 +303,7 @@ fn wide_moments(n: usize, coeffs: usize) -> RowMoments {
     m
 }
 
-/// Task 17b: the moments come back within bfloat16 (relative 2⁻⁸, the zeros and a squared gradient of 1e-10 too, which
+/// The moments come back within bfloat16 (relative 2⁻⁸, the zeros and a squared gradient of 1e-10 too, which
 /// fp16 would flush to zero), and the trained flags exactly.
 #[test]
 fn moments_and_trained_flags_round_trip() {
@@ -323,7 +323,7 @@ fn moments_and_trained_flags_round_trip() {
     assert!(want.sh_m2.contains(&1e-10) && got.sh_m2.iter().any(|&v| (v - 1e-10).abs() < 1e-12));
 }
 
-/// Task 17b: a version 1 file (the layout without moments and trained flags) still loads, without moments (the trainer
+/// A version 1 file (the layout without moments and trained flags) still loads, without moments (the trainer
 /// starts them at zero) and without flags (the rows count as trained); version 1 knows no flag but the floor.
 #[test]
 fn a_version_1_file_loads_without_moments() {

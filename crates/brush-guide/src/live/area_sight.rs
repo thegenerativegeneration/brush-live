@@ -1,8 +1,8 @@
 //! The views that see the resident model with area training on: the views that see a resident tile's box up to
 //! [`SIGHT_FAR_M`] deep ([`crate::area::resident_boxes`], left tiles included), the area's training views and the
-//! newest view. Floors now come from the cameras that see the resident tiles: only these views' cameras floor the
-//! splats (Mip-Splatting 3D filter), so a camera that sees none of them never sets a resident splat's floor. Parked
-//! rows keep the floor they were parked with, and held rows keep theirs through a refine.
+//! newest view. Only these views' cameras floor the splats (Mip-Splatting 3D filter), so a camera that sees none of
+//! them never sets a resident splat's floor. Parked rows keep the floor they were parked with, and held rows keep
+//! theirs through a refine.
 //!
 //! Views are bucketed by pose ([`crate::area::buckets`]): the frustum tests run on one representative per bucket and
 //! every view of the bucket takes its result, and only the representatives (with the newest view) orient the score

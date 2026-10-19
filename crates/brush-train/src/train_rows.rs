@@ -35,7 +35,7 @@ impl MomentTails {
     }
 }
 
-/// `t`'s rows at `rows`, all of them when `None`.
+/// `t`'s rows at `rows`, all of them when `None`. Pick before reshaping inside one transaction (burn bug, issue #78).
 fn pick<const D: usize, K: Basic>(t: Tensor<D, K>, rows: Option<&Tensor<1, Int>>) -> Tensor<D, K> {
     match rows {
         Some(r) => t.select(0, r.clone()),
@@ -57,7 +57,8 @@ impl SplatTrainer {
 
     /// The rows of `splats` at `rows` (all when `None`), in that order, read back in one transaction; with their Adam
     /// moments when `with_moments` and every parameter group has them. The moments are picked before they are
-    /// reshaped: reducing the SH second moment and then picking rows read back the rows one below the picked ones.
+    /// reshaped: reducing the SH second moment and then picking rows read back the rows one below the picked ones
+    /// (burn bug, issue #78).
     async fn read_rows_at(&self, splats: &Splats, rows: Option<&[usize]>, with_moments: bool) -> SplatRows {
         let n = splats.num_splats() as usize;
         let indices = rows.map(|r| index_tensor(r, &splats.device().inner()));

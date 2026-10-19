@@ -203,7 +203,7 @@ fn seeds_land_in_active_tiles_and_on_new_ground_only() {
     assert_eq!(outside, SeedSort { dropped: 2, new_ground: 1 });
 }
 
-/// Task 19: every tile holding resident rows has a box, left ones included: a tile's band where it has one, else the
+/// Every tile holding resident rows has a box, left ones included: a tile's band where it has one, else the
 /// registry's height range; parked tiles have none.
 #[test]
 fn resident_boxes_cover_left_and_banded_tiles_but_not_parked_ones() {

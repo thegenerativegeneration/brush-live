@@ -1,4 +1,4 @@
-//! Task 20c: area training engages once the walker has left a tile (or a tile parked); until then the engine trains as
+//! Area training engages once the walker has left a tile (or a tile parked); until then the engine trains as
 //! with area training off. The scenes face the wall of [`crate::live::area_tests::keyframe_toward`] from 5 m.
 
 use super::*;

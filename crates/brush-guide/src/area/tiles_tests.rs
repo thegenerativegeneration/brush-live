@@ -74,7 +74,7 @@ fn parked_tiles_come_back_by_radius() {
     assert!(r.parked_within_radius(Vec3::new(36.0, 0.0, 5.0)).is_empty());
 }
 
-/// User decision D2 and Review Focus 2: far seeds and sparse seeds in parked tiles are dropped, dense seeds in a
+/// Far seeds and sparse seeds in parked tiles are dropped, dense seeds in a
 /// parked tile within radius + 10 m restore it; seeds elsewhere are kept.
 #[test]
 fn seed_triage_drops_far_and_sparse_seeds_and_restores_dense_near_ones() {
@@ -97,7 +97,7 @@ fn seed_triage_drops_far_and_sparse_seeds_and_restores_dense_near_ones() {
     assert_eq!(r.triage_seeds(&mixed, near, 8).keep, vec![true; 3], "resident tiles and new ground keep seeds");
 }
 
-/// Review Focus 4: room for a restore comes from unseen tiles beyond the radius, farthest first; tiles within
+/// Room for a restore comes from unseen tiles beyond the radius, farthest first; tiles within
 /// the radius or seen recently are never chosen.
 #[test]
 fn room_plan_parks_unseen_far_tiles_or_defers() {
@@ -134,7 +134,7 @@ fn tile_states_follow_distance_and_parking() {
     assert_eq!(r.tile_states(Vec3::new(5.0, 0.0, 5.0)), vec![[0, 0, 0], [4, 0, 1], [9, 0, 2]]);
 }
 
-/// Review Focus 2: resident rows in a parked tile's column are reported, the parked state is kept.
+/// Resident rows in a parked tile's column are reported, the parked state is kept.
 #[test]
 fn rows_in_a_parked_tile_are_reported_not_adopted() {
     let mut r = TileRegistry::new(params());
@@ -220,7 +220,7 @@ fn a_merge_keeps_a_tile_parked_with_more_rows() {
     assert_eq!((t.resident, t.splats, t.version, t.parked_at_step), (false, 13, 2, 7));
 }
 
-/// Task 10b: the walker visits every tile whose footprint lies within the radius, rows or not; a visited tile beyond
+/// The walker visits every tile whose footprint lies within the radius, rows or not; a visited tile beyond
 /// radius + hysteresis is left, a tile never visited is not.
 #[test]
 fn walked_tiles_are_left_beyond_radius_plus_hysteresis() {
@@ -242,7 +242,7 @@ fn walked_tiles_are_left_beyond_radius_plus_hysteresis() {
     assert_eq!(r.left_keys(far).len(), r.left_keys(Vec3::new(5.0, 0.0, 5000.0)).len(), "a NaN walker visits nothing");
 }
 
-/// Review of Task 10: room for a restore may also come from left tiles that views still see, after the unseen far
+/// Room for a restore may also come from left tiles that views still see, after the unseen far
 /// tiles and farthest first; a seen tile the walker never visited is never parked for room.
 #[test]
 fn room_plan_parks_seen_left_tiles_after_unseen_ones() {
@@ -271,7 +271,7 @@ fn room_plan_parks_seen_left_tiles_after_unseen_ones() {
     );
 }
 
-/// Task 10b: a plan never parks every resident splat (`park_tiles` would skip that park); a smaller tile still goes.
+/// A plan never parks every resident splat (`park_tiles` would skip that park); a smaller tile still goes.
 #[test]
 fn room_plan_never_parks_every_resident_splat() {
     let mut r = TileRegistry::new(params());
