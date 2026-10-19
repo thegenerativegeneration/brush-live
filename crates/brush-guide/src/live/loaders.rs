@@ -89,5 +89,6 @@ impl LiveModel {
             &self.load_config,
         ));
         self.all_members = members;
+        self.all_loader_builds += 1;
     }
 }

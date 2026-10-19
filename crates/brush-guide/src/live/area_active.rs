@@ -1,7 +1,8 @@
 //! Training the active tiles (`area_freeze` inactive or inactive_at_cap): at each keyframe and pose update the active
 //! set is ranked from the newest camera ([`crate::area::rank_active`]): the tiles within 2.5 m (at most half a tile)
 //! of it, then up to `area_active_tiles` tiles it sees within `area_view_m`, largest on its image first, with
-//! hysteresis. The views that see an active tile train ([`LiveModel::refresh_area_views`]). With inactive (and
+//! hysteresis. The views that see an active tile train ([`LiveModel::refresh_area_views`]; with inactive_at_cap only
+//! at the cap). With inactive (and
 //! inactive_at_cap at the cap, [`super::area_budget`]) keyframes seed only into active tiles and onto new ground, and
 //! every other resident row is held in the trainer until it parks ([`super::area_freeze`]).
 

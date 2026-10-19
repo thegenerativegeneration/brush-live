@@ -1,11 +1,13 @@
 //! Area training in the live model: only the views that see an active tile ([`super::area_active`]), or that lie
-//! within `area_radius_m` (horizontally) of the newest keyframe's camera, train; rows outside the active tiles, or
+//! within `area_radius_m` (horizontally) of the newest keyframe's camera, train (with `area_freeze` inactive_at_cap
+//! every view until the cap, [`super::area_budget`]); rows outside the active tiles, or
 //! of tiles the capture has left, are held still while resident ([`super::area_freeze`]),
 //! parked on disk ([`super::area_park`]), come back when it returns ([`super::area_restore`]), and the eval model loads
 //! them back.
 
 use super::LiveModel;
 use brush_dataset::scene::SceneBatch;
+use crate::config::AreaFreeze;
 use crate::area::{
     AreaCounters, AreaParams, AreaReport, Heights, TileKey, TileRegistry, area_views, tile_splats, views_seeing,
 };
@@ -19,7 +21,8 @@ use std::path::PathBuf;
 /// Area training's state: the tile registry, the views that train, and what parking did.
 pub(crate) struct AreaState {
     pub(super) registry: TileRegistry,
-    /// Views within the radius of the newest view, ascending; refreshed on every keyframe and pose update.
+    /// The training views ([`LiveModel::refresh_area_views`]), ascending; refreshed on every keyframe, pose update
+    /// and inactive_at_cap switch.
     pub(super) views: Vec<usize>,
     pub(super) counters: AreaCounters,
     /// Parked tiles that resident rows lay in at the last visibility readback; the refine's park step restores them.
@@ -193,13 +196,15 @@ impl LiveModel {
         }
     }
 
-    /// Recomputes the area's views; no-op with area training off. With `area_freeze` inactive and an active tile that
-    /// holds rows they are the views that see an active tile up to `area_view_m` deep
-    /// ([`crate::area::views_seeing`]); otherwise the views within the radius of the newest view's current camera.
+    /// Recomputes the area's views; no-op with area training off. With `area_freeze` inactive_at_cap below the cap
+    /// ([`Self::holds_inactive`]) they are every view, as with area training off. Otherwise, with an active set and
+    /// an active tile that holds rows, they are the views that see an active tile up to `area_view_m` deep
+    /// ([`crate::area::views_seeing`]); else the views within the radius of the newest view's current camera.
     /// The newest view is always among them, even when its position is not finite. A changed active set is logged
     /// with the view count.
     pub(super) fn refresh_area_views(&mut self) {
         let view_m = self.config.area_view_m;
+        let every = self.config.area_freeze == AreaFreeze::InactiveAtCap && !self.holds_inactive();
         let Some(area) = self.area.as_mut() else {
             return;
         };
@@ -208,7 +213,9 @@ impl LiveModel {
             area.views.clear();
             return;
         };
-        area.views = if area.active_boxes.is_empty() {
+        area.views = if every {
+            (0..positions.len()).collect()
+        } else if area.active_boxes.is_empty() {
             area_views(&positions, centre, area.registry.params().radius)
         } else {
             let cameras: Vec<_> = self.views.iter().map(|v| v.camera).collect();
@@ -216,7 +223,11 @@ impl LiveModel {
         };
         if std::mem::take(&mut area.active_changed) {
             let stems: Vec<String> = area.active.iter().map(|k| k.stem()).collect();
-            let how = if area.active_boxes.is_empty() { "radius fallback" } else { "by sight" };
+            let how = match (every, area.active_boxes.is_empty()) {
+                (true, _) => "every view below the cap",
+                (false, true) => "radius fallback",
+                (false, false) => "by sight",
+            };
             log::info!("area: active tiles {} ({} training views, {how})", stems.join(", "), area.views.len());
         }
         // Only a non-finite centre leaves the newest view out; the loaders need at least one view.

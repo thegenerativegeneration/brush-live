@@ -1,6 +1,6 @@
 use crate::test_scene;
 
-use brush_guide::config::GuideConfig;
+use brush_guide::config::{AreaFreeze, GuideConfig};
 use brush_guide::live::PoseUpdateStats;
 use brush_guide::protocol::{
     ClientHeader, PoseUpdate, ServerHeader, decode_cells, decode_frame, encode_frame,
@@ -411,12 +411,14 @@ fn ply_vertices(ply: &[u8]) -> u64 {
 }
 
 /// With area training on a walk that parks the origin, Stop's `splat.ply` holds the parked splats besides the
-/// resident ones, and the export command returns the same bytes.
+/// resident ones, and the export command returns the same bytes. `area_freeze` inactive: far below the cap
+/// inactive_at_cap trains every view, so keyframe 0 keeps the origin in sight and it never parks.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn finish_writes_parked_tiles_into_the_ply() {
     let device = test_scene::device().await.autodiff();
     let dir = std::env::temp_dir().join(format!("brush-guide-session-final-{}", std::process::id()));
     let config = GuideConfig {
+        area_freeze: AreaFreeze::Inactive,
         refine_every: 5,
         max_train_steps: Some(40),
         area_radius_m: 2.0,

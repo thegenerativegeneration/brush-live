@@ -8,9 +8,10 @@ use crate::scores::{
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AreaFreeze {
-    /// The active tiles as with `inactive` (training views, ranking); the rows outside them train and grow while
-    /// the resident rows stay below `area_freeze_at` of `max_splats`, and from there are held as with `inactive`
-    /// until the resident rows drop below `area_freeze_at` − 0.05.
+    /// While the resident rows stay below `area_freeze_at` of `max_splats` every view and every row trains as with
+    /// area training off (the active set is still ranked and reported); from there the views that see an active tile
+    /// train and the rows outside the active tiles are held, as with `inactive`, until the resident rows drop below
+    /// `area_freeze_at` − 0.05.
     #[default]
     InactiveAtCap,
     /// Only the active tiles train: the tiles within 2.5 m (at most half a tile) of the newest keyframe's camera and

@@ -273,3 +273,73 @@ async fn area_off_is_unchanged() {
         std::fs::remove_dir_all(dir).ok();
     }
 }
+
+/// The scene of [`the_training_views_see_an_active_tile`]: keyframes 0 and 4 face the wall, 1 turns away, 2 faces its
+/// own wall 8 m along, 3 stands 14 m back.
+async fn five_views(live: &mut LiveModel, dir: &std::path::Path) {
+    facing_wall(live, dir, 0, 0.0).await;
+    add(live, dir, 1, Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, 10.0)).await;
+    facing_wall(live, dir, 2, 8.0).await;
+    add(live, dir, 3, Vec3::new(0.1, 0.0, 14.0), Vec3::ZERO).await;
+    facing_wall(live, dir, 4, 0.2).await;
+}
+
+/// With inactive_at_cap below the cap the active set is ranked as with inactive, yet every view trains with the
+/// loader members of area training off, and nothing is held.
+#[tokio::test]
+async fn below_the_cap_every_view_trains_as_with_area_off() {
+    let mut members = Vec::new();
+    for radius in [2.0, 0.0] {
+        let dir = tmp(&format!("at-cap-views-{radius}"));
+        let config = GuideConfig { area_freeze: AreaFreeze::InactiveAtCap, ..active_config(radius) };
+        let mut live = LiveModel::new(config, device().await);
+        live.enable_area(dir.join("tiles"));
+        five_views(&mut live, &dir).await;
+        train(&mut live, 6).await;
+        assert!(live.trainer.as_ref().unwrap().frozen_rows().is_none(), "{radius}: rows held below the cap");
+        if radius > 0.0 {
+            assert_eq!(active_wall(&live).len(), 2, "{:?}", active(&live));
+            let r = live.area_report().unwrap();
+            assert!(!r.at_cap && r.frozen_rows == 0, "{r:?}");
+        }
+        let every: Vec<usize> = (0..5).collect();
+        assert_eq!((live.training_views(), live.all_members.clone()), (every.clone(), every), "{radius}");
+        members.push((live.recent_members.clone(), live.pending_views(), live.all_loader_builds));
+        std::fs::remove_dir_all(dir).ok();
+    }
+    assert_eq!(members[0], members[1], "area on below the cap differs from area off");
+}
+
+/// inactive_at_cap: from 0.9 of `max_splats` on the views that see an active tile train (as with inactive) and the
+/// rows outside the active tiles are held; between 0.85 and 0.9 that stays, below 0.85 every view trains again. Each
+/// flip rebuilds the all-views loader once, the steps between flips not at all.
+#[tokio::test]
+async fn at_the_cap_the_active_views_train_and_each_flip_rebuilds_the_loaders_once() {
+    let dir = tmp("at-cap-flip");
+    let config = GuideConfig {
+        area_freeze: AreaFreeze::InactiveAtCap,
+        area_seen_window_steps: 1000,
+        ..active_config(10.0)
+    };
+    let mut live = LiveModel::new(config, device().await);
+    live.enable_area(dir.join("tiles"));
+    five_views(&mut live, &dir).await;
+    let every: Vec<usize> = (0..5).collect();
+    assert_eq!(live.training_views(), every);
+    let step_at = async |live: &mut LiveModel, share: f32| {
+        let n = live.splats().unwrap().num_splats() as f32;
+        live.config.max_splats = (n / share).floor() as u32;
+        let builds = live.all_loader_builds;
+        train(live, 1).await;
+        let held = live.trainer.as_ref().unwrap().frozen_rows().is_some();
+        assert_eq!(held, live.area_report().unwrap().at_cap, "{share}");
+        assert_eq!(live.all_members, live.training_views(), "{share}");
+        (live.training_views(), held, live.all_loader_builds - builds)
+    };
+    assert_eq!(step_at(&mut live, 0.88).await, (every.clone(), false, 0));
+    assert_eq!(step_at(&mut live, 0.9).await, (vec![0, 4], true, 1));
+    assert_eq!(step_at(&mut live, 0.86).await, (vec![0, 4], true, 0));
+    assert_eq!(step_at(&mut live, 0.84).await, (every, false, 1));
+    assert_eq!(live.area_report().unwrap().counters.parks, 0);
+    std::fs::remove_dir_all(dir).ok();
+}

@@ -9,8 +9,9 @@
 //!   tiles), or held rows no step ever trained; when that and the parks fall short, it may take any row outside the
 //!   active and near tiles, held or not, and with every resident tile active or near any row, as without area
 //!   training ([`LiveModel::set_eviction_fallback`]).
-//! - With `area_freeze` inactive_at_cap the rows outside the active tiles train while the resident rows stay below
-//!   `area_freeze_at` of `max_splats` and are held from there ([`LiveModel::note_cap`]).
+//! - With `area_freeze` inactive_at_cap every row and every view trains (as without area training) while the resident
+//!   rows stay below `area_freeze_at` of `max_splats`; from there the rows outside the active tiles are held and the
+//!   views that see an active tile train ([`LiveModel::note_cap`]).
 
 use super::LiveModel;
 use crate::area::{
@@ -38,8 +39,10 @@ impl LiveModel {
     }
 
     /// With `area_freeze` inactive_at_cap: at `resident` rows from `area_freeze_at` × `max_splats` on the rows
-    /// outside the active tiles are held, below (`area_freeze_at` − [`FREEZE_RELEASE`]) × `max_splats` they train
-    /// again. A switch marks the mask stale and is logged. No-op in other modes or without area training.
+    /// outside the active tiles are held and the views that see an active tile train, below
+    /// (`area_freeze_at` − [`FREEZE_RELEASE`]) × `max_splats` every row and every view trains again. A switch marks
+    /// the mask stale, recomputes the training views and the Mip floor's cameras, rebuilds both loaders and is logged.
+    /// No-op in other modes or without area training.
     pub(super) fn note_cap(&mut self, resident: u32) {
         if self.config.area_freeze != AreaFreeze::InactiveAtCap {
             return;
@@ -55,6 +58,11 @@ impl LiveModel {
             area.mask_stale = true;
             let what = if at_cap { "held" } else { "train again" };
             log::info!("area: rows outside the active tiles {what} at {resident} of {max} splats");
+            self.refresh_area_views();
+            if !self.views.is_empty() {
+                self.refresh_floor_cams();
+                self.rebuild_all_loaders();
+            }
         }
     }
 
