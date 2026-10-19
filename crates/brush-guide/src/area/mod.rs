@@ -62,6 +62,8 @@ pub struct AreaCounters {
     /// Refines whose eviction, short of what it wanted after the parks and the active tiles' fair shares, widened and
     /// took rows that way.
     pub eviction_fallbacks: u32,
+    /// Keyframes received when area training engaged (`area_engage_on_leave`); 0 before it engaged.
+    pub engaged_at_keyframe: u32,
 }
 
 /// Area training's state for the eval log: tile and splat counts, counters, and every tile's state.

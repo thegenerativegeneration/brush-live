@@ -22,11 +22,18 @@ impl LiveModel {
     /// Recomputes the views that see the resident model from the current poses: the views of every pose bucket whose
     /// representative sees a resident tile's box (height bands of the last readback widened by the rows seeded since)
     /// up to [`SIGHT_FAR_M`], the area's views and the newest view; and the voters among them, each such bucket's
-    /// representative, the representatives of the area's views and the newest view. No-op with area training off.
+    /// representative, the representatives of the area's views and the newest view. Before area training engages
+    /// ([`super::area_engage`]) both are every view, as with area training off. No-op with area training off.
     pub(super) fn refresh_sight(&mut self) {
+        let n = self.views.len();
         let Some(area) = self.area.as_mut() else {
             return;
         };
+        if !area.engaged {
+            area.sight = (0..n).collect();
+            area.sight_reps = (0..n).collect();
+            return;
+        }
         let mut heights = area.heights.clone();
         widen_all(&mut heights, &area.fresh);
         let boxes = resident_boxes(&area.registry, &heights);

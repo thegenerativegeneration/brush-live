@@ -70,12 +70,16 @@ impl LiveModel {
     /// After a refine: parked tiles that resident rows drifted into come back ([`RestoreReason::Rows`]) when they lie
     /// within radius + hysteresis of the newest view; farther ones take the rows into their file
     /// ([`Self::merge_into_parked`]), so a walker's drifting splats do not pull a far area back. Then the tiles
-    /// [`crate::area::TileRegistry::to_park`] names park ([`Self::park_tiles`]). No-op without area training or
-    /// views; with parking off every such tile comes back and nothing parks.
+    /// [`crate::area::TileRegistry::to_park`] names park ([`Self::park_tiles`]). No-op without area training, before
+    /// it engages ([`super::area_engage`]: nothing is parked yet) or without views; with parking off every such tile
+    /// comes back and nothing parks.
     pub(super) async fn park_after_refine(&mut self, splats: Splats) -> Splats {
         let Some(centre) = self.view_cams.last().map(|(p, _)| *p) else {
             return splats;
         };
+        if !self.area_engaged() {
+            return splats;
+        }
         let Some(area) = self.area.as_mut() else {
             return splats;
         };

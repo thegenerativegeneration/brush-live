@@ -28,11 +28,12 @@ use glam::Vec3;
 pub(super) const FREEZE_RELEASE: f32 = 0.05;
 
 impl LiveModel {
-    /// Whether the rows outside the active tiles are held now: always with `area_freeze` inactive, with
-    /// inactive_at_cap while the resident rows are at the cap ([`Self::note_cap`]), never otherwise.
+    /// Whether the rows outside the active tiles are held now: once area training engaged
+    /// ([`super::area_engage`]), always with `area_freeze` inactive, with inactive_at_cap while the resident rows are
+    /// at the cap ([`Self::note_cap`]), never otherwise.
     pub(super) fn holds_inactive(&self) -> bool {
         match (&self.area, self.config.area_freeze) {
-            (Some(_), AreaFreeze::Inactive) => true,
+            (Some(a), AreaFreeze::Inactive) => a.engaged,
             (Some(a), AreaFreeze::InactiveAtCap) => a.at_cap,
             _ => false,
         }
@@ -42,10 +43,10 @@ impl LiveModel {
     /// outside the active tiles are held and the views that see an active tile train, below
     /// (`area_freeze_at` − [`FREEZE_RELEASE`]) × `max_splats` every row and every view trains again. A switch marks
     /// the mask stale, recomputes the training views and the Mip floor's cameras, rebuilds both loaders and is logged;
-    /// during a keyframe (its view not yet in) the keyframe does that once its view is in. No-op in other modes or
-    /// without area training.
+    /// during a keyframe (its view not yet in) the keyframe does that once its view is in. No-op in other modes,
+    /// without area training or before it engages ([`super::area_engage`]).
     pub(super) fn note_cap(&mut self, resident: u32) {
-        if self.config.area_freeze != AreaFreeze::InactiveAtCap {
+        if self.config.area_freeze != AreaFreeze::InactiveAtCap || !self.area_engaged() {
             return;
         }
         let (max, at) = (self.config.max_splats as f32, self.config.area_freeze_at);
@@ -73,10 +74,10 @@ impl LiveModel {
 
     /// Per seed (flat xyz), whether a tile has room for it under the per-tile cap, counting the registry's rows,
     /// the rows seeded since its last readback and the seeds before it ([`keep_under_tile_cap`]); the seeds turned
-    /// away are counted. `None` without area training or a per-tile cap.
+    /// away are counted. `None` without area training, before it engages or without a per-tile cap.
     pub(super) fn tile_cap_keep(&mut self, seed_means: &[f32]) -> Option<Vec<bool>> {
         let cap = self.config.area_tile_cap();
-        let area = self.area.as_mut().filter(|_| cap > 0)?;
+        let area = self.area.as_mut().filter(|a| a.engaged && cap > 0)?;
         let counts = tile_counts(&area.registry, &area.fresh);
         let mut keep = vec![true; seed_means.len() / 3];
         let cleared = keep_under_tile_cap(&counts, cap, seed_means, area.registry.params().tile_size, &mut keep);
@@ -86,14 +87,19 @@ impl LiveModel {
 
     /// Hands the trainer the row budget for the next refine from a readback of every resident row (flat xyz `means`):
     /// the per-tile cap, and while the rows outside the active tiles are held ([`Self::holds_inactive`]) the fair
-    /// share an eviction may take from each active tile (otherwise the eviction is not limited). No-op without area
-    /// training.
+    /// share an eviction may take from each active tile (otherwise the eviction is not limited). No budget before area
+    /// training engages ([`super::area_engage`]); no-op without area training.
     pub(super) fn set_row_budget(&mut self, means: &[f32]) {
         let holds = self.holds_inactive();
         let cap = self.config.area_tile_cap();
         let (Some(area), Some(trainer)) = (self.area.as_mut(), self.trainer.as_mut()) else {
             return;
         };
+        if !area.engaged {
+            area.budget_keys.clear();
+            trainer.set_row_budget(None);
+            return;
+        }
         let fair = holds.then(|| FairShare { active: &area.active, max_splats: self.config.max_splats });
         let tile_size = area.registry.params().tile_size;
         let budget = row_budget(means, tile_size, cap, fair);
@@ -126,9 +132,12 @@ impl LiveModel {
     /// Right before a refine, from the registry as the visibility readback just left it: makes the room the refine
     /// would otherwise evict for, and keeps the resident left tiles' rows within `area_held_fraction` of
     /// `max_splats` ([`Self::park_room_tiles`]); then tells the trainer how its eviction widens when the parks and the
-    /// active tiles' fair shares fall short ([`Self::set_eviction_fallback`]). No-op without area training, a trainer
-    /// or views.
+    /// active tiles' fair shares fall short ([`Self::set_eviction_fallback`]). No-op without area training, before it
+    /// engages ([`super::area_engage`]), or without a trainer or views.
     pub(super) async fn park_for_room(&mut self, splats: Splats) -> Splats {
+        if !self.area_engaged() {
+            return splats;
+        }
         let Some(need) = self.room_need(splats.num_splats()) else {
             return splats;
         };

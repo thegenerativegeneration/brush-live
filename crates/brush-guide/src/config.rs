@@ -191,6 +191,11 @@ pub struct GuideConfig {
     /// tile still filling up can overshoot by one refine's growth before that. 0: no per-tile cap (held rows no step
     /// ever trained stay eviction victims at the total cap either way).
     pub area_tile_max_fraction: f32,
+    /// Area training engages once the walker has left a tile (a visited tile lies beyond `area_radius_m` plus
+    /// `area_hysteresis_m`) or a tile parked, and stays on until the session resets. Until then the engine trains as
+    /// with area training off: every view trains, nothing is held or parked, and no per-tile cap, row budget or
+    /// eviction quota applies (the active set is still ranked and reported). false: engaged from the first keyframe.
+    pub area_engage_on_leave: bool,
     /// Plumbed into `TrainConfig::train_radius_m`: splats farther than this from the training camera get no update
     /// in that step. 0: off.
     pub train_radius_m: f32,
@@ -267,6 +272,7 @@ impl Default for GuideConfig {
             area_active_min_rows: 50,
             area_freeze_at: 0.9,
             area_tile_max_fraction: 0.4,
+            area_engage_on_leave: true,
             train_radius_m: 0.0,
         }
     }
@@ -441,6 +447,7 @@ mod area_tests {
         assert_eq!(cfg.area_freeze, AreaFreeze::InactiveAtCap);
         assert_eq!((cfg.area_view_m, cfg.area_active_tiles, cfg.area_active_min_rows), (15.0, 3, 50));
         assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_fraction), (0.9, 0.4));
+        assert!(cfg.area_engage_on_leave);
         assert_eq!(GuideConfig { max_splats: 25_000, ..cfg.clone() }.area_tile_cap(), 10_000);
         assert_eq!(GuideConfig { area_tile_max_fraction: 0.0, ..cfg }.area_tile_cap(), 0);
         let modes = [

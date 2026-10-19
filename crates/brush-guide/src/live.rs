@@ -19,6 +19,7 @@ use std::path::PathBuf;
 mod area;
 mod area_active;
 mod area_budget;
+mod area_engage;
 mod area_export;
 mod area_freeze;
 mod area_park;
@@ -283,6 +284,7 @@ impl LiveModel {
         if let Some(area) = self.area.as_mut() {
             area.registry.note_walker(kf.camera.position);
         }
+        self.note_engaged();
 
         let splats = match self.splats.take() {
             None => {

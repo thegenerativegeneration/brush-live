@@ -99,6 +99,7 @@ impl LiveModel {
             }
         }
         let camera = self.views[newest].camera;
+        self.note_engaged();
         self.refresh_active(&camera, &[]);
         if let Some(area) = self.area.as_mut() {
             // Rows moved with their views and may lie in other tiles now: the next step holds them afresh.

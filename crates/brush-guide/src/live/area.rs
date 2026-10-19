@@ -3,7 +3,8 @@
 //! every view until the cap, [`super::area_budget`]); rows outside the active tiles, or
 //! of tiles the capture has left, are held still while resident ([`super::area_freeze`]),
 //! parked on disk ([`super::area_park`]), come back when it returns ([`super::area_restore`]), and the eval model loads
-//! them back.
+//! them back. All of this waits until area training engages ([`super::area_engage`]: the walker has left a tile);
+//! until then the engine trains as with area training off.
 
 use super::LiveModel;
 use brush_dataset::scene::SceneBatch;
@@ -81,6 +82,8 @@ pub(crate) struct AreaState {
     pub(super) sight: Vec<usize>,
     /// The views among `sight` that vote in the score round: one per pose bucket, and the newest view.
     pub(super) sight_reps: Vec<usize>,
+    /// Area training is engaged ([`super::area_engage`]); until then the engine trains as with it off.
+    pub(super) engaged: bool,
 }
 
 /// The junction refresh after a restore: for `steps_left` training steps every other step draws one of `views`, the
@@ -155,6 +158,7 @@ impl AreaState {
             tile_evictions: BTreeMap::new(),
             sight: Vec::new(),
             sight_reps: Vec::new(),
+            engaged: false,
         }
     }
 }
@@ -170,7 +174,10 @@ impl LiveModel {
             _ => std::fs::create_dir_all(&tiles_dir),
         };
         self.area = match prepared {
-            Ok(()) => AreaParams::from_config(&self.config).map(AreaState::new),
+            Ok(()) => AreaParams::from_config(&self.config).map(|p| AreaState {
+                engaged: !self.config.area_engage_on_leave,
+                ..AreaState::new(p)
+            }),
             Err(e) => {
                 log::warn!("area training off: cannot prepare {}: {e}", tiles_dir.display());
                 None
@@ -200,15 +207,17 @@ impl LiveModel {
         }
     }
 
-    /// Recomputes the area's views; no-op with area training off. With `area_freeze` inactive_at_cap below the cap
-    /// ([`Self::holds_inactive`]) they are every view, as with area training off. Otherwise, with an active set and
+    /// Recomputes the area's views; no-op with area training off. Before area training engages
+    /// ([`super::area_engage`]), and with `area_freeze` inactive_at_cap below the cap ([`Self::holds_inactive`]), they
+    /// are every view, as with area training off. Otherwise, with an active set and
     /// an active tile that holds rows, they are the views that see an active tile up to `area_view_m` deep
     /// ([`crate::area::views_seeing`]); else the views within the radius of the newest view's current camera.
     /// The newest view is always among them, even when its position is not finite. A changed active set is logged
     /// with the view count.
     pub(super) fn refresh_area_views(&mut self) {
         let view_m = self.config.area_view_m;
-        let every = self.config.area_freeze == AreaFreeze::InactiveAtCap && !self.holds_inactive();
+        let engaged = self.area_engaged();
+        let every = !engaged || (self.config.area_freeze == AreaFreeze::InactiveAtCap && !self.holds_inactive());
         let Some(area) = self.area.as_mut() else {
             return;
         };
@@ -228,6 +237,7 @@ impl LiveModel {
         if std::mem::take(&mut area.active_changed) {
             let stems: Vec<String> = area.active.iter().map(|k| k.stem()).collect();
             let how = match (every, area.active_boxes.is_empty()) {
+                (true, _) if !engaged => "every view until a tile is left",
                 (true, _) => "every view below the cap",
                 (false, true) => "radius fallback",
                 (false, false) => "by sight",
