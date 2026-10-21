@@ -138,6 +138,8 @@ pub enum ServerHeader {
         #[serde(default)]
         refine_ms: u64,
         #[serde(default)]
+        area_ms: u64,
+        #[serde(default)]
         hold_ms: u64,
     },
     Splat {

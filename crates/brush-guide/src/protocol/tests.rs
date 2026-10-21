@@ -279,6 +279,7 @@ fn status_header_round_trips_worker_times() {
         optimizer_ms: 0,
         stats_ms: 0,
         refine_ms: 0,
+        area_ms: 0,
         hold_ms: 0,
     };
     let frame = encode_frame(&h, &[]);
@@ -311,6 +312,7 @@ fn status_step_fields_round_trip() {
         optimizer_ms: 0,
         stats_ms: 0,
         refine_ms: 11,
+        area_ms: 5,
         hold_ms: 3,
     };
     let frame = encode_frame(&h, &[]);
@@ -321,10 +323,10 @@ fn status_step_fields_round_trip() {
     let mut frame = (json.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(json);
     let (h, _): (ServerHeader, _) = decode_frame(&frame).unwrap();
-    let ServerHeader::Status { batch_ms, forward_ms, loss_ms, backward_ms, optimizer_ms, stats_ms, refine_ms, hold_ms, .. } = h else {
+    let ServerHeader::Status { batch_ms, forward_ms, loss_ms, backward_ms, optimizer_ms, stats_ms, refine_ms, area_ms, hold_ms, .. } = h else {
         panic!("not a status");
     };
-    assert_eq!([batch_ms, forward_ms, loss_ms, backward_ms, optimizer_ms, stats_ms, refine_ms, hold_ms], [0; 8]);
+    assert_eq!([batch_ms, forward_ms, loss_ms, backward_ms, optimizer_ms, stats_ms, refine_ms, area_ms, hold_ms], [0; 9]);
 }
 
 #[test]
@@ -445,6 +447,7 @@ fn write_golden_fixtures() {
                     optimizer_ms: 0,
                     stats_ms: 0,
                     refine_ms: 0,
+                    area_ms: 0,
                     hold_ms: 0,
                 },
                 &[],

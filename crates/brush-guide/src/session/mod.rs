@@ -101,6 +101,7 @@ impl StatusMsg {
                 optimizer_ms: self.times.step.optimizer_ms,
                 stats_ms: self.times.step.stats_ms,
                 refine_ms: self.times.step.refine_ms,
+                area_ms: self.times.step.area_ms,
                 hold_ms: self.times.step.hold_ms,
             },
             &[],

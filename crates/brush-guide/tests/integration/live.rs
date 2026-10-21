@@ -2,7 +2,7 @@ use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
 use brush_guide::keyframe::decode_keyframe;
-use brush_guide::live::{LiveModel, PROFILE_LOG_EVERY, PoseUpdateStats, StepLr, ViewPose};
+use brush_guide::live::{LiveModel, PROFILE_LOG_EVERY, PoseUpdateStats, StepLr, StepTotals, ViewPose};
 use glam::Vec3;
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -228,6 +228,46 @@ async fn hold_and_refine_totals_survive_take_refine_stats() {
     let (refines, _) = live.take_refine_stats();
     assert!(refines > 0);
     assert_eq!(live.step_totals().refine_ms, live.refine_total_ms() as u64);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// A status read in the middle of a log window neither loses nor double-counts: totals never shrink.
+#[tokio::test]
+async fn step_totals_are_monotone_with_a_mid_window_read() {
+    let config = GuideConfig {
+        profile_steps: true,
+        ..GuideConfig::default()
+    };
+    let (mut live, dir) = live_with_view(config, "midwindow").await;
+    let mut mid = None;
+    for i in 0..PROFILE_LOG_EVERY + 3 {
+        live.train_step().await;
+        if i == 50 {
+            mid = Some(live.step_totals());
+        }
+    }
+    let (mid, end) = (mid.unwrap(), live.step_totals());
+    let sum = |t: &StepTotals| [t.batch_ms, t.forward_ms, t.loss_ms, t.backward_ms, t.optimizer_ms, t.stats_ms, t.refine_ms, t.area_ms, t.hold_ms];
+    for (m, e) in sum(&mid).iter().zip(sum(&end)) {
+        assert!(e >= *m, "{mid:?} -> {end:?}");
+    }
+    assert!(end.forward_ms + end.backward_ms > 0, "{end:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn reset_clears_step_totals() {
+    let config = GuideConfig {
+        profile_steps: true,
+        refine_every: 5,
+        ..GuideConfig::default()
+    };
+    let (mut live, dir) = live_with_view(config, "reset-totals").await;
+    for _ in 0..6 {
+        live.train_step().await;
+    }
+    live.reset();
+    assert_eq!(live.step_totals(), StepTotals::default());
     std::fs::remove_dir_all(dir).ok();
 }
 

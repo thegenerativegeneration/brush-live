@@ -50,7 +50,7 @@ struct LoadArgs {
 pub const PROFILE_LOG_EVERY: u32 = 100;
 
 /// Cumulative milliseconds of the training step's phases since the model started. The phases up to `stats_ms`
-/// count only with `GuideConfig::profile_steps`; `refine_ms` and `hold_ms` are always timed.
+/// count only with `GuideConfig::profile_steps`; `refine_ms`, `area_ms` and `hold_ms` are always timed (wall time, no GPU sync added).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepTotals {
     pub batch_ms: u64,
@@ -60,6 +60,8 @@ pub struct StepTotals {
     pub optimizer_ms: u64,
     pub stats_ms: u64,
     pub refine_ms: u64,
+    /// Area and budget bookkeeping inside `LiveModel::refine`, apart from the trainer's own refine.
+    pub area_ms: u64,
     pub hold_ms: u64,
 }
 
@@ -72,6 +74,7 @@ struct StepSeconds {
     backward: f64,
     optimizer: f64,
     stats: f64,
+    area: f64,
     hold: f64,
 }
 
@@ -301,6 +304,7 @@ impl LiveModel {
             optimizer_ms: ms(s.optimizer),
             stats_ms: ms(s.stats),
             refine_ms: ms(self.refine_total_s),
+            area_ms: ms(s.area),
             hold_ms: ms(s.hold),
         }
     }
@@ -493,11 +497,13 @@ impl LiveModel {
     /// otherwise make room for; afterwards it parks the tiles the capture has left and holds the rows `area_freeze`
     /// names (outside the active tiles, or of left tiles still resident).
     async fn refine(&mut self, splats: Splats) -> Splats {
+        let t_area = web_time::Instant::now();
         self.sync_max_splats();
         crate::timing::sync_splats(&splats).await;
         self.note_visibility(&splats).await;
         let splats = self.park_for_room(splats).await;
         self.refresh_floor_cams();
+        let mut area_s = t_area.elapsed().as_secs_f64();
         let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
         let t = web_time::Instant::now();
         let before = splats.num_splats();
@@ -517,9 +523,12 @@ impl LiveModel {
         );
         self.num_evicted += u64::from(stats.num_evicted);
         self.last_refine_evicted = stats.evicted_for_total;
+        let t_area = web_time::Instant::now();
         self.note_budget_evictions();
         let splats = self.park_after_refine(splats).await;
         self.hold_rows_after_refine(&splats).await;
+        area_s += t_area.elapsed().as_secs_f64();
+        self.step_s.area += area_s;
         splats
     }
 }
