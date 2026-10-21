@@ -9,7 +9,7 @@ pub(crate) use worker::warm_up_eval;
 pub use frames::forward_frames;
 
 use crate::config::GuideConfig;
-use crate::live::{PoseUpdateStats, ViewPose};
+use crate::live::{PoseUpdateStats, StepTotals, ViewPose};
 use crate::protocol::{
     CELL_BYTES, Cell, ClientHeader, KeyframeHeader, PoseUpdate, ServerHeader, decode_frame,
     encode_cells, encode_frame,
@@ -57,6 +57,8 @@ pub struct WorkerTimes {
     pub uptime_ms: u64,
     /// Time the iteration cap held the next training step back.
     pub throttle_ms: u64,
+    /// The training step's phases, from the live model.
+    pub step: StepTotals,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,6 +94,14 @@ impl StatusMsg {
                 throttle_ms: self.times.throttle_ms,
                 adam_clamped: self.adam_clamped,
                 sh_pruned: self.sh_pruned,
+                batch_ms: self.times.step.batch_ms,
+                forward_ms: self.times.step.forward_ms,
+                loss_ms: self.times.step.loss_ms,
+                backward_ms: self.times.step.backward_ms,
+                optimizer_ms: self.times.step.optimizer_ms,
+                stats_ms: self.times.step.stats_ms,
+                refine_ms: self.times.step.refine_ms,
+                hold_ms: self.times.step.hold_ms,
             },
             &[],
         )

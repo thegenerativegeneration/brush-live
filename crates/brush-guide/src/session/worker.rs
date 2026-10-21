@@ -15,7 +15,7 @@ use super::splat_read::{SplatRead, view_cones};
 use super::{Command, ScoreSetMsg, StatusMsg, WorkerTimes};
 use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
-use crate::live::LiveModel;
+use crate::live::{LiveModel, StepTotals};
 use crate::protocol::{Cell, KeyframeHeader};
 use crate::schedule::{Cadence, IterThrottle};
 use crate::scores::voxel::{RawVoxel, VoxelAggregator};
@@ -165,7 +165,7 @@ impl ActivityTotals {
         }
     }
 
-    fn to_times(&self) -> WorkerTimes {
+    fn to_times(&self, step: StepTotals) -> WorkerTimes {
         let ms = |s: f64| (s * 1e3) as u64;
         WorkerTimes {
             train_ms: ms(self.train),
@@ -175,6 +175,7 @@ impl ActivityTotals {
             fisher_ms: ms(self.fisher),
             uptime_ms: ms(self.start.elapsed().as_secs_f64()),
             throttle_ms: ms(self.throttle),
+            step,
         }
     }
 }
@@ -641,7 +642,7 @@ impl Worker {
                 train_iters_per_s: rate as f32,
                 last_score_ms: self.last_score_ms,
                 train_iters: u64::from(self.live.iter()),
-                times: self.totals_s.to_times(),
+                times: self.totals_s.to_times(self.live.step_totals()),
                 adam_clamped: self.live.adam_clamped(),
                 sh_pruned: self.live.sh_pruned(),
             });

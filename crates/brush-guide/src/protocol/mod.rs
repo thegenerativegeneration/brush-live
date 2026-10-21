@@ -121,6 +121,24 @@ pub enum ServerHeader {
         /// Splats pruned for a diverged colour since the session started.
         #[serde(default)]
         sh_pruned: u64,
+        /// Cumulative training-step phases in ms (see `live::StepTotals`); the phases from `batch_ms` to
+        /// `stats_ms` are 0 without step profiling.
+        #[serde(default)]
+        batch_ms: u64,
+        #[serde(default)]
+        forward_ms: u64,
+        #[serde(default)]
+        loss_ms: u64,
+        #[serde(default)]
+        backward_ms: u64,
+        #[serde(default)]
+        optimizer_ms: u64,
+        #[serde(default)]
+        stats_ms: u64,
+        #[serde(default)]
+        refine_ms: u64,
+        #[serde(default)]
+        hold_ms: u64,
     },
     Splat {
         ply_len: u64,

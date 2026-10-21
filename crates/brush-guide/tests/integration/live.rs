@@ -2,7 +2,7 @@ use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
 use brush_guide::keyframe::decode_keyframe;
-use brush_guide::live::{LiveModel, PoseUpdateStats, StepLr, ViewPose};
+use brush_guide::live::{LiveModel, PROFILE_LOG_EVERY, PoseUpdateStats, StepLr, ViewPose};
 use glam::Vec3;
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -181,5 +181,66 @@ async fn loader_cache_bytes_follow_the_cached_views() {
     let bytes = live.loader_cache_bytes();
     // 64x48 RGBA8 per cached view, at most 3 views in each of the two loaders.
     assert!(bytes > 0 && bytes <= 2 * 3 * 64 * 48 * 4, "{bytes}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+async fn live_with_view(config: GuideConfig, name: &str) -> (LiveModel, std::path::PathBuf) {
+    let device = test_scene::device().await.autodiff();
+    let dir = tmp(name);
+    let mut live = LiveModel::new(config, device);
+    let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));
+    live.add_keyframe(decode_keyframe(&h, &p, &dir).await.unwrap())
+        .await;
+    (live, dir)
+}
+
+/// The profile phases add up across profile logs, and reading them twice neither loses nor doubles any.
+#[tokio::test]
+async fn step_totals_accumulate_across_profile_logs() {
+    let config = GuideConfig {
+        profile_steps: true,
+        ..GuideConfig::default()
+    };
+    let (mut live, dir) = live_with_view(config, "totals").await;
+    for _ in 0..PROFILE_LOG_EVERY + 3 {
+        live.train_step().await;
+    }
+    let t = live.step_totals();
+    assert!(
+        t.forward_ms + t.loss_ms + t.backward_ms + t.optimizer_ms + t.stats_ms > 0,
+        "{t:?}"
+    );
+    assert_eq!(live.step_totals(), t);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// `take_refine_stats` leaves the cumulative refine time alone.
+#[tokio::test]
+async fn hold_and_refine_totals_survive_take_refine_stats() {
+    let config = GuideConfig {
+        refine_every: 5,
+        ..GuideConfig::default()
+    };
+    let (mut live, dir) = live_with_view(config, "refine-total").await;
+    for _ in 0..6 {
+        live.train_step().await;
+    }
+    let (refines, _) = live.take_refine_stats();
+    assert!(refines > 0);
+    assert_eq!(live.step_totals().refine_ms, live.refine_total_ms() as u64);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[tokio::test]
+async fn step_totals_zero_without_profiling() {
+    let (mut live, dir) = live_with_view(GuideConfig::default(), "noprofile").await;
+    for _ in 0..PROFILE_LOG_EVERY + 3 {
+        live.train_step().await;
+    }
+    let t = live.step_totals();
+    assert_eq!(
+        [t.batch_ms, t.forward_ms, t.loss_ms, t.backward_ms, t.optimizer_ms, t.stats_ms],
+        [0; 6]
+    );
     std::fs::remove_dir_all(dir).ok();
 }

@@ -272,11 +272,59 @@ fn status_header_round_trips_worker_times() {
         throttle_ms: 400,
         adam_clamped: 7,
         sh_pruned: 3,
+        batch_ms: 0,
+        forward_ms: 0,
+        loss_ms: 0,
+        backward_ms: 0,
+        optimizer_ms: 0,
+        stats_ms: 0,
+        refine_ms: 0,
+        hold_ms: 0,
     };
     let frame = encode_frame(&h, &[]);
     let (back, rest): (ServerHeader, _) = decode_frame(&frame).unwrap();
     assert_eq!(back, h);
     assert!(rest.is_empty());
+}
+
+#[test]
+fn status_step_fields_round_trip() {
+    let h = ServerHeader::Status {
+        num_keyframes: 3,
+        num_splats: 10,
+        train_iters_per_s: 5.0,
+        last_score_ms: 12,
+        train_iters: 0,
+        train_ms: 0,
+        ingest_ms: 0,
+        preview_ms: 0,
+        voxel_ms: 0,
+        fisher_ms: 0,
+        uptime_ms: 0,
+        throttle_ms: 0,
+        adam_clamped: 0,
+        sh_pruned: 0,
+        batch_ms: 0,
+        forward_ms: 7,
+        loss_ms: 0,
+        backward_ms: 0,
+        optimizer_ms: 0,
+        stats_ms: 0,
+        refine_ms: 11,
+        hold_ms: 3,
+    };
+    let frame = encode_frame(&h, &[]);
+    let (back, _): (ServerHeader, _) = decode_frame(&frame).unwrap();
+    assert_eq!(back, h);
+
+    let json = br#"{"type":"status","num_keyframes":3,"num_splats":10,"train_iters_per_s":5.0,"last_score_ms":12}"#;
+    let mut frame = (json.len() as u32).to_le_bytes().to_vec();
+    frame.extend_from_slice(json);
+    let (h, _): (ServerHeader, _) = decode_frame(&frame).unwrap();
+    let ServerHeader::Status { batch_ms, forward_ms, loss_ms, backward_ms, optimizer_ms, stats_ms, refine_ms, hold_ms, .. } = h else {
+        panic!("not a status");
+    };
+    assert_eq!([batch_ms, forward_ms, loss_ms, backward_ms, optimizer_ms, stats_ms, refine_ms, hold_ms], [0; 8]);
 }
 
 #[test]
@@ -390,6 +438,14 @@ fn write_golden_fixtures() {
                     throttle_ms: 0,
                     adam_clamped: 0,
                     sh_pruned: 0,
+                    batch_ms: 0,
+                    forward_ms: 0,
+                    loss_ms: 0,
+                    backward_ms: 0,
+                    optimizer_ms: 0,
+                    stats_ms: 0,
+                    refine_ms: 0,
+                    hold_ms: 0,
                 },
                 &[],
             ),

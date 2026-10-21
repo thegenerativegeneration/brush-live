@@ -6,6 +6,7 @@ use brush_dataset::scene::SceneView;
 use brush_dataset::scene_loader::SceneLoader;
 use brush_render::gaussian_splats::Splats;
 use brush_train::config::TrainConfig;
+use brush_train::profile::StepProfile;
 use brush_train::evict::{EvictConfig, ProtectCone};
 use brush_train::train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds};
 use burn::module::Module;
@@ -13,6 +14,7 @@ use burn::tensor::Device;
 use clap::Parser;
 use glam::{UVec2, Vec3};
 use rand::SeedableRng;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -45,7 +47,44 @@ struct LoadArgs {
 }
 
 /// With debug timing on, the step profile is logged every this many steps.
-const PROFILE_LOG_EVERY: u32 = 100;
+pub const PROFILE_LOG_EVERY: u32 = 100;
+
+/// Cumulative milliseconds of the training step's phases since the model started. The phases up to `stats_ms`
+/// count only with `GuideConfig::profile_steps`; `refine_ms` and `hold_ms` are always timed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepTotals {
+    pub batch_ms: u64,
+    pub forward_ms: u64,
+    pub loss_ms: u64,
+    pub backward_ms: u64,
+    pub optimizer_ms: u64,
+    pub stats_ms: u64,
+    pub refine_ms: u64,
+    pub hold_ms: u64,
+}
+
+/// Seconds behind [`StepTotals`] that are not refine.
+#[derive(Clone, Copy, Debug, Default)]
+struct StepSeconds {
+    batch: f64,
+    forward: f64,
+    loss: f64,
+    backward: f64,
+    optimizer: f64,
+    stats: f64,
+    hold: f64,
+}
+
+impl StepSeconds {
+    fn add_profile(&mut self, p: &StepProfile, batch_s: f64) {
+        self.batch += batch_s;
+        self.forward += p.forward_s;
+        self.loss += p.loss_s;
+        self.backward += p.backward_s;
+        self.optimizer += p.optimizer_s;
+        self.stats += p.stats_noise_s;
+    }
+}
 
 /// Splats trained incrementally as keyframes arrive. Splats are kept on the
 /// inner (non-autodiff) device between steps.
@@ -101,6 +140,8 @@ pub struct LiveModel {
     last_step_lr: StepLr,
     /// Seconds spent getting training batches since the last profile log.
     batch_s: f64,
+    /// Seconds per phase since the model started; profile phases are added when the profile is taken.
+    step_s: StepSeconds,
     /// Whether the trainer times its phases; `batch_s` only accumulates then.
     profiling: bool,
     rng: rand::rngs::StdRng,
@@ -149,6 +190,7 @@ impl LiveModel {
             refine_total_s: 0.0,
             last_step_lr: StepLr::default(),
             batch_s: 0.0,
+            step_s: StepSeconds::default(),
             profiling: false,
             rng,
         }
@@ -240,6 +282,27 @@ impl LiveModel {
     /// Milliseconds spent in refine since the model started.
     pub fn refine_total_ms(&self) -> f64 {
         self.refine_total_s * 1e3
+    }
+
+    /// Cumulative phase times since the model started. Takes the trainer's pending step profile first.
+    pub fn step_totals(&mut self) -> StepTotals {
+        if let Some(p) = self.trainer.as_mut().and_then(SplatTrainer::take_profile)
+            && p.steps > 0
+        {
+            self.step_s.add_profile(&p, std::mem::take(&mut self.batch_s));
+        }
+        let ms = |s: f64| (s * 1e3) as u64;
+        let s = &self.step_s;
+        StepTotals {
+            batch_ms: ms(s.batch),
+            forward_ms: ms(s.forward),
+            loss_ms: ms(s.loss),
+            backward_ms: ms(s.backward),
+            optimizer_ms: ms(s.optimizer),
+            stats_ms: ms(s.stats),
+            refine_ms: ms(self.refine_total_s),
+            hold_ms: ms(s.hold),
+        }
     }
 
     /// The last training step's mean LR and position scale; zeros before the first.
@@ -355,7 +418,9 @@ impl LiveModel {
             return;
         }
         if let Some(splats) = self.splats.clone() {
+            let t_hold = web_time::Instant::now();
             self.hold_inactive_if_stale(&splats).await;
+            self.step_s.hold += t_hold.elapsed().as_secs_f64();
         }
         let pending = self.pending_views();
         let junction = self.area.as_mut().and_then(|a| a.junction.pick());
@@ -402,6 +467,7 @@ impl LiveModel {
             && let Some(p) = trainer.take_profile()
             && p.steps > 0
         {
+            self.step_s.add_profile(&p, self.batch_s);
             let ms = |s: f64| s * 1e3 / f64::from(p.steps);
             log::debug!(
                 target: crate::timing::TARGET,
