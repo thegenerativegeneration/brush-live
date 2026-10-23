@@ -29,11 +29,8 @@ fn twin(t: &SplatTrainer) -> SplatTrainer {
         profile: t.profile,
         lpips: t.lpips.clone(),
         sh_background: t.sh_background.clone(),
-        adam_clamped: t.adam_clamped,
-        sh_pruned: t.sh_pruned,
+        tally: t.tally.clone(),
         last_frozen: t.last_frozen.clone(),
-        budget_evicted: t.budget_evicted.clone(),
-        eviction_fell_back: t.eviction_fell_back,
     }
 }
 

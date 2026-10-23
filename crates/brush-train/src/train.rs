@@ -40,6 +40,7 @@ mod divergence;
 
 mod row_state;
 
+use divergence::RefineTally;
 use evict::RefineEvictions;
 use row_state::RowState;
 
@@ -123,17 +124,11 @@ pub struct SplatTrainer {
     /// is off, so the flag-off step never builds a basis, a background image,
     /// or any extra graph node (see `step`'s `match` on this field).
     sh_background: Option<ShBackground>,
-    /// Optimizer elements whose step hit `adam_scaled::MAX_NORMALIZED_STEP`, read back at each refine.
-    adam_clamped: u64,
-    /// Splats refine pruned for a diverged colour (|sh0| > [`MAX_SH0`]).
-    sh_pruned: u64,
+    /// What refine counted: clamped Adam steps, diverged-colour prunes and evictions.
+    tally: RefineTally,
     /// How many splats (a `[1]` tensor) the last step left alone for lying beyond `train_radius_m`; `None` with the
     /// radius off. A count, so row edits between steps leave it as it was.
     last_frozen: Option<Tensor<1, Int>>,
-    /// Rows the last refine evicted per group of its budget ([`Self::budget_evictions`]).
-    budget_evicted: Vec<u32>,
-    /// The last refine's limited eviction widened and took rows ([`Self::eviction_fell_back`]).
-    eviction_fell_back: bool,
 }
 
 /// `(l1, ssim)` kernel weights for `step` (1-based). The RGB loss is
@@ -258,11 +253,8 @@ impl SplatTrainer {
             evict: None,
             rows: RowState::default(),
             sh_background,
-            adam_clamped: 0,
-            sh_pruned: 0,
+            tally: RefineTally::default(),
             last_frozen: None,
-            budget_evicted: Vec::new(),
-            eviction_fell_back: false,
             profile: None,
             #[cfg(not(target_family = "wasm"))]
             lpips,
@@ -283,7 +275,7 @@ impl SplatTrainer {
     /// Optimizer elements whose step was clamped since training started, counted up to the last refine; nonzero
     /// means the optimizer state was inconsistent (see `adam_scaled::MAX_NORMALIZED_STEP`).
     pub fn adam_clamped(&self) -> u64 {
-        self.adam_clamped
+        self.tally.adam_clamped
     }
 
     /// How many splats the last step left alone for lying beyond `train_radius_m` (a `[1]` tensor, read back by
@@ -372,7 +364,7 @@ impl SplatTrainer {
     /// Whether the last refine's limited eviction fell short of what it wanted, widened ([`Self::set_eviction_fallback`];
     /// from opened groups on to no limit) and took rows that way.
     pub fn eviction_fell_back(&self) -> bool {
-        self.eviction_fell_back
+        self.tally.eviction_fell_back
     }
 
     /// Sets the splat budget (`max_splats`) eviction and growth work towards from now on.
@@ -389,7 +381,7 @@ impl SplatTrainer {
     /// Rows the last refine evicted per group of its budget (the budget eviction and the over-cap one together);
     /// empty when it had none.
     pub fn budget_evictions(&self) -> &[u32] {
-        &self.budget_evicted
+        &self.tally.budget_evicted
     }
 
     /// Diagnostic: the rows held by [`Self::set_frozen_rows`], row-aligned with the current splats; `None` when none
@@ -419,7 +411,7 @@ impl SplatTrainer {
 
     /// Splats refine pruned for a diverged colour since training started.
     pub fn sh_pruned(&self) -> u64 {
-        self.sh_pruned
+        self.tally.sh_pruned
     }
 
     /// Percentile bounding box of the splats, refreshed on each refine.

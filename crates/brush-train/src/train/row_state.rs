@@ -52,8 +52,7 @@ impl RowState {
     }
 
     /// Appends one split child per index in `parents` (inner device): life and origin from the parent; the children
-    /// are not held and of no group. Refine takes the held rows and the budget before it splits, so both are `None`
-    /// here today.
+    /// are not held and of no group. Refine takes the held rows and the budget before it splits, so both are `None` here.
     pub fn split(&mut self, parents: Tensor<1, Int>) {
         let n = parents.dims()[0];
         if let Some(origin) = self.origin.as_mut() {

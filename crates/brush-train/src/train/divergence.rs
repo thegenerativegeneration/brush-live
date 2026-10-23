@@ -6,6 +6,20 @@ use burn::tensor::{Bool, Tensor, s};
 
 use super::{MAX_SH0, SplatOptim, SplatTrainer};
 
+/// What refine counted. `adam_clamped` and `sh_pruned` accumulate over the run; `budget_evicted` and
+/// `eviction_fell_back` describe the last refine only.
+#[derive(Clone, Default)]
+pub(super) struct RefineTally {
+    /// Optimizer elements whose step hit `adam_scaled::MAX_NORMALIZED_STEP`, read back at each refine.
+    pub adam_clamped: u64,
+    /// Splats refine pruned for a diverged colour (|sh0| > [`MAX_SH0`]).
+    pub sh_pruned: u64,
+    /// Rows the last refine evicted per group of its budget (`SplatTrainer::budget_evictions`).
+    pub budget_evicted: Vec<u32>,
+    /// The last refine's limited eviction widened and took rows (`SplatTrainer::eviction_fell_back`).
+    pub eviction_fell_back: bool,
+}
+
 impl SplatTrainer {
     /// Adds the Adam steps `optim` clamped since the last refine to `adam_clamped` and resets their counts.
     pub(super) async fn count_clamped(&mut self, optim: &mut SplatOptim) {
@@ -22,7 +36,7 @@ impl SplatTrainer {
                 .into_scalar_async::<i64>()
                 .await
                 .expect("Failed to count clamped optimizer steps");
-            self.adam_clamped += n.max(0) as u64;
+            self.tally.adam_clamped += n.max(0) as u64;
         }
     }
 
@@ -51,7 +65,7 @@ impl SplatTrainer {
             .into_scalar_async::<i32>()
             .await
             .expect("Failed to count diverged colours") as u32;
-        self.sh_pruned += u64::from(count);
+        self.tally.sh_pruned += u64::from(count);
         diverged
     }
 }

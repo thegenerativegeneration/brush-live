@@ -22,7 +22,7 @@ impl SplatTrainer {
         budget: Option<&RowBudget>,
         full: Option<Tensor<1, Bool>>,
     ) -> (Tensor<1, Bool>, Vec<usize>) {
-        self.eviction_fell_back = false;
+        self.tally.eviction_fell_back = false;
         let mut fell_back = false;
         let Some(ev) = self.evict.as_mut() else {
             return (dead, Vec::new());
@@ -150,7 +150,7 @@ impl SplatTrainer {
         log::info!(
             "evict: {count} of {want} wanted (recent backlog {backlog}, seed shortfall {shortfall}, {current} splats)"
         );
-        self.eviction_fell_back = fell_back;
+        self.tally.eviction_fell_back = fell_back;
         (dead.bool_or(mask), picked)
     }
 
@@ -158,7 +158,7 @@ impl SplatTrainer {
     /// it (by eviction importance) down to that count. Needs eviction state; without it nothing is added. Returns the
     /// mask and the rows added, ascending.
     pub(super) async fn evict_over_cap(&self, dead: Tensor<1, Bool>, budget: &RowBudget) -> (Tensor<1, Bool>, Vec<usize>) {
-        let Some(life) = self.evict.as_ref().and(self.rows.life.as_ref()) else {
+        let Some(life) = self.rows.life.as_ref().filter(|_| self.evict.is_some()) else {
             return (dead, Vec::new());
         };
         if !budget.any_over_cap() {
@@ -216,10 +216,10 @@ impl SplatTrainer {
         if let Some(budget) = &budget {
             let (mask, over) = self.evict_over_cap(prune.clone(), budget).await;
             evicted.extend(over);
-            self.budget_evicted = budget.count_by_group(&evicted);
+            self.tally.budget_evicted = budget.count_by_group(&evicted);
             prune = mask;
         } else {
-            self.budget_evicted.clear();
+            self.tally.budget_evicted.clear();
         }
         RefineEvictions {
             prune,
