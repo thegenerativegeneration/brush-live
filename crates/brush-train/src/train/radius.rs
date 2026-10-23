@@ -5,8 +5,9 @@ use brush_render::gaussian_splats::{Splats, fold_min_scale};
 use burn::module::Param;
 use burn::tensor::{Bool, Device, Tensor, activation::sigmoid, s};
 
-use super::SplatTrainer;
+use super::{MIN_SCALE_FREEZE_FRAC, SplatTrainer};
 use crate::evict::SplatLife;
+use crate::stats::RefineRecord;
 
 /// `[N]` flags of the `means` (`[N, 3]`, inner backend) farther than `radius` from `center`.
 pub(super) fn beyond_radius(means: Tensor<2>, center: glam::Vec3, radius: f32) -> Tensor<1, Bool> {
@@ -74,12 +75,11 @@ pub(super) fn bake_trained(
 }
 
 /// `fresh` (the refine's new floor, rows after the split children appended) with the rows set in `untrained`
-/// (`kept`'s rows, the rows before the children) taken from `kept`.
-pub(super) fn keep_floor(
-    fresh: Tensor<1>,
-    kept: Tensor<1>,
-    untrained: Tensor<1, Bool>,
-) -> Tensor<1> {
+/// (`kept`'s rows, the rows before the children) taken from `kept`; `fresh` itself without a kept floor.
+pub(super) fn keep_floor(fresh: Tensor<1>, kept: Option<(Tensor<1>, Tensor<1, Bool>)>) -> Tensor<1> {
+    let Some((kept, untrained)) = kept else {
+        return fresh;
+    };
     let extra = fresh.dims()[0] - kept.dims()[0];
     let device = fresh.device();
     let kept = Tensor::cat(vec![kept, Tensor::zeros([extra], &device)], 0);
@@ -94,6 +94,32 @@ pub(super) fn keep_floor(
 }
 
 impl SplatTrainer {
+    /// Bakes the current 3D-filter floor into `splats` for refine. While the floor still refreshes and rows no step
+    /// trained since the last refine exist (training radius on or rows held), those rows stay raw and keep their floor
+    /// through the refine, so a frozen splat does not get its floor folded in again at every refine; the kept floor
+    /// goes to `refiner.kept_floor`, and the opacities and scales of every row with its floor folded in come back for
+    /// the prune checks. Otherwise every row is baked and `None` comes back.
+    pub(super) fn bake_for_refine(
+        &self,
+        refiner: &mut RefineRecord,
+        splats: Splats,
+        progress: f32,
+    ) -> (Splats, Option<(Tensor<1>, Tensor<2>)>) {
+        let refresh_floor = progress < MIN_SCALE_FREEZE_FRAC
+            && self.config.min_scale_factor > 0.0
+            && !self.view_cams.is_empty();
+        match refiner.untrained().filter(|_| refresh_floor) {
+            Some(untrained) => match bake_trained(splats, &untrained) {
+                Ok(bake) => {
+                    refiner.kept_floor = Some(bake.floor);
+                    (bake.splats, Some((bake.opacities, bake.scales)))
+                }
+                Err(splats) => (splats, None),
+            },
+            None => (splats.bake_min_scale(), None),
+        }
+    }
+
     /// The rows this step leaves alone: splats beyond the training radius plus the rows the caller holds. Records the
     /// radius part in `last_frozen` (`None` with the radius off) and drops held rows that no longer fit `rows`.
     pub(super) fn frozen_for_step(

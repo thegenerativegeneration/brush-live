@@ -4,7 +4,7 @@ use crate::{
     adam_scaled::{AdamScaled, AdamState},
     budget::{EvictionRelax, RowBudget},
     config::TrainConfig,
-    evict::{EvictConfig, Eviction, ProtectCone, SplatLife, read_f32},
+    evict::{EvictConfig, Eviction, ProtectCone, SplatLife},
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
@@ -33,6 +33,12 @@ use tracing::{Instrument, trace_span};
 mod rows;
 
 mod evict;
+
+mod radius;
+
+mod refine_extra;
+
+use evict::RefineEvictions;
 
 pub const BOUND_PERCENTILE: f32 = 0.8;
 
@@ -981,32 +987,9 @@ impl SplatTrainer {
         // current 3D-filter floor into them first — split/clone/prune then see
         // the splat's true scales with no double-apply. A freshly recomputed
         // floor is attached at the end (below), once positions/count are known.
-        // With the training radius on or rows held, rows no step trained since the last refine stay raw and keep
-        // their floor through the refine instead, so a frozen splat does not get its floor folded in again at every
-        // refine.
-        let refresh_floor = progress < MIN_SCALE_FREEZE_FRAC
-            && self.config.min_scale_factor > 0.0
-            && !self.view_cams.is_empty();
-        let untrained_in = refiner.untrained().filter(|_| refresh_floor);
-        let (splats, prune_view) = match untrained_in {
-            Some(untrained) => match radius::bake_trained(splats, &untrained) {
-                Ok(bake) => {
-                    refiner.kept_floor = Some(bake.floor);
-                    (bake.splats, Some((bake.opacities, bake.scales)))
-                }
-                Err(splats) => (splats, None),
-            },
-            None => (splats.bake_min_scale(), None),
-        };
+        let (splats, prune_view) = self.bake_for_refine(&mut refiner, splats, progress);
         let device = splats.device();
-        if let Some(e) = self.evict.as_mut()
-            && let Some(life) = e.life.as_mut()
-        {
-            life.update_importance(
-                refiner.importance_sum.clone(),
-                refiner.importance_views.clone(),
-            );
-        }
+        self.note_refine_importance(&refiner);
 
         let max_allowed_bounds = self.bounds.extent.max_element() * 100.0;
 
@@ -1016,21 +999,7 @@ impl SplatTrainer {
             .optim
             .take()
             .expect("Can only refine after optimizer is initialized");
-        let clamped = [
-            optim.transforms.take_clamped(),
-            optim.sh_coeffs.take_clamped(),
-            optim.opacities.take_clamped(),
-        ]
-        .into_iter()
-        .flatten()
-        .reduce(|a, b| a + b);
-        if let Some(clamped) = clamped {
-            let n = clamped
-                .into_scalar_async::<i64>()
-                .await
-                .expect("Failed to count clamped optimizer steps");
-            self.adam_clamped += n.max(0) as u64;
-        }
+        self.count_clamped(&mut optim).await;
         let (opacities, scales) = prune_view.unwrap_or_else(|| (splats.opacities(), splats.scales()));
         let alpha_mask = opacities.lower_elem(MIN_OPACITY);
 
@@ -1062,25 +1031,7 @@ impl SplatTrainer {
         let sh_bad = row_non_finite(&splats.sh_coeffs.val().flatten(1, 2));
         let opac_bad = row_non_finite(&splats.raw_opacities.val().unsqueeze_dim(1));
         let non_finite_mask = transforms_bad.bool_or(sh_bad).bool_or(opac_bad);
-        let n = splats.num_splats() as usize;
-        let sh_diverged = splats
-            .sh_coeffs
-            .val()
-            .slice(s![.., 0..1, ..])
-            .reshape([n, 3])
-            .abs()
-            .greater_elem(MAX_SH0)
-            .any_dim(1)
-            .squeeze_dim(1)
-            .bool_and(non_finite_mask.clone().bool_not());
-        let num_pruned_sh = sh_diverged
-            .clone()
-            .int()
-            .sum()
-            .into_scalar_async::<i32>()
-            .await
-            .expect("Failed to count diverged colours") as u32;
-        self.sh_pruned += u64::from(num_pruned_sh);
+        let sh_diverged = self.diverged_colours(&splats, non_finite_mask.clone()).await;
         let num_pruned_non_finite = non_finite_mask
             .clone()
             .int()
@@ -1095,25 +1046,8 @@ impl SplatTrainer {
             .bool_or(non_finite_mask)
             .bool_or(sh_diverged);
 
-        let n = splats.num_splats() as usize;
-        let budget = self.row_budget.take().filter(|b| Self::budget_fits(b, Some(n)));
-        let full = budget
-            .as_ref()
-            .and_then(RowBudget::no_growth)
-            .map(|f| Tensor::<1, Bool>::from_data(TensorData::new(f, [n]), &prune_mask.device()));
-        let (mut prune_mask, mut evicted) = self
-            .add_evictions(iter, &splats, &refiner, prune_mask, held, budget.as_ref(), full.clone())
-            .await;
-        let evicted_for_total = evicted.len();
-        if let Some(budget) = &budget {
-            let (mask, over) = self.evict_over_cap(prune_mask.clone(), budget).await;
-            evicted.extend(over);
-            self.budget_evicted = budget.count_by_group(&evicted);
-            prune_mask = mask;
-        } else {
-            self.budget_evicted.clear();
-        }
-        let num_evicted = evicted.len() as u32;
+        let RefineEvictions { prune: prune_mask, full, num_evicted, for_total: evicted_for_total } =
+            self.evict_for_refine(iter, &splats, &refiner, prune_mask, held).await;
         let life = self.evict.as_mut().and_then(|e| e.life.as_mut());
         let origin = self.origin.as_mut();
         let (mut splats, refiner, pruned_count, full) =
@@ -1124,31 +1058,13 @@ impl SplatTrainer {
         let untrained = refiner.untrained();
         let no_growth = radius::either(untrained.clone(), full);
         let mut split_inds = HashSet::new();
-        // After an eviction for the total budget, the freed room goes to newly observed cells only (rows a group gave
-        // for its own cap free no room for others).
-        let recent_mask = match self.evict.as_mut() {
-            Some(e) => {
-                let mask = if evicted_for_total > 0 {
-                    let means = read_f32(splats.means()).await;
-                    Some(e.recent.mask(&means, e.config.recent_refines))
-                } else {
-                    None
-                };
-                e.recent.tick();
-                mask
-            }
-            None => None,
-        };
+        let recent_mask = self.recent_growth_mask(&splats, evicted_for_total).await;
 
         // Always replace dead gaussians, so that the pruned budget is reused.
         // Evicted ones are not replaced: freeing their budget is the point.
         if num_dead > 0 {
             // Replacement weighting: opacity × visibility.
-            let vis_f = refiner.vis_mask().float();
-            let vis_f = match &no_growth {
-                Some(u) => vis_f.mask_fill(u.clone(), 0.0),
-                None => vis_f,
-            };
+            let vis_f = trained_only(refiner.vis_mask(), no_growth.as_ref()).float();
             let resampled_weights = splats.opacities() * vis_f.clone();
             let resampled_weights = resampled_weights
                 .into_data_async()
@@ -1277,11 +1193,7 @@ impl SplatTrainer {
             if let Some(f) =
                 compute_min_scale(&means, &self.view_cams, self.config.min_scale_factor)
             {
-                let f = match kept_floor {
-                    Some((kept, untrained)) => radius::keep_floor(f, kept, untrained),
-                    None => f,
-                };
-                splats = splats.with_min_scale(f);
+                splats = splats.with_min_scale(radius::keep_floor(f, kept_floor));
             }
         }
 
@@ -1567,8 +1479,6 @@ mod profile_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod sh_background_integration_tests;
-
-mod radius;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod radius_tests;

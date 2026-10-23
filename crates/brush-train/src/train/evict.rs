@@ -179,6 +179,86 @@ impl SplatTrainer {
         log::info!("evict: {} over their group's cap", picked.len());
         (dead.bool_or(mask), picked)
     }
+
+    /// Hands the refine window's importance sums to the eviction life, when eviction tracks one.
+    pub(super) fn note_refine_importance(&mut self, refiner: &RefineRecord) {
+        if let Some(e) = self.evict.as_mut()
+            && let Some(life) = e.life.as_mut()
+        {
+            life.update_importance(
+                refiner.importance_sum.clone(),
+                refiner.importance_views.clone(),
+            );
+        }
+    }
+
+    /// Adds this refine's evictions to the `prune` mask: the budget eviction ([`Self::add_evictions`]) and, under a
+    /// row budget that fits `splats`, the eviction of groups over their cap. Takes the row budget and records the
+    /// per-group eviction counts in `budget_evicted`.
+    pub(super) async fn evict_for_refine(
+        &mut self,
+        iter: u32,
+        splats: &Splats,
+        refiner: &RefineRecord,
+        prune: Tensor<1, Bool>,
+        held: Option<Tensor<1, Bool>>,
+    ) -> RefineEvictions {
+        let n = splats.num_splats() as usize;
+        let budget = self.row_budget.take().filter(|b| Self::budget_fits(b, Some(n)));
+        let full = budget
+            .as_ref()
+            .and_then(RowBudget::no_growth)
+            .map(|f| Tensor::<1, Bool>::from_data(TensorData::new(f, [n]), &prune.device()));
+        let (mut prune, mut evicted) = self
+            .add_evictions(iter, splats, refiner, prune, held, budget.as_ref(), full.clone())
+            .await;
+        let for_total = evicted.len();
+        if let Some(budget) = &budget {
+            let (mask, over) = self.evict_over_cap(prune.clone(), budget).await;
+            evicted.extend(over);
+            self.budget_evicted = budget.count_by_group(&evicted);
+            prune = mask;
+        } else {
+            self.budget_evicted.clear();
+        }
+        RefineEvictions {
+            prune,
+            full,
+            num_evicted: evicted.len() as u32,
+            for_total,
+        }
+    }
+
+    /// After an eviction for the total budget (`evicted_for_total > 0`), the rows of `splats` in newly observed cells:
+    /// the freed room goes to them only (rows a group gave for its own cap free no room for others). `None` otherwise
+    /// or without eviction state. Ticks the recent-cell window.
+    pub(super) async fn recent_growth_mask(
+        &mut self,
+        splats: &Splats,
+        evicted_for_total: usize,
+    ) -> Option<Vec<bool>> {
+        let e = self.evict.as_mut()?;
+        let mask = if evicted_for_total > 0 {
+            let means = read_f32(splats.means()).await;
+            Some(e.recent.mask(&means, e.config.recent_refines))
+        } else {
+            None
+        };
+        e.recent.tick();
+        mask
+    }
+}
+
+/// The evictions of one refine, from [`SplatTrainer::evict_for_refine`].
+pub(super) struct RefineEvictions {
+    /// The prune mask with the evicted rows added.
+    pub prune: Tensor<1, Bool>,
+    /// Rows of a group at its cap: no growth from them.
+    pub full: Option<Tensor<1, Bool>>,
+    /// Rows evicted in total.
+    pub num_evicted: u32,
+    /// Rows evicted for the total budget (not for a group's cap).
+    pub for_total: usize,
 }
 
 /// What one eviction pick shares between the limited pass and the widened one.
