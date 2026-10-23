@@ -68,16 +68,21 @@ impl LiveModel {
             return splats;
         };
         let tile_size = area.registry.params().tile_size;
-        let mut keys: Vec<TileKey> =
-            keys.iter().copied().filter(|&k| area.registry.get(k).is_some_and(|t| !t.resident)).collect();
+        let mut keys: Vec<TileKey> = keys
+            .iter()
+            .copied()
+            .filter(|&k| area.registry.get(k).is_some_and(|t| !t.resident))
+            .collect();
         if keys.is_empty() {
             return splats;
         }
         keys.sort_by(|a, b| {
-            a.footprint_distance(centre, tile_size).total_cmp(&b.footprint_distance(centre, tile_size)).then(a.cmp(b))
+            a.footprint_distance(centre, tile_size)
+                .total_cmp(&b.footprint_distance(centre, tile_size))
+                .then(a.cmp(b))
         });
         keys.dedup();
-        // The waits keep earlier queued GPU work out of the event's time, and only the work it queued in.
+        // Waiting here and after the loop times the GPU work this event queues, and none queued before it.
         crate::timing::wait_splats(&splats).await;
         let t = web_time::Instant::now();
         let (mut tiles, mut restored) = (0u32, 0u32);
