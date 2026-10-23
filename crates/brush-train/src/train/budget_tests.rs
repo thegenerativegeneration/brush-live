@@ -22,7 +22,7 @@ fn halves(g0: GroupBudget, g1: GroupBudget, limit_eviction: bool) -> RowBudget {
 
 /// The importance of the splats left after a refine, in order.
 async fn kept_importance(trainer: &SplatTrainer) -> Vec<f32> {
-    let life = trainer.evict.as_ref().unwrap().life.as_ref().unwrap();
+    let life = trainer.rows.life.as_ref().unwrap();
     rows(life.importance.clone().unsqueeze_dim::<2>(1)).await.concat()
 }
 
@@ -154,15 +154,15 @@ async fn the_budget_follows_take_and_append() {
     let s = trainer.append_rows(s, &taken.unwrap());
     let mut want: Vec<u32> = (1..N).filter(|&i| i != 40).map(|i| u32::from(i >= 30)).collect();
     want.extend([NO_GROUP, NO_GROUP]);
-    assert_eq!(trainer.row_budget.as_ref().unwrap().group, want);
+    assert_eq!(trainer.rows.budget.as_ref().unwrap().group, want);
     trainer.set_row_budget(Some(halves(group(1, true, 0), group(1, true, 0), false)).map(|mut b| {
         b.group.pop();
         b
     }));
-    assert!(trainer.row_budget.is_none(), "a short budget was kept");
+    assert!(trainer.rows.budget.is_none(), "a short budget was kept");
     trainer.set_row_budget(Some(RowBudget { group: want, ..halves(group(100, false, 0), group(100, false, 0), false) }));
     let _ = trainer.refine(1, s).await;
-    assert!(trainer.row_budget.is_none(), "refine kept the budget");
+    assert!(trainer.rows.budget.is_none(), "refine kept the budget");
 }
 
 /// A limited eviction short of what it wants falls back: group 0 gives its quota of 2 (rows 0 and 1), then, opened, group

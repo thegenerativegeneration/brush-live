@@ -272,7 +272,6 @@ impl SplatLife {
 #[cfg_attr(test, derive(Clone))]
 pub(crate) struct Eviction {
     pub config: EvictConfig,
-    pub life: Option<SplatLife>,
     pub protect: Option<ProtectCone>,
     pub seed_shortfall: u32,
     pub recent: RecentCells,
@@ -282,7 +281,6 @@ impl Eviction {
     pub(crate) fn new(config: EvictConfig) -> Self {
         Self {
             config,
-            life: None,
             protect: None,
             seed_shortfall: 0,
             recent: RecentCells::default(),

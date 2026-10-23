@@ -79,7 +79,7 @@ async fn refine_drops_the_mask_and_none_is_todays_path() {
     trainer.set_frozen_rows(Some(far_rows_mask(NEAR + FAR + 1, &device)));
     let s = trainer.step(batch(), splats(0.9, &device).train()).await.0;
     let s = trainer.refine(1, s.valid()).await.0;
-    assert!(trainer.frozen_rows.is_none(), "refine kept the mask");
+    assert!(trainer.rows.held.is_none(), "refine kept the mask");
     trainer.set_frozen_rows(None);
     trainer.step(batch(), s.train()).await;
     assert!(trainer.refine_record.as_ref().unwrap().trained.is_none(), "no mask, no trained column");
@@ -98,7 +98,8 @@ async fn the_mask_follows_take_and_append() {
     let taken = taken.expect("two rows");
     let s = trainer.append_rows(s, &taken);
     let mask: Vec<bool> = trainer
-        .frozen_rows
+        .rows
+        .held
         .clone()
         .unwrap()
         .int()
@@ -147,7 +148,7 @@ async fn a_mask_of_the_wrong_length_is_dropped() {
     trainer.set_frozen_rows(Some(far_rows_mask(NEAR + FAR, &device)));
     assert!(trainer.frozen_rows().is_none(), "set_frozen_rows kept a short mask");
     // A mask that fits when set but not at the step (rows changed behind the trainer's back) is dropped there.
-    trainer.frozen_rows = Some(far_rows_mask(NEAR + FAR, &device).bool_not());
+    trainer.rows.held = Some(far_rows_mask(NEAR + FAR, &device).bool_not());
     let (before, after, _) = step(&mut trainer, s).await;
     assert!(trainer.frozen_rows().is_none());
     assert_ne!(before.rows(FAR_ROWS), after.rows(FAR_ROWS), "far rows did not train");

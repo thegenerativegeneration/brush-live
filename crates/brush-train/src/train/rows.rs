@@ -64,11 +64,11 @@ impl SplatTrainer {
         let indices = rows.map(|r| index_tensor(r, &splats.device().inner()));
         let at = indices.as_ref();
         let count = rows.map_or(n, <[usize]>::len);
-        let life = self.evict.as_ref().and_then(|e| e.life.as_ref());
+        let life = self.rows.life.as_ref();
         if let Some(life) = life {
             assert_eq!(life.len(), n, "life out of step with the splats");
         }
-        if let Some(origin) = &self.origin {
+        if let Some(origin) = &self.rows.origin {
             assert_eq!(origin.len(), n, "origin tags out of step with the splats");
         }
 
@@ -112,7 +112,7 @@ impl SplatTrainer {
                 tx = tx.register(t.clone());
             }
         }
-        if let Some(origin) = &self.origin {
+        if let Some(origin) = &self.rows.origin {
             tx = tx.register(pick(origin.tags(), at));
         }
         let mut data = tx
@@ -120,7 +120,7 @@ impl SplatTrainer {
             .await
             .expect("splat rows readback")
             .into_iter();
-        let origin = match &self.origin {
+        let origin = match &self.rows.origin {
             Some(_) => data
                 .next_back()
                 .expect("origin tags readback")
@@ -227,20 +227,7 @@ impl SplatTrainer {
             }
         };
         splats.min_scale = splats.min_scale.map(|f| f.select(0, keep_inner.clone()));
-        if let Some(life) = self.evict.as_mut().and_then(|e| e.life.as_mut()) {
-            life.keep(keep_inner.clone());
-        }
-        if let Some(origin) = self.origin.as_mut() {
-            origin.keep(keep_inner.clone());
-        }
-        self.frozen_rows = self
-            .frozen_rows
-            .take()
-            .map(|f| f.select(0, keep_inner.clone()));
-        if let Some(budget) = self.row_budget.as_mut() {
-            budget.remove(take);
-        }
-        self.refine_record = self.refine_record.take().map(|r| r.keep(keep_inner));
+        self.keep_rows(keep_inner, Some(take));
         self.check_origin_rows(&splats);
         (splats, Some(rows))
     }
@@ -265,8 +252,9 @@ impl SplatTrainer {
         );
         let device = splats.device().inner();
         // Life starts at the first step; rows appended before it carry state the step would otherwise reset.
-        if let Some(e) = self.evict.as_mut() {
-            e.life
+        if self.evict.is_some() {
+            self.rows
+                .life
                 .get_or_insert_with(|| SplatLife::new(splats.num_splats() as usize, &device));
         }
         let new = rows.to_splats(&device);
@@ -279,10 +267,10 @@ impl SplatTrainer {
         } else {
             self.append_raw(splats, new.bake_min_scale(), None, None, moments)
         };
-        if let Some(origin) = self.origin.as_mut() {
+        if let Some(origin) = self.rows.origin.as_mut() {
             origin.set_tail(&rows.origin);
         }
-        if let Some(life) = self.evict.as_mut().and_then(|e| e.life.as_mut()) {
+        if let Some(life) = self.rows.life.as_mut() {
             life.set_tail(&rows.age, &rows.importance, &rows.trained);
         }
         splats

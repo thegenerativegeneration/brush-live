@@ -307,7 +307,10 @@ async fn masked_count_survives_take_and_append() {
     let s = s.valid();
     let count = |t: &SplatTrainer| {
         let c = t.masked_by_radius().expect("radius on, a step ran");
-        async move { c.into_data_async().await.unwrap().convert::<i64>().try_to_vec::<i64>().unwrap()[0] }
+        async move {
+            let data = c.into_data_async().await.unwrap();
+            data.convert::<i64>().try_to_vec::<i64>().unwrap()[0]
+        }
     };
     let c = count(&trainer).await;
     assert!(c > 4, "rows beyond the radius: {c}");
@@ -368,10 +371,10 @@ fn assert_rows_aligned(trainer: &SplatTrainer, splats: &Splats) {
     let m = optim.opacities.momentum.as_ref().unwrap();
     assert_eq!(m.moment_1.dims()[0], n, "opacity moment 1");
     assert_eq!(m.moment_2.dims()[0], n, "opacity moment 2");
-    let life = trainer.evict.as_ref().unwrap().life.as_ref().unwrap();
+    let life = trainer.rows.life.as_ref().unwrap();
     assert_eq!(life.len(), n, "life");
     assert_eq!((life.importance.dims()[0], life.trained.dims()[0]), (n, n), "life importance, trained");
-    assert_eq!(trainer.origin.as_ref().unwrap().len(), n, "origin");
+    assert_eq!(trainer.rows.origin.as_ref().unwrap().len(), n, "origin");
 }
 
 #[tokio::test]

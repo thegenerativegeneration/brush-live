@@ -130,11 +130,7 @@ async fn eviction_removes_lowest_and_keeps_adam_rows_aligned() {
         assert_eq!(after_means[row], before_means[src], "mean row {row}");
     }
 
-    let life = trainer
-        .evict
-        .as_ref()
-        .and_then(|e| e.life.as_ref())
-        .expect("life");
+    let life = trainer.rows.life.as_ref().expect("life");
     assert_eq!(life.len(), N - 6);
     let after_imp = rows(life.importance.clone().unsqueeze_dim::<2>(1)).await;
     let expect: Vec<Vec<f32>> = kept.iter().map(|&i| vec![imp[i]]).collect();
@@ -237,11 +233,7 @@ async fn eviction_then_split_fills_to_growth_limit() {
     let optim = trainer.optim.as_ref().expect("optimizer");
     let m = optim.transforms.momentum.as_ref().expect("momentum");
     assert_eq!(m.moment_1.dims()[0], 57);
-    let life = trainer
-        .evict
-        .as_ref()
-        .and_then(|e| e.life.as_ref())
-        .expect("life");
+    let life = trainer.rows.life.as_ref().expect("life");
     assert_eq!(life.len(), 57);
     let imp = rows(life.importance.clone().unsqueeze_dim::<2>(1)).await;
     let age = rows(life.age.clone().unsqueeze_dim::<2>(1)).await;
@@ -446,12 +438,12 @@ async fn held_rows_are_never_evicted() {
     trainer.note_seed_shortfall(1);
     let (s, stats) = trainer.refine(1, s).await;
     assert_eq!(stats.num_evicted, 6);
-    let life = trainer.evict.as_ref().unwrap().life.as_ref().unwrap();
+    let life = trainer.rows.life.as_ref().unwrap();
     let kept: Vec<f32> = rows(life.importance.clone().unsqueeze_dim::<2>(1))
         .await
         .concat();
     let want: Vec<f32> = imp.iter().copied().filter(|&v| !(6.0..12.0).contains(&v)).collect();
     assert_eq!(kept, want, "the held splats stay, the next six least important go");
     assert_eq!(s.num_splats() as usize, N - 6);
-    assert!(trainer.frozen_rows.is_none());
+    assert!(trainer.rows.held.is_none());
 }

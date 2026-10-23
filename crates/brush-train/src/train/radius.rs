@@ -115,7 +115,8 @@ impl SplatTrainer {
     }
 
     /// The rows this step leaves alone: splats beyond the training radius plus the rows the caller holds. Records how
-    /// many splats lie beyond the radius in `last_frozen` (`None` with the radius off) and drops held rows that no longer fit `rows`.
+    /// many splats lie beyond the radius in `last_frozen` (`None` with the radius off) and drops held rows that no
+    /// longer fit `rows`.
     pub(super) fn frozen_for_step(
         &mut self,
         means: Tensor<2>,
@@ -125,12 +126,12 @@ impl SplatTrainer {
         let beyond = (self.config.train_radius_m > 0.0)
             .then(|| beyond_radius(means, camera_pos, self.config.train_radius_m));
         self.last_frozen = beyond.as_ref().map(|b| b.clone().int().sum());
-        if let Some(held) = &self.frozen_rows
+        if let Some(held) = &self.rows.held
             && !Self::held_fits(held.dims()[0], Some(rows))
         {
-            self.frozen_rows = None;
+            self.rows.held = None;
         }
-        either(beyond, self.frozen_rows.clone())
+        either(beyond, self.rows.held.clone())
     }
 
     /// Marks the rows `frozen` does not hold as trained in the refine record and the eviction life. Call after the
@@ -150,8 +151,9 @@ impl SplatTrainer {
                 None => {}
             }
         }
-        if let Some(e) = self.evict.as_mut() {
-            e.life
+        if self.evict.is_some() {
+            self.rows
+                .life
                 .get_or_insert_with(|| SplatLife::new(rows, device))
                 .mark_trained(frozen);
         }

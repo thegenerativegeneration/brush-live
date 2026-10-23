@@ -27,7 +27,7 @@ impl SplatTrainer {
         let Some(ev) = self.evict.as_mut() else {
             return (dead, Vec::new());
         };
-        let Some(life) = ev.life.as_mut() else {
+        let Some(life) = self.rows.life.as_mut() else {
             return (dead, Vec::new());
         };
         life.tick();
@@ -158,7 +158,7 @@ impl SplatTrainer {
     /// it (by eviction importance) down to that count. Needs eviction state; without it nothing is added. Returns the
     /// mask and the rows added, ascending.
     pub(super) async fn evict_over_cap(&self, dead: Tensor<1, Bool>, budget: &RowBudget) -> (Tensor<1, Bool>, Vec<usize>) {
-        let Some(life) = self.evict.as_ref().and_then(|e| e.life.as_ref()) else {
+        let Some(life) = self.evict.as_ref().and(self.rows.life.as_ref()) else {
             return (dead, Vec::new());
         };
         if !budget.any_over_cap() {
@@ -182,8 +182,8 @@ impl SplatTrainer {
 
     /// Hands the refine window's importance sums to the eviction life, when eviction tracks one.
     pub(super) fn note_refine_importance(&mut self, refiner: &RefineRecord) {
-        if let Some(e) = self.evict.as_mut()
-            && let Some(life) = e.life.as_mut()
+        if self.evict.is_some()
+            && let Some(life) = self.rows.life.as_mut()
         {
             life.update_importance(
                 refiner.importance_sum.clone(),
@@ -204,7 +204,7 @@ impl SplatTrainer {
         held: Option<Tensor<1, Bool>>,
     ) -> RefineEvictions {
         let n = splats.num_splats() as usize;
-        let budget = self.row_budget.take().filter(|b| Self::budget_fits(b, Some(n)));
+        let budget = self.rows.budget.take().filter(|b| Self::budget_fits(b, Some(n)));
         let full = budget
             .as_ref()
             .and_then(RowBudget::no_growth)
