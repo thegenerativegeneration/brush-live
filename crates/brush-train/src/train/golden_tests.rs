@@ -1,6 +1,6 @@
 //! Characterization of `step` and `refine` with every fork-only path on at once: SH background with the alpha
 //! penalty, training radius, held rows, a two-group row budget, eviction, origin tracking and the min-scale floor.
-//! The golden numbers were recorded before `train.rs` was split; a behaviour-preserving change reproduces them.
+//! A change that keeps `step` and `refine` behaviour reproduces the golden numbers.
 
 use super::radius_tests::{NEAR, batch, device, floats, splats};
 use super::*;

@@ -332,7 +332,9 @@ impl ShBackground {
     }
 
     /// The prediction `pred` (`[h, w, 4]`, RGB + alpha) with the globe composited into
-    /// RGB behind the render's own alpha; the alpha channel is untouched. Also the
+    /// RGB behind the render's own alpha; the alpha channel is untouched (the alpha-match
+    /// loss reads it). That alpha is the true accumulated alpha: the rasterizer writes it
+    /// into channel 3 whatever the render background (`kernels::rasterize`'s `final_a`). Also the
     /// background alpha penalty (Splatfacto-W) when `alpha_weight > 0`: where the
     /// globe already matches the photo `gt_packed`, opacity is a floater. The globe
     /// is evaluated on a coarse block grid and upsampled; the penalty uses the same grid.
@@ -363,10 +365,9 @@ impl ShBackground {
         (Tensor::cat(vec![composited, alpha], 2), penalty)
     }
 
-    /// The coefficients, on the autodiff graph — composite with this (not
-    /// with [`image`]'s output during training) so gradients reach the
-    /// globe through the same graph the splats use, and a single
-    /// `backward()` covers both.
+    /// The coefficients, on the autodiff graph. [`Self::composite`] builds the training
+    /// background from these (not from [`image`]'s output) so gradients reach the globe
+    /// through the same graph the splats use, and a single `backward()` covers both.
     pub fn coeffs(&self) -> Tensor<2> {
         self.coeffs.clone()
     }

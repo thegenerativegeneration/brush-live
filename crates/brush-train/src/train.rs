@@ -36,7 +36,7 @@ mod evict;
 
 mod radius;
 
-mod refine_extra;
+mod divergence;
 
 use evict::RefineEvictions;
 
@@ -751,13 +751,7 @@ impl SplatTrainer {
                 },
             };
 
-            // Flag off: `pred_final` is exactly `pred_image`, so the loss
-            // call below is byte-for-byte today's call. Flag on: composite
-            // the globe into the RGB channels using the render's own alpha
-            // as the weight (`brush_render`'s rasterizer writes the true
-            // accumulated alpha into channel 3 regardless of the render
-            // background — see `kernels::rasterize`'s `final_a`), keeping
-            // the alpha channel itself untouched for the alpha-match path.
+            // With the globe on, composite it behind the render's alpha (ShBackground::composite).
             let (pred_final, globe_alpha_penalty) = match self.sh_background.as_mut() {
                 Some(bg) => bg.composite(
                     pred_image.clone(),
@@ -925,7 +919,7 @@ impl SplatTrainer {
                 .refine_record
                 .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
             record.gather_stats(refine_weight, importance, visible.clone(), max_radius);
-            self.mark_trained(frozen.as_ref(), &visible, splats.num_splats(), &device);
+            self.mark_trained(frozen.as_ref(), &visible, splats.num_splats() as usize, &device);
         });
 
         // Noise uses the forward's floored opacities, without building an autodiff graph. Splats beyond the
@@ -1349,10 +1343,7 @@ impl SplatTrainer {
         let minus_opac = self.config.opac_decay * t_shrink_strength;
 
         // Lower opacity slowly over time; `untrained` rows (children appended by the split are trained) keep theirs.
-        let keep = untrained.map(|u| {
-            let children = Tensor::<1>::zeros([refine_count], &u.device()).greater_elem(0.0);
-            Tensor::cat(vec![u, children], 0)
-        });
+        let keep = untrained.map(|u| radius::pad_unset(u, refine_count));
         splats.raw_opacities = splats.raw_opacities.map(|f| {
             let new_opac = sigmoid(f.clone()) - minus_opac;
             let decayed = inv_sigmoid(new_opac.clamp(1e-12, 1.0 - 1e-12));

@@ -83,13 +83,7 @@ pub(super) fn keep_floor(fresh: Tensor<1>, kept: Option<(Tensor<1>, Tensor<1, Bo
     let extra = fresh.dims()[0] - kept.dims()[0];
     let device = fresh.device();
     let kept = Tensor::cat(vec![kept, Tensor::zeros([extra], &device)], 0);
-    let untrained = Tensor::cat(
-        vec![
-            untrained,
-            Tensor::<1>::zeros([extra], &device).greater_elem(0.0),
-        ],
-        0,
-    );
+    let untrained = pad_unset(untrained, extra);
     fresh.mask_where(untrained, kept)
 }
 
@@ -145,7 +139,7 @@ impl SplatTrainer {
         &mut self,
         frozen: Option<&Tensor<1, Bool>>,
         visible: &Tensor<1>,
-        rows: u32,
+        rows: usize,
         device: &Device,
     ) {
         if let Some(record) = self.refine_record.as_mut() {
@@ -158,7 +152,7 @@ impl SplatTrainer {
         }
         if let Some(e) = self.evict.as_mut() {
             e.life
-                .get_or_insert_with(|| SplatLife::new(rows as usize, device))
+                .get_or_insert_with(|| SplatLife::new(rows, device))
                 .mark_trained(frozen);
         }
     }
