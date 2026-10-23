@@ -113,34 +113,7 @@ pub(super) async fn worker(
         w.acc.train_s += dt;
         w.totals_s.train += dt;
         w.acc.steps += 1;
-        if w.step_cap_reached() {
-            log::info!(
-                "max_train_steps reached: training stopped at step {}",
-                w.live.iter()
-            );
-        }
-        if w.preview.due(Instant::now()) {
-            w.wait_for_training();
-            let t = Instant::now();
-            w.publish_preview().await;
-            w.totals_s.preview += t.elapsed().as_secs_f64();
-        }
-        let now = w.clock.elapsed().as_secs_f64();
-        if w.voxel_cadence.due(now) {
-            w.wait_for_training();
-            let now = w.clock.elapsed().as_secs_f64();
-            let t = Instant::now();
-            w.voxel_round(now).await;
-            w.totals_s.voxel += t.elapsed().as_secs_f64();
-        }
-        let (received, now) = (w.holdout.received(), w.clock.elapsed().as_secs_f64());
-        if w.holdout.has_views()
-            && let Some(extras) = w.eval_schedule.due(received, now)
-        {
-            let scored = w.eval_holdout(extras, false).await;
-            w.eval_schedule.record(received, now, extras, scored);
-        }
-        w.publish_status();
+        w.after_step().await;
         brush_async::yield_now().await;
     }
 }
@@ -292,6 +265,39 @@ impl Worker {
         self.config
             .max_train_steps
             .is_some_and(|n| self.live.iter() >= n)
+    }
+
+    /// Everything that follows a training step: the step-cap log, the preview, a voxel round and the
+    /// holdout eval when due, then the status.
+    async fn after_step(&mut self) {
+        if self.step_cap_reached() {
+            log::info!(
+                "max_train_steps reached: training stopped at step {}",
+                self.live.iter()
+            );
+        }
+        if self.preview.due(Instant::now()) {
+            self.wait_for_training();
+            let t = Instant::now();
+            self.publish_preview().await;
+            self.totals_s.preview += t.elapsed().as_secs_f64();
+        }
+        let now = self.clock.elapsed().as_secs_f64();
+        if self.voxel_cadence.due(now) {
+            self.wait_for_training();
+            let now = self.clock.elapsed().as_secs_f64();
+            let t = Instant::now();
+            self.voxel_round(now).await;
+            self.totals_s.voxel += t.elapsed().as_secs_f64();
+        }
+        let (received, now) = (self.holdout.received(), self.clock.elapsed().as_secs_f64());
+        if self.holdout.has_views()
+            && let Some(extras) = self.eval_schedule.due(received, now)
+        {
+            let scored = self.eval_holdout(extras, false).await;
+            self.eval_schedule.record(received, now, extras, scored);
+        }
+        self.publish_status();
     }
 
     /// Waits for all queued GPU work, which is training's unless an
