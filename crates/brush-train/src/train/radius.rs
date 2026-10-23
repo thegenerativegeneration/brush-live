@@ -114,8 +114,8 @@ impl SplatTrainer {
         }
     }
 
-    /// The rows this step leaves alone: splats beyond the training radius plus the rows the caller holds. Records the
-    /// radius part in `last_frozen` (`None` with the radius off) and drops held rows that no longer fit `rows`.
+    /// The rows this step leaves alone: splats beyond the training radius plus the rows the caller holds. Records how
+    /// many splats lie beyond the radius in `last_frozen` (`None` with the radius off) and drops held rows that no longer fit `rows`.
     pub(super) fn frozen_for_step(
         &mut self,
         means: Tensor<2>,
@@ -124,7 +124,7 @@ impl SplatTrainer {
     ) -> Option<Tensor<1, Bool>> {
         let beyond = (self.config.train_radius_m > 0.0)
             .then(|| beyond_radius(means, camera_pos, self.config.train_radius_m));
-        self.last_frozen = beyond.clone();
+        self.last_frozen = beyond.as_ref().map(|b| b.clone().int().sum());
         if let Some(held) = &self.frozen_rows
             && !Self::held_fits(held.dims()[0], Some(rows))
         {

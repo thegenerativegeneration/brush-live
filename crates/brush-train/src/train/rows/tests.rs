@@ -256,7 +256,7 @@ async fn appended_rows_are_baked_into_splats_without_a_floor() {
     }
 }
 
-/// With the training radius on the refine record carries the trained column and the trainer the last frozen mask;
+/// With the training radius on the refine record carries the trained column and the trainer the last step's frozen count;
 /// taking and appending rows keeps every per-row tensor as long as the splats, and training runs on.
 #[tokio::test]
 async fn take_and_append_keep_rows_aligned_with_the_radius_on() {
@@ -273,11 +273,6 @@ async fn take_and_append_keep_rows_aligned_with_the_radius_on() {
     let (s, taken) = trainer.take_rows(s, &take).await;
     let taken = taken.expect("a quarter of the rows");
     assert_rows_aligned(&trainer, &s);
-    // The last step's frozen mask is only summed (`masked_by_radius`); take keeps it to the remaining rows.
-    assert_eq!(
-        trainer.last_frozen.as_ref().map(|f| f.dims()[0]),
-        Some(s.num_splats() as usize)
-    );
     let s = trainer.append_rows(s, &taken);
     assert_eq!(s.num_splats() as usize, n);
     assert_rows_aligned(&trainer, &s);
@@ -303,6 +298,32 @@ async fn take_and_append_keep_rows_aligned_with_the_radius_on() {
     assert_rows_aligned(&trainer, &s);
 }
 
+/// `masked_by_radius` is the last step's count; taking and appending rows afterwards leaves it as it was.
+#[tokio::test]
+async fn masked_count_survives_take_and_append() {
+    // Splats lie 2.0-2.07 m from the camera: rows past x = 0.45 (i > 45) are beyond the radius.
+    let (mut trainer, s) = trained_with(60, &["--train-radius-m", "2.05"], true).await;
+    let (s, _) = trainer.step(batch(), s.train()).await;
+    let s = s.valid();
+    let count = |t: &SplatTrainer| {
+        let c = t.masked_by_radius().expect("radius on, a step ran");
+        async move { c.into_data_async().await.unwrap().convert::<i64>().try_to_vec::<i64>().unwrap()[0] }
+    };
+    let c = count(&trainer).await;
+    assert!(c > 4, "rows beyond the radius: {c}");
+    let n = s.num_splats() as usize;
+    // Ten rows, four of them beyond the radius.
+    let take: Vec<bool> = (0..n).map(|i| (40..50).contains(&i)).collect();
+    let (s, taken) = trainer.take_rows(s, &take).await;
+    assert_eq!(count(&trainer).await, c, "after take");
+    let s = trainer.append_rows(s, &taken.expect("ten rows"));
+    assert_eq!(count(&trainer).await, c, "after append");
+    let take: Vec<bool> = (0..n).map(|i| i < 5).collect();
+    let (_, taken) = trainer.take_rows(s, &take).await;
+    assert!(taken.is_some());
+    assert_eq!(count(&trainer).await, c, "after the second take");
+}
+
 /// The opacity parameter's first Adam moment, per splat.
 async fn opacity_moment(trainer: &SplatTrainer) -> Vec<f32> {
     let optim = trainer.optim.as_ref().expect("a step ran");
@@ -316,8 +337,7 @@ async fn opacity_moment(trainer: &SplatTrainer) -> Vec<f32> {
         .unwrap()
 }
 
-/// Every per-row tensor the trainer holds is as long as `splats` (`last_frozen` aside: the last step's mask, not kept
-/// through append or refine).
+/// Every per-row tensor the trainer holds is as long as `splats`.
 fn assert_rows_aligned(trainer: &SplatTrainer, splats: &Splats) {
     let n = splats.num_splats() as usize;
     if let Some(f) = &splats.min_scale {

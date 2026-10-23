@@ -124,8 +124,9 @@ pub struct SplatTrainer {
     adam_clamped: u64,
     /// Splats refine pruned for a diverged colour (|sh0| > [`MAX_SH0`]).
     sh_pruned: u64,
-    /// The splats the last step left alone for lying beyond `train_radius_m`; `None` with the radius off.
-    last_frozen: Option<Tensor<1, Bool>>,
+    /// How many splats (a `[1]` tensor) the last step left alone for lying beyond `train_radius_m`; `None` with the
+    /// radius off. A count, so row edits between steps leave it as it was.
+    last_frozen: Option<Tensor<1, Int>>,
     /// Rows the caller holds still until the next refine ([`Self::set_frozen_rows`]); `None` holds none.
     frozen_rows: Option<Tensor<1, Bool>>,
     /// Groups and their budgets for the next refine ([`Self::set_row_budget`]); `None` for none.
@@ -291,7 +292,7 @@ impl SplatTrainer {
     /// How many splats the last step left alone for lying beyond `train_radius_m` (a `[1]` tensor, read back by
     /// the caller); `None` with the radius off or before the first step.
     pub fn masked_by_radius(&self) -> Option<Tensor<1, Int>> {
-        self.last_frozen.clone().map(|f| f.int().sum())
+        self.last_frozen.clone()
     }
 
     /// Holds the rows set in `frozen` (`[N]` over the current splats, inner device) still until the next refine, as
