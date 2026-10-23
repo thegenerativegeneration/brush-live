@@ -5,7 +5,7 @@ use std::path::Path;
 use web_time::Instant;
 
 impl Worker {
-    /// Writes the whole model to `path` ([`LiveModel::write_final`]), then runs the finish eval (and with
+    /// Writes the whole model to `path` ([`crate::live::LiveModel::write_final`]), then runs the finish eval (and with
     /// `finish_fisher` the Fisher pass and a last round) and pauses training; returns the file size.
     pub(super) async fn finish(&mut self, path: &Path) -> Result<u64, String> {
         if self.live.splats().is_none() {
