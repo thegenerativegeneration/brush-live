@@ -67,7 +67,9 @@ async fn coming_back_restores_by_distance_and_starts_a_junction() {
 /// Radius 2 m and hysteresis 5 m: from 6 m the origin tiles are beyond the radius but not left (seeds in
 /// left tiles are dropped).
 pub(in crate::live) fn not_left_from_6m() -> GuideConfig {
-    { let mut c = area_config(2.0); c.area.hysteresis_m = 5.0; c }
+    let mut c = area_config(2.0);
+    c.area.hysteresis_m = 5.0;
+    c
 }
 
 /// A parked tile within radius + far_seed that the keyframe's seeds hit comes back before seeding, and the keyframe

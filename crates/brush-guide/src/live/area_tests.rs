@@ -76,14 +76,12 @@ pub(in crate::live) fn area_config(radius: f32) -> GuideConfig {
 /// [`area_config`] training only the active tiles: the tiles within 2.5 m and up to 2 tiles in view within 8 m, any
 /// with rows.
 pub(in crate::live) fn active_config(radius: f32) -> GuideConfig {
-    {
-        let mut c = area_config(radius);
-        c.area.freeze = crate::config::AreaFreeze::Inactive;
-        c.area.view_m = 8.0;
-        c.area.active_tiles = 2;
-        c.area.active_min_rows = 1;
-        c
-    }
+    let mut c = area_config(radius);
+    c.area.freeze = crate::config::AreaFreeze::Inactive;
+    c.area.view_m = 8.0;
+    c.area.active_tiles = 2;
+    c.area.active_min_rows = 1;
+    c
 }
 
 pub(in crate::live) async fn add(live: &mut LiveModel, dir: &std::path::Path, id: u64, pos: Vec3, target: Vec3) {

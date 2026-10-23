@@ -9,14 +9,12 @@ use glam::Vec3;
 
 /// inactive_at_cap with the defaults' engagement, 1 m tiles, a per-tile cap of 5 % of `max_splats` and `hysteresis`.
 fn engage_config(radius: f32, hysteresis: f32) -> GuideConfig {
-    {
-        let mut c = active_config(radius);
-        c.area.freeze = AreaFreeze::InactiveAtCap;
-        c.area.engage_on_leave = true;
-        c.area.tile_max_fraction = 0.05;
-        c.area.hysteresis_m = hysteresis;
-        c
-    }
+    let mut c = active_config(radius);
+    c.area.freeze = AreaFreeze::InactiveAtCap;
+    c.area.engage_on_leave = true;
+    c.area.tile_max_fraction = 0.05;
+    c.area.hysteresis_m = hysteresis;
+    c
 }
 
 /// Keyframe looking straight at the wall from 5 m at x.
