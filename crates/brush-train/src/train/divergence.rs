@@ -1,5 +1,5 @@
-//! Refine bookkeeping beyond upstream's prune checks: Adam steps the optimizer clamped, and splats whose colour
-//! diverged.
+//! Refine bookkeeping beyond upstream's prune checks: Adam steps the optimizer clamped, splats whose colour
+//! diverged, and the refine tally (`RefineTally`) that holds those counts and the evictions.
 
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::{Bool, Tensor, s};

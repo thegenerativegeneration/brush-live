@@ -327,7 +327,7 @@ impl SplatTrainer {
     /// `None` without a held mask or without eviction, whose per-row state carries the flag.
     pub fn held_untrained_rows(&self) -> Option<Tensor<1, Int>> {
         let held = self.rows.held.as_ref()?;
-        self.evict.as_ref()?;
+        self.evict.as_ref()?; // None without eviction (load-bearing)
         Some(match &self.rows.life {
             Some(life) => held.clone().bool_and(life.trained.clone().lower_elem(0.5)).int().sum(),
             None => held.clone().int().sum(),
@@ -1356,7 +1356,7 @@ fn map_splats_and_opt(
 // Prunes points based on the given mask.
 //
 // Args:
-//   mask: bool[n]. If True, prune this Gaussian.
+//   prune: bool[n]. If True, prune this Gaussian.
 //   rows: the per-row state, kept aligned with the remaining rows (no budget: refine has taken it).
 //   extra: a per-row mask kept aligned with the remaining rows.
 async fn prune_points(

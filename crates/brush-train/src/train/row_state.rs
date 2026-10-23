@@ -11,7 +11,8 @@ use burn::tensor::{Bool, Int, Tensor};
 #[derive(Default)]
 #[cfg_attr(test, derive(Clone))]
 pub(super) struct RowState {
-    /// Age, importance and trained flag per row; only with eviction on, from the first step or append on.
+    /// Age, importance and trained flag per row. `Some` only while eviction is on: created under `evict.is_some()`
+    /// (`mark_trained`, `append_rows`), reset by `enable_eviction`.
     pub life: Option<SplatLife>,
     /// Seeding view per row, when tracked (`track_origins`).
     pub origin: Option<SplatOrigin>,
@@ -52,7 +53,8 @@ impl RowState {
     }
 
     /// Appends one split child per index in `parents` (inner device): life and origin from the parent; the children
-    /// are not held and of no group. Refine takes the held rows and the budget before it splits, so both are `None` here.
+    /// are not held and of no group. Refine takes the held rows and the budget before it splits,
+    /// so both are `None` here.
     pub fn split(&mut self, parents: Tensor<1, Int>) {
         let n = parents.dims()[0];
         if let Some(origin) = self.origin.as_mut() {

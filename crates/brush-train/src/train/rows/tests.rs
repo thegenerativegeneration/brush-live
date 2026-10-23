@@ -256,8 +256,8 @@ async fn appended_rows_are_baked_into_splats_without_a_floor() {
     }
 }
 
-/// With the training radius on the refine record carries the trained column and the trainer the last step's frozen count;
-/// taking and appending rows keeps every per-row tensor as long as the splats, and training runs on.
+/// With the training radius on the refine record carries the trained column and the trainer the last step's frozen
+/// count; taking and appending rows keeps every per-row tensor as long as the splats, and training runs on.
 #[tokio::test]
 async fn take_and_append_keep_rows_aligned_with_the_radius_on() {
     // Splats lie 2.0–2.07 m from the camera: rows past x = 0.45 are beyond the radius.
