@@ -319,9 +319,7 @@ fn index_tensor(rows: &[usize], device: &burn::tensor::Device) -> Tensor<1, Int>
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
-#[path = "train_rows_tests.rs"]
 mod tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
-#[path = "train_moments_tests.rs"]
 mod moments_tests;
