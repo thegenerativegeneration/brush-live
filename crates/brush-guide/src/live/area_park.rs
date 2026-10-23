@@ -140,10 +140,8 @@ impl LiveModel {
             splats
         };
         let area = self.area.as_mut().expect("area training is on");
-        area.counters.tile_bytes = area.file_bytes.values().sum();
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        area.counters.park_ms += ms;
-        area.counters.max_park_ms = area.counters.max_park_ms.max(ms);
+        area.counters.note_park(ms, area.file_bytes.values().sum());
         log::info!("area: park event {tiles} tiles, {} splats in {ms:.1} ms", parked.len());
         self.drop_departed_views();
         splats
@@ -198,10 +196,8 @@ impl LiveModel {
             splats
         };
         let area = self.area.as_mut().expect("area training is on");
-        area.counters.tile_bytes = area.file_bytes.values().sum();
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        area.counters.park_ms += ms;
-        area.counters.max_park_ms = area.counters.max_park_ms.max(ms);
+        area.counters.note_park(ms, area.file_bytes.values().sum());
         log::info!("area: park event {tiles} tiles, {} splats in {ms:.1} ms", merged.len());
         splats
     }
@@ -212,32 +208,8 @@ impl LiveModel {
         if self.area.as_ref().is_none_or(|a| a.parking_off) {
             return None;
         }
-        let (tile, moves) = match self.parked_with_moves(key) {
-            Ok(read) => read,
-            Err(e) => {
-                log::warn!("area: drop unreadable tile {}, the rows drifted into it stay resident: {e}", key.stem());
-                self.drop_parked(dir, key);
-                return None;
-            }
-        };
-        if tile.rows.sh_coeffs_per_channel != new.sh_coeffs_per_channel {
-            log::warn!(
-                "area: drop tile {} of another SH degree, the rows drifted into it stay resident",
-                key.stem()
-            );
-            self.drop_parked(dir, key);
-            return None;
-        }
-        let spread = move_spread(&tile.rows, &moves);
-        let limit = self.config.area_restore_inconsistency_m;
-        if spread > limit {
-            log::info!(
-                "area: drop inconsistent tile {} (views disagree by {spread:.2} m, limit {limit:.2} m)",
-                key.stem()
-            );
-            self.drop_parked(dir, key);
-            return None;
-        }
+        let (tile, moves, _) =
+            self.validated_parked(dir, key, new.sh_coeffs_per_channel, ", the rows drifted into it stay resident")?;
         let mut old = tile.rows;
         apply_moves(&mut old, &moves);
         let rows = SplatRows::concat(&[old, new]);
@@ -316,6 +288,46 @@ impl LiveModel {
             .collect();
         debug_assert_eq!(poses.len(), slots.len(), "an origin slot names no view");
         poses
+    }
+
+    /// Parked tile `key` with its moves and their spread, or `None` after dropping it ([`Self::drop_parked`]) because
+    /// its file cannot be read, holds other than `coeffs` SH coefficients per channel, or its seeding views carry it
+    /// more than `area_restore_inconsistency_m` apart. `note` ends the warnings of the first two.
+    pub(super) fn validated_parked(
+        &mut self,
+        dir: &Path,
+        key: TileKey,
+        coeffs: u32,
+        note: &str,
+    ) -> Option<(ParkedTile, Vec<(u32, Affine3A)>, f32)> {
+        let (tile, moves) = match self.parked_with_moves(key) {
+            Ok(read) => read,
+            Err(e) => {
+                log::warn!("area: drop unreadable tile {}{note}: {e}", key.stem());
+                self.drop_parked(dir, key);
+                return None;
+            }
+        };
+        if tile.rows.sh_coeffs_per_channel != coeffs {
+            log::warn!(
+                "area: drop tile {} of another SH degree: {} coefficients, the model has {coeffs}{note}",
+                key.stem(),
+                tile.rows.sh_coeffs_per_channel
+            );
+            self.drop_parked(dir, key);
+            return None;
+        }
+        let spread = move_spread(&tile.rows, &moves);
+        let limit = self.config.area_restore_inconsistency_m;
+        if spread > limit {
+            log::info!(
+                "area: drop inconsistent tile {} (views disagree by {spread:.2} m, limit {limit:.2} m)",
+                key.stem()
+            );
+            self.drop_parked(dir, key);
+            return None;
+        }
+        Some((tile, moves, spread))
     }
 
     /// The rows of parked tile `key` from its file, moved by the pose corrections their seeding views had since the

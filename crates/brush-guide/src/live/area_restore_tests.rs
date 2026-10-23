@@ -385,6 +385,27 @@ async fn a_tile_of_another_sh_degree_is_dropped() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// A tile file that cannot be read is dropped (and retrains from its keyframes), not restored.
+#[tokio::test]
+async fn an_unreadable_tile_is_dropped_on_restore() {
+    use crate::area::park_file::tile_path;
+    let (mut live, dir) = parked_origin("restore-unreadable").await;
+    let tiles = dir.join("tiles");
+    let key = live.area.as_ref().unwrap().registry.parked_keys()[0];
+    std::fs::write(tile_path(&tiles, key), b"not a tile").unwrap();
+    let splats = live.splats.take().unwrap();
+    let before = splats.num_splats();
+    let splats = live.restore_tiles(splats, &[key], RestoreReason::Distance, Vec3::ZERO).await;
+    assert_eq!(splats.num_splats(), before);
+    live.splats = Some(splats);
+    let r = live.area_report().unwrap();
+    assert_eq!((r.counters.drops, r.counters.restores), (1, 0), "{r:?}");
+    assert!(live.area.as_ref().unwrap().registry.get(key).is_none(), "the tile left the registry");
+    assert!(!tile_path(&tiles, key).exists());
+    assert_eq!(live.junction_steps_left(), 0);
+    std::fs::remove_dir_all(dir).ok();
+}
+
 #[test]
 fn restore_reasons_print_as_the_log_names_them() {
     let names: Vec<String> =

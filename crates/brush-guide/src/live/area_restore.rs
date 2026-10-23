@@ -5,7 +5,7 @@
 //! drift into a parked tile far from the walker join its file instead: [`super::area_park`].)
 
 use super::LiveModel;
-use crate::area::{TileKey, apply_moves, junction_views, move_spread, remove_tile_files};
+use crate::area::{TileKey, apply_moves, junction_views, remove_tile_files};
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use brush_train::rows::SplatRows;
@@ -68,20 +68,16 @@ impl LiveModel {
             return splats;
         };
         let tile_size = area.registry.params().tile_size;
-        let mut keys: Vec<TileKey> = keys
-            .iter()
-            .copied()
-            .filter(|&k| area.registry.get(k).is_some_and(|t| !t.resident))
-            .collect();
+        let mut keys: Vec<TileKey> =
+            keys.iter().copied().filter(|&k| area.registry.get(k).is_some_and(|t| !t.resident)).collect();
         if keys.is_empty() {
             return splats;
         }
         keys.sort_by(|a, b| {
-            a.footprint_distance(centre, tile_size)
-                .total_cmp(&b.footprint_distance(centre, tile_size))
-                .then(a.cmp(b))
+            a.footprint_distance(centre, tile_size).total_cmp(&b.footprint_distance(centre, tile_size)).then(a.cmp(b))
         });
         keys.dedup();
+        // The waits keep earlier queued GPU work out of the event's time, and only the work it queued in.
         crate::timing::wait_splats(&splats).await;
         let t = web_time::Instant::now();
         let (mut tiles, mut restored) = (0u32, 0u32);
@@ -102,10 +98,8 @@ impl LiveModel {
         crate::timing::wait_splats(&splats).await;
         let junction_steps = self.config.area_junction_steps;
         let area = self.area.as_mut().expect("area training is on");
-        area.counters.tile_bytes = area.file_bytes.values().sum();
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        area.counters.restore_ms += ms;
-        area.counters.max_restore_ms = area.counters.max_restore_ms.max(ms);
+        area.counters.note_restore(ms, area.file_bytes.values().sum());
         log::info!("area: restore event {tiles} tiles, {restored} splats in {ms:.1} ms ({reason})");
         if tiles > 0 {
             area.mask_stale = true;
@@ -139,34 +133,10 @@ impl LiveModel {
             self.defer(key, plan.shortfall);
             return (splats, Restore::Deferred);
         }
-        let (mut tile, moves) = match self.parked_with_moves(key) {
-            Ok(read) => read,
-            Err(e) => {
-                log::warn!("area: drop unreadable tile {}: {e}", key.stem());
-                self.drop_parked(dir, key);
-                return (splats, Restore::Dropped);
-            }
-        };
         let coeffs = splats.sh_coeffs.dims()[1] as u32;
-        if tile.rows.sh_coeffs_per_channel != coeffs {
-            log::warn!(
-                "area: drop tile {} of another SH degree: {} coefficients, the model has {coeffs}",
-                key.stem(),
-                tile.rows.sh_coeffs_per_channel
-            );
-            self.drop_parked(dir, key);
+        let Some((mut tile, moves, spread)) = self.validated_parked(dir, key, coeffs, "") else {
             return (splats, Restore::Dropped);
-        }
-        let spread = move_spread(&tile.rows, &moves);
-        let limit = self.config.area_restore_inconsistency_m;
-        if spread > limit {
-            log::info!(
-                "area: drop inconsistent tile {} (views disagree by {spread:.2} m, limit {limit:.2} m)",
-                key.stem()
-            );
-            self.drop_parked(dir, key);
-            return (splats, Restore::Dropped);
-        }
+        };
         let splats = self.park_tiles(splats, &plan.park_first).await;
         let n = tile.rows.len() as u32;
         let over = (splats.num_splats() + n).saturating_sub(max_splats);

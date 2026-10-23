@@ -67,6 +67,22 @@ pub struct AreaCounters {
     pub engaged_at_keyframe: u32,
 }
 
+impl AreaCounters {
+    /// Counts a park event of `ms` milliseconds that leaves `tile_bytes` of tile files on disk.
+    pub(crate) fn note_park(&mut self, ms: f64, tile_bytes: u64) {
+        self.tile_bytes = tile_bytes;
+        self.park_ms += ms;
+        self.max_park_ms = self.max_park_ms.max(ms);
+    }
+
+    /// Counts a restore event of `ms` milliseconds that leaves `tile_bytes` of tile files on disk.
+    pub(crate) fn note_restore(&mut self, ms: f64, tile_bytes: u64) {
+        self.tile_bytes = tile_bytes;
+        self.restore_ms += ms;
+        self.max_restore_ms = self.max_restore_ms.max(ms);
+    }
+}
+
 /// Area training's state for the eval log: tile and splat counts, counters, and every tile's state.
 #[derive(Clone, Debug, Serialize)]
 pub struct AreaReport {
@@ -101,4 +117,19 @@ pub struct AreaReport {
     /// The per-tile cap in effect (`area_tile_max_fraction` of `max_splats`); 0: none. Held rows no step ever trained
     /// are eviction victims at the total cap with or without it.
     pub tile_cap: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AreaCounters;
+
+    #[test]
+    fn note_park_and_note_restore_keep_totals_and_maxima() {
+        let mut c = AreaCounters::default();
+        c.note_park(3.0, 10);
+        c.note_park(2.0, 7);
+        assert_eq!((c.park_ms, c.max_park_ms, c.tile_bytes), (5.0, 3.0, 7));
+        c.note_restore(4.0, 9);
+        assert_eq!((c.restore_ms, c.max_restore_ms, c.tile_bytes, c.park_ms), (4.0, 4.0, 9, 5.0));
+    }
 }

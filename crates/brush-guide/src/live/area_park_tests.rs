@@ -245,6 +245,40 @@ async fn an_unreadable_far_tile_is_dropped_when_rows_drift_into_it() {
     std::fs::remove_dir_all(dir).ok();
 }
 
+/// Rows drifted into a far parked tile whose seeding views disagree by more than the limit stay resident and the
+/// tile is dropped.
+#[tokio::test]
+async fn a_far_tile_whose_views_disagree_is_dropped_when_rows_drift_into_it() {
+    use crate::area::park_file::{SlotPose, write_tile};
+    use crate::live::area_restore::tests::{correction, drift_rows, parked_origin};
+    let (mut live, dir) = parked_origin("merge-inconsistent").await;
+    let tiles = dir.join("tiles");
+    let key = live.area.as_ref().unwrap().registry.parked_keys()[0];
+    // Give half the tile's rows to view 1, as if both views had seeded it.
+    let mut tile = read_tile(&tiles, key).unwrap();
+    let half = tile.rows.len() / 2;
+    for o in &mut tile.rows.origin[..half] {
+        *o = Some(1);
+    }
+    let cam1 = live.views()[1].camera;
+    tile.slot_poses.retain(|p| p.slot != 1);
+    tile.slot_poses.push(SlotPose { slot: 1, position: cam1.position, rotation: cam1.rotation });
+    write_tile(&tiles, &tile).unwrap();
+    // A correction moves view 0 by 1.5 m and leaves view 1: the views disagree by 1.5 m > 1 m.
+    live.update_poses(&[correction(0, Vec3::new(1.5, 0.0, 2.0), Vec3::new(1.5, 0.0, 0.0))]);
+    let corner = key.min_xz(1.0);
+    drift_rows(&mut live, (0..3).flat_map(|i| [corner.x + 0.2 + 0.1 * i as f32, 0.0, corner.y + 0.5]).collect()).await;
+    train(&mut live, 5).await;
+    let r = live.area_report().unwrap();
+    assert!(r.counters.drops >= 1, "{r:?}");
+    assert!(live.area.as_ref().unwrap().registry.get(key).is_none_or(|t| t.resident), "the tile is still parked");
+    assert!(!crate::area::park_file::tile_path(&tiles, key).exists());
+    let means: Vec<f32> = live.splats().unwrap().means().into_data_async().await.unwrap().try_to_vec().unwrap();
+    let here = means.chunks(3).filter(|p| TileKey::of(Vec3::new(p[0], p[1], p[2]), 1.0) == key).count();
+    assert_eq!(here, 3, "the drifted rows stay resident");
+    std::fs::remove_dir_all(dir).ok();
+}
+
 /// The eval model holds 40 parked tiles (more parts than a Metal kernel binds buffers): every resident and
 /// parked mean comes back as stored.
 #[tokio::test]
