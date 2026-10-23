@@ -3,7 +3,10 @@
 
 use brush_render::gaussian_splats::{Splats, fold_min_scale};
 use burn::module::Param;
-use burn::tensor::{Bool, Tensor, activation::sigmoid, s};
+use burn::tensor::{Bool, Device, Tensor, activation::sigmoid, s};
+
+use super::SplatTrainer;
+use crate::evict::SplatLife;
 
 /// `[N]` flags of the `means` (`[N, 3]`, inner backend) farther than `radius` from `center`.
 pub(super) fn beyond_radius(means: Tensor<2>, center: glam::Vec3, radius: f32) -> Tensor<1, Bool> {
@@ -88,4 +91,49 @@ pub(super) fn keep_floor(
         0,
     );
     fresh.mask_where(untrained, kept)
+}
+
+impl SplatTrainer {
+    /// The rows this step leaves alone: splats beyond the training radius plus the rows the caller holds. Records the
+    /// radius part in `last_frozen` (`None` with the radius off) and drops held rows that no longer fit `rows`.
+    pub(super) fn frozen_for_step(
+        &mut self,
+        means: Tensor<2>,
+        camera_pos: glam::Vec3,
+        rows: usize,
+    ) -> Option<Tensor<1, Bool>> {
+        let beyond = (self.config.train_radius_m > 0.0)
+            .then(|| beyond_radius(means, camera_pos, self.config.train_radius_m));
+        self.last_frozen = beyond.clone();
+        if let Some(held) = &self.frozen_rows
+            && !Self::held_fits(held.dims()[0], Some(rows))
+        {
+            self.frozen_rows = None;
+        }
+        either(beyond, self.frozen_rows.clone())
+    }
+
+    /// Marks the rows `frozen` does not hold as trained in the refine record and the eviction life. Call after the
+    /// record gathered this step's stats.
+    pub(super) fn mark_trained(
+        &mut self,
+        frozen: Option<&Tensor<1, Bool>>,
+        visible: &Tensor<1>,
+        rows: u32,
+        device: &Device,
+    ) {
+        if let Some(record) = self.refine_record.as_mut() {
+            match frozen {
+                Some(frozen) => record.mark_trained(frozen.clone().bool_not().float()),
+                // Rows held earlier in the window train again.
+                None if record.trained.is_some() => record.mark_trained(visible.clone().ones_like()),
+                None => {}
+            }
+        }
+        if let Some(e) = self.evict.as_mut() {
+            e.life
+                .get_or_insert_with(|| SplatLife::new(rows as usize, device))
+                .mark_trained(frozen);
+        }
+    }
 }

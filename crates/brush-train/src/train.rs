@@ -112,7 +112,7 @@ pub struct SplatTrainer {
     lpips: Option<lpips::LpipsModel>,
     /// The learned SH environment background; `None` when `config.sh_background`
     /// is off, so the flag-off step never builds a basis, a background image,
-    /// or any extra graph node (see `step`'s `if let Some(..)` guard).
+    /// or any extra graph node (see `step`'s `match` on this field).
     sh_background: Option<ShBackground>,
     /// Optimizer elements whose step hit `adam_scaled::MAX_NORMALIZED_STEP`, read back at each refine.
     adam_clamped: u64,
@@ -836,6 +836,12 @@ impl SplatTrainer {
             )
         };
 
+        let frozen = self.frozen_for_step(
+            splats.means().inner(),
+            camera.position,
+            splats.num_splats() as usize,
+        );
+
         // The optimizer strips autodiff before stepping, so optimizer state
         // (scaling, momentum) lives on the inner device.
         let opt_device = device.clone().inner();
@@ -862,21 +868,6 @@ impl SplatTrainer {
             });
 
         optimizer.transforms.scaling = Some(lr_scaling);
-
-        let beyond = (self.config.train_radius_m > 0.0).then(|| {
-            radius::beyond_radius(
-                splats.means().inner(),
-                camera.position,
-                self.config.train_radius_m,
-            )
-        });
-        self.last_frozen = beyond.clone();
-        if let Some(held) = &self.frozen_rows
-            && !Self::held_fits(held.dims()[0], Some(splats.num_splats() as usize))
-        {
-            self.frozen_rows = None;
-        }
-        let frozen = radius::either(beyond, self.frozen_rows.clone());
 
         splats = trace_span!("Optimizer step").in_scope(|| {
             splats.transforms = trace_span!("Transforms step").in_scope(|| {
@@ -928,17 +919,7 @@ impl SplatTrainer {
                 .refine_record
                 .get_or_insert_with(|| RefineRecord::new(splats.num_splats(), &device));
             record.gather_stats(refine_weight, importance, visible.clone(), max_radius);
-            match &frozen {
-                Some(frozen) => record.mark_trained(frozen.clone().bool_not().float()),
-                // Rows held earlier in the window train again.
-                None if record.trained.is_some() => record.mark_trained(visible.clone().ones_like()),
-                None => {}
-            }
-            if let Some(e) = self.evict.as_mut() {
-                e.life
-                    .get_or_insert_with(|| SplatLife::new(splats.num_splats() as usize, &device))
-                    .mark_trained(frozen.as_ref());
-            }
+            self.mark_trained(frozen.as_ref(), &visible, splats.num_splats(), &device);
         });
 
         // Noise uses the forward's floored opacities, without building an autodiff graph. Splats beyond the
