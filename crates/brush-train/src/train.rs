@@ -1778,6 +1778,9 @@ mod freeze_tests;
 #[path = "train_budget_tests.rs"]
 mod budget_tests;
 
+#[cfg(all(test, not(target_family = "wasm")))]
+mod golden_tests;
+
 #[cfg(test)]
 mod loss_weight_tests {
     use super::loss_weights;
