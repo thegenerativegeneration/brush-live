@@ -150,12 +150,99 @@ const NON_DEFAULT_JSON: &str = r#"{
     "warmup": false
 }"#;
 
-/// Numbers compared as `f64`, so an integer literal for a float field equals the float it serializes to.
-fn numbers_as_f64(value: Value) -> Value {
+/// `GuideConfig::default()` serialized, as printed by `serde_json` (`f32` fields as their `f64` widening).
+const DEFAULT_JSON: &str = r#"{
+  "all_loader_rebuild_every": 10,
+  "area_active_min_rows": 50,
+  "area_active_tiles": 3,
+  "area_engage_on_leave": true,
+  "area_far_seed_m": 10.0,
+  "area_freeze": "inactive_at_cap",
+  "area_freeze_at": 0.8999999761581421,
+  "area_held_fraction": 0.25,
+  "area_hysteresis_m": 5.0,
+  "area_junction_steps": 200,
+  "area_min_resident_keyframes": 20,
+  "area_radius_m": 50.0,
+  "area_restore_inconsistency_m": 1.0,
+  "area_restore_min_seeds": 8,
+  "area_seen_window_steps": 1000,
+  "area_tile_max_fraction": 0.0,
+  "area_tile_size_m": 10.0,
+  "area_view_m": 15.0,
+  "coverage": {
+    "low_res_penalty": 0.5,
+    "min_px_per_m": 300.0,
+    "n_target": 8.0,
+    "spread_target": 0.20000000298023224
+  },
+  "dump_raw_uncertainty": false,
+  "eval_every_keyframes": 0,
+  "eval_extras_at": [],
+  "eval_extras_views": [],
+  "eval_interval_s": 30.0,
+  "eval_lpips": false,
+  "eval_save_views": [],
+  "eval_seam_band_m": 0.0,
+  "eval_seam_from": 0,
+  "evict": true,
+  "evict_headroom": 0.10000000149011612,
+  "evict_max_cell_fraction": 0.30000001192092896,
+  "evict_min_age": 3,
+  "evict_recent_refines": 10,
+  "finish_fisher": false,
+  "fisher_lambda": 9.999999974752427e-7,
+  "fisher_lambda_rel": 0.0010000000474974513,
+  "holdout_every": 0,
+  "holdout_max_received": 0,
+  "init_random_count": 5000,
+  "keyframe_long_side": 960,
+  "loader_cache_bytes": 1073741824,
+  "max_iters_per_s": 0.0,
+  "max_splats": 750000,
+  "max_train_steps": null,
+  "min_cell_opacity": 0.10000000149011612,
+  "min_depth_confidence": 2,
+  "min_score_interval_s": 2.0,
+  "mono_min_depth_with_lidar_m": 4.5,
+  "mono_scale_range": [
+    0.30000001192092896,
+    3.0
+  ],
+  "mono_seeding": true,
+  "move_anchored_splats": true,
+  "pass": {
+    "hutchinson_samples": 1,
+    "observed_rel_eps": 9.999999974752427e-7,
+    "render_scale": 0.5
+  },
+  "profile_steps": false,
+  "recent_fraction": 0.699999988079071,
+  "recent_window": 20,
+  "refine_every": 100,
+  "score_budget": 0.25,
+  "seed": 42,
+  "seed_alpha_threshold": 0.5,
+  "seed_stride_px": 4,
+  "seed_view_fraction": 0.029999999329447746,
+  "sh_background": false,
+  "sh_background_alpha_weight": 0.0,
+  "sh_degree": 1,
+  "sigma_pix": 0.05000000074505806,
+  "ssim_every": 1,
+  "status_every_step": false,
+  "train_radius_m": 0.0,
+  "voxel_size": 0.10000000149011612,
+  "warmup": true
+}"#;
+
+/// Numbers narrowed to `f32` (kept as `f64`): an integer literal for a float field equals the float it serializes
+/// to, and the default parser's last-bit error on long decimals does not matter for `f32` fields.
+fn numbers_as_f32(value: Value) -> Value {
     match value {
-        Value::Number(n) => serde_json::json!(n.as_f64().expect("finite")),
-        Value::Array(items) => Value::Array(items.into_iter().map(numbers_as_f64).collect()),
-        Value::Object(map) => Value::Object(map.into_iter().map(|(k, v)| (k, numbers_as_f64(v))).collect()),
+        Value::Number(n) => serde_json::json!(f64::from(n.as_f64().expect("finite") as f32)),
+        Value::Array(items) => Value::Array(items.into_iter().map(numbers_as_f32).collect()),
+        Value::Object(map) => Value::Object(map.into_iter().map(|(k, v)| (k, numbers_as_f32(v))).collect()),
         other => other,
     }
 }
@@ -175,19 +262,37 @@ fn default_json_keys_are_pinned() {
 #[test]
 fn every_key_round_trips() {
     let given: Value = serde_json::from_str(NON_DEFAULT_JSON).expect("valid json");
-    let given_keys: Vec<&str> = given.as_object().expect("object").keys().map(String::as_str).collect();
+    let mut given_keys: Vec<&str> = given.as_object().expect("object").keys().map(String::as_str).collect();
+    given_keys.sort_unstable();
     assert_eq!(given_keys, KEYS, "the round-trip JSON sets every key");
     let defaults = default_json();
     for key in KEYS {
         assert_ne!(
-            numbers_as_f64(given[key].clone()),
-            numbers_as_f64(defaults[key].clone()),
+            numbers_as_f32(given[key].clone()),
+            numbers_as_f32(defaults[key].clone()),
             "{key} is set to its default"
         );
     }
     let cfg: GuideConfig = serde_json::from_str(NON_DEFAULT_JSON).expect("parses");
     let back = serde_json::to_value(cfg).expect("serializes");
-    assert_eq!(numbers_as_f64(back), numbers_as_f64(given));
+    assert_eq!(numbers_as_f32(back), numbers_as_f32(given));
+}
+
+#[test]
+fn default_json_is_pinned() {
+    let pinned: Value = serde_json::from_str(DEFAULT_JSON).expect("valid json");
+    assert_eq!(numbers_as_f32(default_json()), numbers_as_f32(pinned));
+}
+
+#[test]
+fn partial_group_override_keeps_the_rest() {
+    let cfg: GuideConfig = serde_json::from_str(r#"{"evict_headroom": 0.5, "holdout_every": 3}"#).expect("parses");
+    assert_eq!((cfg.evict_headroom, cfg.holdout_every), (0.5, 3));
+    let got = serde_json::to_value(cfg).expect("serializes");
+    let defaults = default_json();
+    for key in KEYS.iter().filter(|k| !["evict_headroom", "holdout_every"].contains(k)) {
+        assert_eq!(got[key], defaults[key], "{key} drifted");
+    }
 }
 
 #[test]
