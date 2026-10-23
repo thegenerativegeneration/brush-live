@@ -1,4 +1,5 @@
 use super::metrics::reference_focal;
+use crate::readback::read_f32;
 use brush_render::bwd::render_splats;
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
@@ -42,14 +43,6 @@ pub struct PassOutput {
     pub dir_sum: Vec<[f32; 3]>,
     pub weight: Vec<f32>,
     pub max_px_per_m: Vec<f32>,
-}
-
-async fn read_vec<const D: usize>(t: Tensor<D>) -> Vec<f32> {
-    t.into_data_async()
-        .await
-        .expect("score readback")
-        .try_to_vec::<f32>()
-        .expect("f32 scores")
 }
 
 /// A Gaussian counts as observed when its trace exceeds `rel_eps` times the
@@ -131,13 +124,13 @@ pub async fn score_pass(splats: &Splats, views: &[PassView], cfg: &PassConfig) -
     let t_views = t_start.elapsed().as_secs_f64();
 
     let t_read = web_time::Instant::now();
-    let fisher_v = read_vec(fisher).await;
-    let dir_v = read_vec(dir_sum).await;
+    let fisher_v = read_f32(fisher).await;
+    let dir_v = read_f32(dir_sum).await;
     let out = PassOutput {
         fisher: fisher_v.as_chunks::<36>().0.to_vec(),
         dir_sum: dir_v.as_chunks::<3>().0.to_vec(),
-        weight: read_vec(weight).await,
-        max_px_per_m: read_vec(max_ppm).await,
+        weight: read_f32(weight).await,
+        max_px_per_m: read_f32(max_ppm).await,
     };
     log::debug!(
         target: crate::timing::TARGET,

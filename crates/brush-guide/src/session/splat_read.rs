@@ -1,19 +1,11 @@
 //! Splat parameters read back from the GPU and turned into the per-Gaussian
 //! inputs of the voxel aggregation.
 
+use crate::readback::read_f32;
 use crate::scores::voxel::{GaussianScore, SplatGeom, ViewCone};
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
-use burn::tensor::Tensor;
 use glam::{Quat, Vec3};
-
-pub(super) async fn read_f32<const D: usize>(t: Tensor<D>) -> Vec<f32> {
-    t.into_data_async()
-        .await
-        .expect("splat readback")
-        .try_to_vec::<f32>()
-        .expect("f32 splat data")
-}
 
 /// Splat parameters read back once per round, flat per splat.
 pub(crate) struct SplatRead {

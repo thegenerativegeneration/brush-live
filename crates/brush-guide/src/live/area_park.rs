@@ -8,6 +8,7 @@ use super::area_restore::RestoreReason;
 use crate::area::{
     ParkedTile, SlotPose, TileKey, apply_moves, group_rows, move_spread, read_tile, rows_in, slot_moves, write_tile,
 };
+use crate::readback::read_f32;
 use brush_render::gaussian_splats::Splats;
 use brush_train::rows::SplatRows;
 use burn::tensor::Transaction;
@@ -112,14 +113,7 @@ impl LiveModel {
         };
         let t = web_time::Instant::now();
         let tile_size = area.registry.params().tile_size;
-        let means: Vec<f32> = splats
-            .means()
-            .into_data_async()
-            .await
-            .expect("means readback")
-            .convert::<f32>()
-            .try_into_vec()
-            .expect("f32 means");
+        let means: Vec<f32> = read_f32(splats.means()).await;
         let take = rows_in(keys, &means, tile_size);
         let taken = take.iter().filter(|&&t| t).count();
         let skip = taken == take.len() && taken > 0;
@@ -174,14 +168,7 @@ impl LiveModel {
         }
         let t = web_time::Instant::now();
         let tile_size = area.registry.params().tile_size;
-        let means: Vec<f32> = splats
-            .means()
-            .into_data_async()
-            .await
-            .expect("means readback")
-            .convert::<f32>()
-            .try_into_vec()
-            .expect("f32 means");
+        let means: Vec<f32> = read_f32(splats.means()).await;
         let take = rows_in(&keys, &means, tile_size);
         let trainer = self.trainer.as_mut().expect("trainer exists once splats exist");
         let (splats, rows) = trainer.take_rows(splats, &take).await;

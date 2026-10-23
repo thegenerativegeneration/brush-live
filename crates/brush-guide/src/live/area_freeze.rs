@@ -13,6 +13,7 @@
 use super::LiveModel;
 use crate::area::{TileKey, rows_in};
 use crate::config::AreaFreeze;
+use crate::readback::read_f32;
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::{Bool, Tensor, TensorData};
 use glam::Vec3;
@@ -84,14 +85,7 @@ impl LiveModel {
         let mut mask = None;
         if (outside || !keys.is_empty()) && splats.num_splats() > 0 {
             let t = web_time::Instant::now();
-            let means: Vec<f32> = splats
-                .means()
-                .into_data_async()
-                .await
-                .expect("means readback")
-                .convert::<f32>()
-                .try_into_vec()
-                .expect("f32 means");
+            let means: Vec<f32> = read_f32(splats.means()).await;
             let list: Vec<TileKey> = keys.iter().copied().collect();
             let flags: Vec<bool> =
                 rows_in(&list, &means, area.registry.params().tile_size).into_iter().map(|f| f != outside).collect();

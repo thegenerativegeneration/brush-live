@@ -1,6 +1,6 @@
 //! Packed splat snapshots for the phone's preview overlay.
 
-use super::splat_read::read_f32;
+use crate::readback::read_f32;
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::{Tensor, s};
 use std::time::{Duration, Instant};

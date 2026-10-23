@@ -8,6 +8,7 @@ pub mod live;
 pub mod mono;
 mod pose_eq;
 pub mod protocol;
+pub(crate) mod readback;
 pub mod schedule;
 pub mod seed;
 pub mod session;

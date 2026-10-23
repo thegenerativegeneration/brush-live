@@ -9,7 +9,6 @@ use crate::area::{TileKey, apply_moves, junction_views, move_spread, remove_tile
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use brush_train::rows::SplatRows;
-use burn::tensor::s;
 use glam::Vec3;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -83,7 +82,7 @@ impl LiveModel {
                 .then(a.cmp(b))
         });
         keys.dedup();
-        sync(&splats).await;
+        crate::timing::wait_splats(&splats).await;
         let t = web_time::Instant::now();
         let (mut tiles, mut restored) = (0u32, 0u32);
         for key in keys {
@@ -100,7 +99,7 @@ impl LiveModel {
                 );
             }
         }
-        sync(&splats).await;
+        crate::timing::wait_splats(&splats).await;
         let junction_steps = self.config.area_junction_steps;
         let area = self.area.as_mut().expect("area training is on");
         area.counters.tile_bytes = area.file_bytes.values().sum();
@@ -254,13 +253,6 @@ impl LiveModel {
             views.extend(junction_views(&cameras, lo, hi, JUNCTION_FAR_M));
         }
         area.junction.views = views.into_iter().collect();
-    }
-}
-
-/// Waits for the GPU work queued on `splats`, so a restore event's time holds the work it queued and none before it.
-async fn sync(splats: &Splats) {
-    if splats.num_splats() > 0 {
-        let _ = splats.means().slice(s![0..1, ..]).into_data_async().await;
     }
 }
 
