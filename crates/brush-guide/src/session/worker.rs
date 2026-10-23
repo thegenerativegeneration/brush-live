@@ -3,8 +3,12 @@
 //! `finish_fisher` a final Fisher pass adds coverage and uncertainty.
 
 mod drain;
+mod eval;
 mod eval_log;
 mod eval_schedule;
+#[cfg(test)]
+mod eval_tests;
+mod finish;
 mod fisher;
 mod holdout;
 mod holdout_seam;
@@ -25,10 +29,10 @@ use burn::tensor::Device;
 use drain::{Drain, try_take};
 use glam::UVec2;
 use eval_schedule::EvalSchedule;
-use holdout::{EvalExtras, Holdout};
+use holdout::Holdout;
 pub(crate) use holdout::warm_up_eval;
 use poses::Held;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -388,121 +392,6 @@ impl Worker {
         Ok(())
     }
 
-    /// Scores the splats on the held-out views and logs the result; `extras` adds LPIPS, the seam split and
-    /// saved renders as configured ([`EvalExtras::for_eval`]), `finish` marks the finish eval. Whether any view
-    /// was scored (not without splats or renderable views).
-    async fn eval_holdout(&mut self, extras: bool, finish: bool) -> bool {
-        // Nothing to score: skip the full model, which loads every parked tile.
-        if !self.holdout.has_views() {
-            return false;
-        }
-        let now = self.clock.elapsed().as_secs_f64();
-        let eval_extras = EvalExtras::for_eval(
-            &self.config,
-            extras,
-            self.holdout.received(),
-            finish,
-            &self.session_dir,
-            self.live.iter(),
-        );
-        let t_load = Instant::now();
-        let Some(splats) = self.live.eval_splats().await else {
-            return false;
-        };
-        let load_ms = t_load.elapsed().as_secs_f64() * 1e3;
-        // Loading the parked tiles does not count against the training step rate.
-        self.rate_window.0 += load_ms / 1e3;
-        let background = self.live.sh_background();
-        let composited = if background.is_some() { eval_log::EvalBackground::Sh } else { eval_log::EvalBackground::Black };
-        let Some(r) = self.holdout.eval(&splats, now, &eval_extras, background).await else {
-            return false;
-        };
-        // Nor does the eval itself.
-        self.rate_window.0 += r.ms / 1e3;
-        log::info!(
-            "eval at {now:.2} s: {} held-out views, psnr {:.2} dB, ssim {:.4}; iter {}, {} splats ({:.0} ms, {} background)",
-            r.views,
-            r.psnr,
-            r.ssim,
-            self.live.iter(),
-            splats.num_splats(),
-            r.ms,
-            if composited == eval_log::EvalBackground::Sh { "SH" } else { "black" }
-        );
-        let record = eval_log::EvalRecord {
-            unix_s: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0.0, |d| d.as_secs_f64()),
-            t_s: now,
-            iter: self.live.iter(),
-            keyframes: self.live.views().len() as u32,
-            received_keyframes: self.holdout.received(),
-            last_keyframe_id: self.live.last_keyframe_id(),
-            splats: splats.num_splats(),
-            resident_splats: self.live.splats().map_or(0, |s| s.num_splats()),
-            loader_cache_bytes: self.live.loader_cache_bytes(),
-            train_ms: (self.totals_s.train * 1e3) as u64,
-            refine_ms: self.live.refine_total_ms(),
-            eval_ms: r.ms,
-            lpips_ms: r.lpips_ms,
-            seam_ms: r.seam_ms,
-            bounds_median_size: self.live.bounds_median_size(),
-            lr_mean: self.live.last_step_lr().lr_mean,
-            position_scale_m: self.live.last_step_lr().position_scale_m,
-            adam_clamped: self.live.adam_clamped(),
-            masked_by_radius: self.live.masked_by_radius().await,
-            area_views: self.live.area_view_count(),
-            sight_views: self.live.sight_view_count(),
-            sight_voters: self.live.sight_voter_count(),
-            parked_load_ms: self.live.area_view_count().map(|_| load_ms),
-            area: self.live.area_report(),
-            extras,
-            background: composited,
-            views: r.per_view.clone(),
-        };
-        if let Err(e) = jsonl::append_jsonl(&self.session_dir.join("eval.jsonl"), &record) {
-            log::warn!("could not append eval.jsonl: {e}");
-        }
-        true
-    }
-
-    /// Writes the whole model to `path` ([`LiveModel::write_final`]), then runs the finish eval (and with
-    /// `finish_fisher` the Fisher pass and a last round) and pauses training; returns the file size.
-    async fn finish(&mut self, path: &Path) -> Result<u64, String> {
-        if self.live.splats().is_none() {
-            return Err("no splats yet".to_owned());
-        }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        let result = self.live.write_final(path).await.map(|e| e.ply_bytes).map_err(|e| e.to_string());
-        if result.is_ok() {
-            self.eval_holdout(true, true).await;
-            if self.config.finish_fisher {
-                let t = Instant::now();
-                self.finish_pass(self.clock.elapsed().as_secs_f64()).await;
-                self.totals_s.fisher += t.elapsed().as_secs_f64();
-                let t = Instant::now();
-                self.voxel_round(self.clock.elapsed().as_secs_f64()).await;
-                self.totals_s.voxel += t.elapsed().as_secs_f64();
-            }
-            self.finished = true;
-            self.channels
-                .status
-                .send_modify(|s| s.train_iters_per_s = 0.0);
-            // Dump the SH background's coefficients alongside the export,
-            // when the flag is on: the exported `splat.ply` does not bake
-            // the globe in, so it keeps holes where sky was, and this JSON
-            // is the only record of what the globe learned for this
-            // session.
-            if let Some(json) = self.live.sh_background_json().await {
-                let path = self.session_dir.join("sh_background.json");
-                let _ = tokio::fs::write(&path, json).await;
-            }
-        }
-        result
-    }
-
     /// Clears everything but the score set version, which keeps counting,
     /// and the mono scale history (`LiveModel::reset`).
     fn reset(&mut self) {
@@ -665,7 +554,3 @@ fn publish_counts(status_tx: &watch::Sender<StatusMsg>, live: &LiveModel) {
         s.train_iters = u64::from(live.iter());
     });
 }
-
-#[cfg(test)]
-#[path = "worker/eval_tests.rs"]
-mod eval_tests;
