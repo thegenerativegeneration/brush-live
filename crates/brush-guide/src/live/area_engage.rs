@@ -32,7 +32,7 @@ impl LiveModel {
         }
         area.engaged = true;
         area.counters.engaged_at_keyframe = received;
-        area.mask_stale = true;
+        area.mask.stale = true;
         log::info!("area: training engages at keyframe {received} ({left} tiles left, {parked} parked)");
         if self.views.len() != self.view_cams.len() {
             area.loaders_stale = true;

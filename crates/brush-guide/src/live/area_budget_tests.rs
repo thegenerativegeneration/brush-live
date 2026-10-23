@@ -138,7 +138,7 @@ async fn wall(name: &str, freeze: AreaFreeze) -> (LiveModel, std::path::PathBuf)
 #[tokio::test]
 async fn inactive_at_cap_holds_inactive_rows_at_the_cap_only() {
     let (mut live, dir) = wall("budget-at-cap", AreaFreeze::InactiveAtCap).await;
-    let active: BTreeSet<TileKey> = live.area.as_ref().unwrap().active.iter().copied().collect();
+    let active: BTreeSet<TileKey> = live.area.as_ref().unwrap().active.tiles.iter().copied().collect();
     let inactive = |p: Vec3| !active.contains(&TileKey::of(p, 1.0));
     let before = by_row(&rows_where(&live, inactive).await);
     assert!(!before.is_empty());
@@ -173,7 +173,7 @@ async fn below_the_cap_inactive_at_cap_seeds_where_inactive_does_not() {
     for freeze in [AreaFreeze::Inactive, AreaFreeze::InactiveAtCap] {
         let (mut live, dir) = wall(&format!("budget-seed-mode-{freeze:?}"), freeze).await;
         let rows = counts(&live, 1.0).await;
-        let active = live.area.as_ref().unwrap().active.clone();
+        let active = live.area.as_ref().unwrap().active.tiles.clone();
         let tile = *rows.keys().find(|k| !active.contains(k)).expect("a tile with rows outside the active set");
         let seed = [tile.x as f32 + 0.5, 0.0, tile.z as f32 + 0.5];
         let mut keep = vec![true];
@@ -208,9 +208,9 @@ async fn walked_with(name: &str, config: GuideConfig) -> (LiveModel, std::path::
     let centre = Vec3::new(8.0, 0.0, 2.0);
     let left: BTreeSet<TileKey> = area.registry.left_keys(centre).into_iter().filter(|k| held.contains_key(k)).collect();
     let far: BTreeSet<TileKey> = held.keys().copied().filter(|k| k.z <= -10).collect();
-    let active: BTreeSet<TileKey> = area.active.iter().copied().filter(|k| held.contains_key(k)).collect();
+    let active: BTreeSet<TileKey> = area.active.tiles.iter().copied().filter(|k| held.contains_key(k)).collect();
     assert!(!left.is_empty() && !far.is_empty() && !active.is_empty(), "{left:?} {far:?} {active:?}");
-    assert!(far.iter().all(|k| !area.registry.is_left(*k, centre) && !area.active.contains(k)));
+    assert!(far.iter().all(|k| !area.registry.is_left(*k, centre) && !area.active.tiles.contains(k)));
     (live, dir, [left, far, active])
 }
 
@@ -332,7 +332,7 @@ async fn an_all_active_capture_evicts_without_a_limit() {
         if all_active {
             active.push(outside);
         }
-        live.area.as_mut().unwrap().active = active;
+        live.area.as_mut().unwrap().active.tiles = active;
         let n = live.splats().unwrap().num_splats();
         live.config.max_splats = n;
         live.note_cap(n);
@@ -344,7 +344,7 @@ async fn an_all_active_capture_evicts_without_a_limit() {
         let splats = live.park_for_room(splats).await;
         live.splats = Some(splats);
         let budget = live.trainer.as_ref().unwrap().row_budget().unwrap().clone();
-        let keys = live.area.as_ref().unwrap().budget_keys.clone();
+        let keys = live.area.as_ref().unwrap().budget.keys.clone();
         assert!(budget.limit_eviction, "the limit goes only when the limited eviction falls short");
         let g = keys.iter().position(|k| *k == outside).unwrap() as u32;
         let want = if all_active { EvictionRelax::Unlimited } else { EvictionRelax::Groups(vec![g]) };
@@ -363,11 +363,11 @@ async fn the_eviction_keeps_each_active_tiles_fair_share() {
     live.config.area_tile_max_fraction = 0.4;
     let all = rows_where(&live, |_| true).await;
     let rows = counts(&live, 1.0).await;
-    let n_active = live.area.as_ref().unwrap().active.len() as u32;
+    let n_active = live.area.as_ref().unwrap().active.tiles.len() as u32;
     live.config.max_splats = 2 * n_active;
     live.set_row_budget(&all.means);
     let budget = live.trainer.as_ref().unwrap().row_budget().unwrap().clone();
-    let keys = live.area.as_ref().unwrap().budget_keys.clone();
+    let keys = live.area.as_ref().unwrap().budget.keys.clone();
     assert!(budget.limit_eviction);
     for (key, g) in keys.iter().zip(&budget.groups) {
         let want = if active.contains(key) { rows[key] as u32 - 2.min(rows[key] as u32) } else { 0 };

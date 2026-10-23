@@ -86,11 +86,11 @@ async fn a_deferral_streak_notes_its_shortfall_once() {
     live.defer(a, 100);
     assert_eq!(pending(&live), base + 107, "both were deferred at the last keyframe: the streaks go on");
     live.end_deferral_streaks();
-    let streaks: Vec<TileKey> = live.area.as_ref().unwrap().deferring.keys().copied().collect();
+    let streaks: Vec<TileKey> = live.area.as_ref().unwrap().defer.streaks.keys().copied().collect();
     assert_eq!(streaks, vec![a], "b was not deferred again");
     // A keyframe at x = 20 defers nothing: a's streak ends with it.
     add(&mut live, &dir, 2, Vec3::new(20.0, 0.0, 2.0), Vec3::new(20.0, 0.0, 0.0)).await;
-    assert!(live.area.as_ref().unwrap().deferring.is_empty());
+    assert!(live.area.as_ref().unwrap().defer.streaks.is_empty());
     let base = pending(&live);
     live.defer(a, 5);
     assert_eq!(pending(&live), base + 5, "a new streak notes its shortfall");

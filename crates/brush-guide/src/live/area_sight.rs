@@ -18,6 +18,15 @@ use std::collections::BTreeSet;
 /// How deep a view sees a resident tile for the floor and the score round, metres.
 pub const SIGHT_FAR_M: f32 = 100.0;
 
+/// The views that see the resident model, and the voters among them.
+#[derive(Debug, Default)]
+pub(super) struct Sight {
+    /// The views that see the resident model, ascending.
+    pub(super) views: Vec<usize>,
+    /// The views among `views` that vote in the score round: one per pose bucket, and the newest view.
+    pub(super) reps: Vec<usize>,
+}
+
 impl LiveModel {
     /// Recomputes the views that see the resident model from the current poses: the views of every pose bucket whose
     /// representative sees a resident tile's box (height bands of the last readback widened by the rows seeded since)
@@ -30,12 +39,12 @@ impl LiveModel {
             return;
         };
         if !area.engaged {
-            area.sight = (0..n).collect();
-            area.sight_reps = (0..n).collect();
+            area.sight.views = (0..n).collect();
+            area.sight.reps = (0..n).collect();
             return;
         }
-        let mut heights = area.heights.clone();
-        widen_all(&mut heights, &area.fresh);
+        let mut heights = area.heights.last.clone();
+        widen_all(&mut heights, &area.heights.fresh);
         let boxes = resident_boxes(&area.registry, &heights);
         let cameras: Vec<Camera> = self.views.iter().map(|v| v.camera).collect();
         let focals: Vec<f32> = self.view_cams.iter().take(cameras.len()).map(|(_, f)| *f).collect();
@@ -50,8 +59,8 @@ impl LiveModel {
         sight.extend(area_views.clone().chain(newest));
         let mut voters = seeing;
         voters.extend(area_views.map(|i| rep_of[i]).chain(newest));
-        area.sight = sight.into_iter().collect();
-        area.sight_reps = voters.into_iter().collect();
+        area.sight.views = sight.into_iter().collect();
+        area.sight.reps = voters.into_iter().collect();
     }
 
     /// The floor's cameras: every view's with area training off; otherwise those of the views that see the resident
@@ -61,7 +70,7 @@ impl LiveModel {
             None => self.view_cams.clone(),
             Some(a) => {
                 let adding = self.views.len().min(self.view_cams.len())..self.view_cams.len();
-                a.sight.iter().copied().chain(adding).filter_map(|i| self.view_cams.get(i).copied()).collect()
+                a.sight.views.iter().copied().chain(adding).filter_map(|i| self.view_cams.get(i).copied()).collect()
             }
         };
         debug_assert!(self.view_cams.is_empty() || !cams.is_empty(), "views exist but no camera floors the splats");
@@ -87,18 +96,18 @@ impl LiveModel {
     pub fn sight_cameras(&self) -> Vec<Camera> {
         match &self.area {
             None => self.views.iter().map(|v| v.camera).collect(),
-            Some(a) => a.sight_reps.iter().filter_map(|&i| self.views.get(i)).map(|v| v.camera).collect(),
+            Some(a) => a.sight.reps.iter().filter_map(|&i| self.views.get(i)).map(|v| v.camera).collect(),
         }
     }
 
     /// Views that see the resident model; `None` with area training off.
     pub fn sight_view_count(&self) -> Option<u32> {
-        self.area.as_ref().map(|a| a.sight.len() as u32)
+        self.area.as_ref().map(|a| a.sight.views.len() as u32)
     }
 
     /// Voters of the score round among them ([`Self::sight_cameras`]); `None` with area training off.
     pub fn sight_voter_count(&self) -> Option<u32> {
-        self.area.as_ref().map(|a| a.sight_reps.len() as u32)
+        self.area.as_ref().map(|a| a.sight.reps.len() as u32)
     }
 }
 

@@ -488,7 +488,7 @@ async fn a_deferred_restore_comes_back_once_room_is_made() {
     let r = live.area_report().unwrap();
     assert_eq!((r.counters.restores, r.counters.drops), (0, 0), "{r:?}");
     assert!(r.counters.deferrals as usize >= near.len(), "{r:?}");
-    assert_eq!(live.area.as_ref().unwrap().deferring.len(), near.len());
+    assert_eq!(live.area.as_ref().unwrap().defer.streaks.len(), near.len());
     let mut retries = 0;
     while live.area_report().unwrap().counters.restores == 0 {
         retries += 1;
@@ -497,6 +497,6 @@ async fn a_deferred_restore_comes_back_once_room_is_made() {
         add_seeing(&mut live, &dir, 2 + retries, pos, away, &[away]).await;
     }
     let area = live.area.as_ref().unwrap();
-    assert!(area.deferring.keys().all(|k| area.registry.get(*k).is_some_and(|t| !t.resident)), "streaks end");
+    assert!(area.defer.streaks.keys().all(|k| area.registry.get(*k).is_some_and(|t| !t.resident)), "streaks end");
     std::fs::remove_dir_all(dir).ok();
 }

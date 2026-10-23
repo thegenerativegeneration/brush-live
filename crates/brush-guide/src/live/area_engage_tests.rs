@@ -31,7 +31,7 @@ fn at_the_cap(live: &mut LiveModel) {
 
 /// Whether the last refine got a row budget (its tiles are recorded; the refine consumes the budget).
 fn budgeted(live: &LiveModel) -> bool {
-    live.area.as_ref().is_some_and(|a| !a.budget_keys.is_empty())
+    live.area.as_ref().is_some_and(|a| !a.budget.keys.is_empty())
 }
 
 /// Whether seeds past the per-tile cap into the origin's wall tile are turned away.

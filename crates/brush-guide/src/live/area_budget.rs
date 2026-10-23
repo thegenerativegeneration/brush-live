@@ -21,10 +21,20 @@ use crate::config::AreaFreeze;
 use brush_render::gaussian_splats::Splats;
 use brush_train::budget::EvictionRelax;
 use glam::Vec3;
+use std::collections::BTreeMap;
 
 /// With `area_freeze` inactive_at_cap, held rows are released once the resident rows drop this share of
 /// `max_splats` below `area_freeze_at`, so the hold does not toggle at every refine.
 pub(super) const FREEZE_RELEASE: f32 = 0.05;
+
+/// The row budget last handed to the trainer and the evictions it caused.
+#[derive(Debug, Default)]
+pub(super) struct BudgetTiles {
+    /// The tiles of the groups of the row budget last handed to the trainer, in group order.
+    pub(super) keys: Vec<TileKey>,
+    /// Rows refines evicted per tile under a row budget, since the start.
+    pub(super) evictions: BTreeMap<TileKey, u32>,
+}
 
 impl LiveModel {
     /// Whether the rows outside the active tiles are held now: once area training engaged
@@ -56,7 +66,7 @@ impl LiveModel {
         let at_cap = resident as f32 >= bound;
         if at_cap != area.at_cap {
             area.at_cap = at_cap;
-            area.mask_stale = true;
+            area.mask.stale = true;
             let what = if at_cap { "held" } else { "train again" };
             log::info!("area: rows outside the active tiles {what} at {resident} of {max} splats");
             if self.views.len() != self.view_cams.len() {
@@ -77,7 +87,7 @@ impl LiveModel {
     pub(super) fn tile_cap_keep(&mut self, seed_means: &[f32]) -> Option<Vec<bool>> {
         let cap = self.config.area_tile_cap();
         let area = self.area.as_mut().filter(|a| a.engaged && cap > 0)?;
-        let counts = tile_counts(&area.registry, &area.fresh);
+        let counts = tile_counts(&area.registry, &area.heights.fresh);
         let mut keep = vec![true; seed_means.len() / 3];
         let cleared = keep_under_tile_cap(&counts, cap, seed_means, area.registry.params().tile_size, &mut keep);
         area.counters.seeds_over_tile_cap += cleared;
@@ -95,15 +105,15 @@ impl LiveModel {
             return;
         };
         if !area.engaged {
-            area.budget_keys.clear();
+            area.budget.keys.clear();
             trainer.set_row_budget(None);
             return;
         }
-        let fair = holds.then(|| FairShare { active: &area.active, max_splats: self.config.max_splats });
+        let fair = holds.then(|| FairShare { active: &area.active.tiles, max_splats: self.config.max_splats });
         let tile_size = area.registry.params().tile_size;
         let budget = row_budget(means, tile_size, cap, fair);
         let (keys, budget) = budget.map_or((Vec::new(), None), |(k, b)| (k, Some(b)));
-        area.budget_keys = keys;
+        area.budget.keys = keys;
         trainer.set_row_budget(budget);
     }
 
@@ -117,9 +127,9 @@ impl LiveModel {
             area.counters.eviction_fallbacks += 1;
         }
         let mut parts = Vec::new();
-        for (key, &n) in area.budget_keys.iter().zip(trainer.budget_evictions()) {
+        for (key, &n) in area.budget.keys.iter().zip(trainer.budget_evictions()) {
             if n > 0 {
-                *area.tile_evictions.entry(*key).or_default() += n;
+                *area.budget.evictions.entry(*key).or_default() += n;
                 parts.push(format!("{} {n}", key.stem()));
             }
         }
@@ -176,7 +186,7 @@ impl LiveModel {
         let camera = self.views.last().map(|v| v.camera);
         let RoomNeed { evict, held_over, centre } = need;
         let total = evict.max(held_over);
-        let Some(area) = self.area.as_mut().filter(|a| !a.parking_off && total > 0) else {
+        let Some(area) = self.area.as_mut().filter(|a| !a.parking.off && total > 0) else {
             return splats;
         };
         area.registry.note_walker(centre);
@@ -197,7 +207,7 @@ impl LiveModel {
             for_cap += 1;
         }
         let far = if has_active && evict > freed {
-            let mut keep = area.active.clone();
+            let mut keep = area.active.tiles.clone();
             keep.extend(near_tiles(centre, registry.params().tile_size));
             let seen = |k: TileKey| {
                 let (Some(cam), Some((lo, hi))) = (camera.as_ref(), registry.tile_box(k)) else {
@@ -243,10 +253,11 @@ impl LiveModel {
         if !trainer.row_budget().is_some_and(|b| b.limit_eviction) {
             return;
         }
-        let mut keep = area.active.clone();
+        let mut keep = area.active.tiles.clone();
         keep.extend(near_tiles(centre, area.registry.params().tile_size));
         let open: Vec<u32> = area
-            .budget_keys
+            .budget
+            .keys
             .iter()
             .enumerate()
             .filter(|&(_, k)| !keep.contains(k) && area.registry.get(*k).is_some_and(|t| t.resident))

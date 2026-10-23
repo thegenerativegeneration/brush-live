@@ -7,16 +7,19 @@
 //! until then the engine trains as with area training off.
 
 use super::LiveModel;
+use super::area_active::{ActiveSet, TileHeights};
+use super::area_budget::BudgetTiles;
+use super::area_freeze::HeldMask;
+use super::area_park::Parking;
+use super::area_restore::Deferrals;
+use super::area_sight::Sight;
 use brush_dataset::scene::SceneBatch;
 use crate::config::AreaFreeze;
-use crate::area::{
-    AreaCounters, AreaParams, AreaReport, Heights, TileKey, TileRegistry, area_views, tile_splats, views_seeing,
-};
+use crate::area::{AreaCounters, AreaParams, AreaReport, TileRegistry, area_views, tile_splats, views_seeing};
 use brush_render::gaussian_splats::{SplatRenderMode, Splats};
 use brush_train::rows::SplatRows;
 use burn::tensor::{Tensor, s};
 use glam::Vec3;
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// Area training's state: the tile registry, the views that train, and what parking did.
@@ -26,62 +29,29 @@ pub(crate) struct AreaState {
     /// and inactive_at_cap switch.
     pub(super) views: Vec<usize>,
     pub(super) counters: AreaCounters,
-    /// Parked tiles that resident rows lay in at the last visibility readback; the refine's park step restores them.
-    pub(super) conflicts: Vec<TileKey>,
-    /// File size of every parked tile.
-    pub(super) file_bytes: BTreeMap<TileKey, u64>,
-    /// The last park was skipped for taking every resident row (logged once per streak).
-    pub(super) skipping: bool,
-    /// A tile file could not be written: no parking until the next reset.
-    pub(super) parking_off: bool,
+    /// Parked tiles, their files and whether parking is on.
+    pub(super) parking: Parking,
     /// Training on the views that see tiles just restored.
     pub(super) junction: Junction,
     /// Seed counts of the last keyframe that seeded again after restoring tiles its seeds hit: (before, after).
     pub(super) last_reseed: Option<(u32, u32)>,
-    /// Parked tiles in a deferral streak (deferred at the last keyframe or since, and not back), with the streak's
-    /// deferrals so far. A streak logs once and notes its shortfall every `DEFER_RENOTE_EVERY` deferrals.
-    pub(super) deferring: BTreeMap<TileKey, u32>,
-    /// Tiles deferred since the last keyframe ended; a streak whose tile is not among them ends with the keyframe.
-    pub(super) deferred_now: BTreeSet<TileKey>,
-    /// The resident tiles whose rows the trainer holds ([`super::area_freeze`]): the left ones, or with
-    /// `area_freeze` inactive every resident tile not active.
-    pub(super) frozen_keys: BTreeSet<TileKey>,
-    /// Rows the trainer held when the mask was last built.
-    pub(super) frozen_rows: u32,
-    /// With `area_freeze` inactive or inactive_at_cap: the active tiles, the one under the newest camera first
-    /// ([`super::area_active`]).
-    pub(super) active: Vec<TileKey>,
-    /// Boxes (min, max) of the active tiles that hold rows; the training views are the views that see one.
-    pub(super) active_boxes: Vec<(Vec3, Vec3)>,
-    /// Height band and rows per tile at the last visibility readback.
-    pub(super) heights: BTreeMap<TileKey, Heights>,
-    /// Height band and rows per tile of the rows seeded since the last visibility readback.
-    pub(super) fresh: BTreeMap<TileKey, Heights>,
-    /// The active set before the current one, to count changes back to it.
-    pub(super) previous_active: Vec<TileKey>,
-    /// Held rows no step ever trained, when the mask was last built.
-    pub(super) held_untrained_rows: u32,
-    /// The active tiles the mask was last built for (sorted); `None` before any mask with `area_freeze` inactive.
-    pub(super) mask_active: Option<Vec<TileKey>>,
-    /// Rows outside the active tiles were appended since the mask was built (restores, seeds on new ground).
-    pub(super) mask_stale: bool,
-    /// Rows in the active tiles when the mask was last built.
-    pub(super) active_splats: u32,
-    /// The active set changed since the training views were last logged.
-    pub(super) active_changed: bool,
+    /// The deferral streaks of parked tiles.
+    pub(super) defer: Deferrals,
+    /// The mask that holds rows still ([`super::area_freeze`]).
+    pub(super) mask: HeldMask,
+    /// The active tiles ([`super::area_active`]).
+    pub(super) active: ActiveSet,
+    /// The tiles' height bands.
+    pub(super) heights: TileHeights,
     /// With `area_freeze` inactive_at_cap: the rows outside the active tiles are held ([`LiveModel::note_cap`]).
     pub(super) at_cap: bool,
     /// inactive_at_cap switched while a keyframe was being added (its camera noted, its view not yet in): the
     /// keyframe's loader rebuild builds both loaders afresh ([`LiveModel::rebuild_loaders`]).
     pub(super) loaders_stale: bool,
-    /// The tiles of the groups of the row budget last handed to the trainer, in group order.
-    pub(super) budget_keys: Vec<TileKey>,
-    /// Rows refines evicted per tile under a row budget, since the start.
-    pub(super) tile_evictions: BTreeMap<TileKey, u32>,
-    /// The views that see the resident model, ascending ([`super::area_sight`]).
-    pub(super) sight: Vec<usize>,
-    /// The views among `sight` that vote in the score round: one per pose bucket, and the newest view.
-    pub(super) sight_reps: Vec<usize>,
+    /// The row budget's tiles and evictions ([`super::area_budget`]).
+    pub(super) budget: BudgetTiles,
+    /// The views that see the resident model ([`super::area_sight`]).
+    pub(super) sight: Sight,
     /// Area training is engaged ([`super::area_engage`]); until then the engine trains as with it off.
     pub(super) engaged: bool,
 }
@@ -132,32 +102,17 @@ impl AreaState {
             registry: TileRegistry::new(params),
             views: Vec::new(),
             counters: AreaCounters::default(),
-            conflicts: Vec::new(),
-            file_bytes: BTreeMap::new(),
-            skipping: false,
-            parking_off: false,
+            parking: Parking::default(),
             junction: Junction::default(),
             last_reseed: None,
-            deferring: BTreeMap::new(),
-            deferred_now: BTreeSet::new(),
-            frozen_keys: BTreeSet::new(),
-            frozen_rows: 0,
-            active: Vec::new(),
-            active_boxes: Vec::new(),
-            heights: BTreeMap::new(),
-            fresh: BTreeMap::new(),
-            previous_active: Vec::new(),
-            held_untrained_rows: 0,
-            mask_active: None,
-            mask_stale: false,
-            active_splats: 0,
-            active_changed: false,
+            defer: Deferrals::default(),
+            mask: HeldMask::default(),
+            active: ActiveSet::default(),
+            heights: TileHeights::default(),
             at_cap: false,
             loaders_stale: false,
-            budget_keys: Vec::new(),
-            tile_evictions: BTreeMap::new(),
-            sight: Vec::new(),
-            sight_reps: Vec::new(),
+            budget: BudgetTiles::default(),
+            sight: Sight::default(),
             engaged: false,
         }
     }
@@ -228,15 +183,15 @@ impl LiveModel {
         };
         area.views = if every {
             (0..positions.len()).collect()
-        } else if area.active_boxes.is_empty() {
+        } else if area.active.boxes.is_empty() {
             area_views(&positions, centre, area.registry.params().radius)
         } else {
             let cameras: Vec<_> = self.views.iter().map(|v| v.camera).collect();
-            views_seeing(&cameras, &area.active_boxes, view_m)
+            views_seeing(&cameras, &area.active.boxes, view_m)
         };
-        if std::mem::take(&mut area.active_changed) {
-            let stems: Vec<String> = area.active.iter().map(|k| k.stem()).collect();
-            let how = match (every, area.active_boxes.is_empty()) {
+        if std::mem::take(&mut area.active.changed) {
+            let stems: Vec<String> = area.active.tiles.iter().map(|k| k.stem()).collect();
+            let how = match (every, area.active.boxes.is_empty()) {
                 (true, _) if !engaged => "every view until a tile is left",
                 (true, _) => "every view below the cap",
                 (false, true) => "radius fallback",
@@ -265,15 +220,15 @@ impl LiveModel {
             summary: area.registry.summary(centre),
             counters: area.counters,
             tiles: area.registry.tile_states(centre),
-            parking_off: area.parking_off,
-            frozen_rows: area.frozen_rows,
+            parking_off: area.parking.off,
+            frozen_rows: area.mask.rows,
             left_splats: area.registry.left_resident_splats(centre),
-            active_tiles: area.active.iter().map(|k| [k.x, k.z]).collect(),
-            active_splats: area.active_splats,
-            held_untrained_rows: area.held_untrained_rows,
+            active_tiles: area.active.tiles.iter().map(|k| [k.x, k.z]).collect(),
+            active_splats: area.mask.active_splats,
+            held_untrained_rows: area.mask.untrained_rows,
             at_cap: area.at_cap,
             tile_splats: tile_splats(&area.registry),
-            tile_evictions: area.tile_evictions.iter().map(|(k, &n)| [k.x, k.z, n as i32]).collect(),
+            tile_evictions: area.budget.evictions.iter().map(|(k, &n)| [k.x, k.z, n as i32]).collect(),
             tile_cap: self.config.area_tile_cap(),
         })
     }

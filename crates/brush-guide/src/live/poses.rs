@@ -103,7 +103,7 @@ impl LiveModel {
         let refreshed = self.note_engaged();
         if let Some(area) = self.area.as_mut() {
             // Rows moved with their views and may lie in other tiles now: the next step holds them afresh.
-            area.mask_stale = true;
+            area.mask.stale = true;
         }
         if !refreshed {
             self.refresh_area_views();

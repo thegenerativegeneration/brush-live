@@ -23,7 +23,7 @@ fn without_floor(mut rows: brush_train::rows::SplatRows) -> brush_train::rows::S
 }
 
 fn active(live: &LiveModel) -> Vec<TileKey> {
-    live.area.as_ref().unwrap().active.clone()
+    live.area.as_ref().unwrap().active.tiles.clone()
 }
 
 /// The active wall tiles (z = 0).
@@ -154,7 +154,7 @@ async fn without_an_active_box_the_radius_views_train() {
     facing_wall(&mut live, &dir, 0, 0.0).await;
     add(&mut live, &dir, 1, Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, 8.0)).await;
     assert_eq!(live.training_views(), vec![1], "keyframe 0 does not see the wall keyframe 1 seeded behind it");
-    live.area.as_mut().unwrap().active_boxes.clear();
+    live.area.as_mut().unwrap().active.boxes.clear();
     live.refresh_area_views();
     assert_eq!(live.training_views(), vec![0, 1]);
     std::fs::remove_dir_all(dir).ok();
@@ -203,11 +203,11 @@ async fn a_pose_update_ranks_the_active_set_again() {
     live.update_poses(&[crate::live::ViewPose::from_arkit(0, &h.pose).unwrap()]);
     let after = active_wall(&live);
     assert!(before != after, "{before:?} stayed");
-    assert!(live.area.as_ref().unwrap().mask_stale);
+    assert!(live.area.as_ref().unwrap().mask.stale);
     // The rows as the step finds them (a step may move an active row across a border).
     let rows = live.trainer.as_ref().unwrap().read_rows(live.splats.as_ref().unwrap()).await;
     train(&mut live, 1).await;
-    assert!(!live.area.as_ref().unwrap().mask_stale);
+    assert!(!live.area.as_ref().unwrap().mask.stale);
     let held = held_flags(&live).await;
     let now = active(&live);
     assert!((0..rows.len()).all(|i| held[i] != now.contains(&tile_of(rows.mean(i)))), "the mask is the old set's");

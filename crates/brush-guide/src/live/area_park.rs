@@ -13,8 +13,21 @@ use brush_render::gaussian_splats::Splats;
 use brush_train::rows::SplatRows;
 use burn::tensor::Transaction;
 use glam::Affine3A;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+/// What parking tracks: the conflicts of the last readback, the tile files and whether parking is on.
+#[derive(Debug, Default)]
+pub(super) struct Parking {
+    /// Parked tiles that resident rows lay in at the last visibility readback; the refine's park step restores them.
+    pub(super) conflicts: Vec<TileKey>,
+    /// File size of every parked tile.
+    pub(super) file_bytes: BTreeMap<TileKey, u64>,
+    /// The last park was skipped for taking every resident row (logged once per streak).
+    pub(super) skipping: bool,
+    /// A tile file could not be written: no parking until the next reset.
+    pub(super) off: bool,
+}
 
 impl LiveModel {
     /// Records per resident tile whether a training step since the last refine drew one of its splats (the refine
@@ -57,12 +70,12 @@ impl LiveModel {
             t.elapsed().as_secs_f64() * 1e3,
             seen.len()
         );
-        if conflicts != area.conflicts {
+        if conflicts != area.parking.conflicts {
             if !conflicts.is_empty() {
                 let stems: Vec<String> = conflicts.iter().map(|k| k.stem()).collect();
                 log::info!("area: resident splats lie in parked tiles {}", stems.join(", "));
             }
-            area.conflicts = conflicts;
+            area.parking.conflicts = conflicts;
         }
         self.note_heights(&means);
         self.set_row_budget(&means);
@@ -88,15 +101,15 @@ impl LiveModel {
         let near = |k: &TileKey| k.footprint_distance(centre, p.tile_size) <= p.radius + p.hysteresis;
         // With parking off a far tile's file cannot take the rows: the tile comes back instead.
         let (back, far): (Vec<TileKey>, Vec<TileKey>) =
-            area.conflicts.iter().partition(|k| near(k) || area.parking_off);
+            area.parking.conflicts.iter().partition(|k| near(k) || area.parking.off);
         let splats = self.restore_tiles(splats, &back, RestoreReason::Rows, centre).await;
         let splats = self.merge_into_parked(splats, &far).await;
-        let Some(area) = self.area.as_mut().filter(|a| !a.parking_off) else {
+        let Some(area) = self.area.as_mut().filter(|a| !a.parking.off) else {
             return splats;
         };
         let keys = area.registry.to_park(centre, self.iter, self.views.len() as u32);
         if keys.is_empty() {
-            area.skipping = false;
+            area.parking.skipping = false;
             return splats;
         }
         self.park_tiles(splats, &keys).await
@@ -108,7 +121,7 @@ impl LiveModel {
     /// the next reset. Each park logs one line per tile and one for the whole event, whose time includes the row
     /// readback. After a park the all-views loader drops views that left the area. No-op with parking off.
     pub(super) async fn park_tiles(&mut self, splats: Splats, keys: &[TileKey]) -> Splats {
-        let Some(area) = self.area.as_mut().filter(|a| !a.parking_off && !keys.is_empty()) else {
+        let Some(area) = self.area.as_mut().filter(|a| !a.parking.off && !keys.is_empty()) else {
             return splats;
         };
         let t = web_time::Instant::now();
@@ -119,11 +132,11 @@ impl LiveModel {
         let skip = taken == take.len() && taken > 0;
         if skip {
             area.counters.parks_skipped += 1;
-            if !area.skipping {
+            if !area.parking.skipping {
                 log::info!("area: park skipped, it would take every resident splat");
             }
         }
-        area.skipping = skip;
+        area.parking.skipping = skip;
         if skip || taken == 0 {
             // With nothing taken, the refine pruned these tiles empty; the next readback drops them.
             return splats;
@@ -141,7 +154,7 @@ impl LiveModel {
         };
         let area = self.area.as_mut().expect("area training is on");
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        area.counters.note_park(ms, area.file_bytes.values().sum());
+        area.counters.note_park(ms, area.parking.file_bytes.values().sum());
         log::info!("area: park event {tiles} tiles, {} splats in {ms:.1} ms", parked.len());
         self.drop_departed_views();
         splats
@@ -197,7 +210,7 @@ impl LiveModel {
         };
         let area = self.area.as_mut().expect("area training is on");
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        area.counters.note_park(ms, area.file_bytes.values().sum());
+        area.counters.note_park(ms, area.parking.file_bytes.values().sum());
         log::info!("area: park event {tiles} tiles, {} splats in {ms:.1} ms", merged.len());
         splats
     }
@@ -205,7 +218,7 @@ impl LiveModel {
     /// Writes parked tile `key` again with `new` rows added (see [`Self::merge_into_parked`]); returns its row count,
     /// version and file size, or `None` when the rows stay out.
     fn merge_tile(&mut self, dir: &Path, key: TileKey, new: SplatRows) -> Option<(u32, u32, u64)> {
-        if self.area.as_ref().is_none_or(|a| a.parking_off) {
+        if self.area.as_ref().is_none_or(|a| a.parking.off) {
             return None;
         }
         let (tile, moves, _) =
@@ -220,12 +233,12 @@ impl LiveModel {
         match write_tile(dir, &ParkedTile { key, version, slot_poses, rows }) {
             Ok(bytes) => {
                 area.registry.note_merged(key, total);
-                area.file_bytes.insert(key, bytes);
+                area.parking.file_bytes.insert(key, bytes);
                 Some((total, version, bytes))
             }
             Err(e) => {
                 log::warn!("area: parking off until reset, tile {} cannot be written: {e}", key.stem());
-                area.parking_off = true;
+                area.parking.off = true;
                 None
             }
         }
@@ -239,7 +252,7 @@ impl LiveModel {
         let dir = self.tiles_dir.clone().expect("area training has a tiles directory");
         let (mut parked, mut tiles) = (BTreeSet::new(), 0);
         for (key, idx) in group_rows(&rows.means, tile_size) {
-            if self.area.as_ref().is_none_or(|a| a.parking_off) {
+            if self.area.as_ref().is_none_or(|a| a.parking.off) {
                 break;
             }
             let t = web_time::Instant::now();
@@ -256,12 +269,12 @@ impl LiveModel {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     log::warn!("area: parking off until reset, tile {} cannot be written: {e}", key.stem());
-                    area.parking_off = true;
+                    area.parking.off = true;
                     continue;
                 }
             };
             area.registry.mark_parked(key, n, self.iter);
-            area.file_bytes.insert(key, bytes);
+            area.parking.file_bytes.insert(key, bytes);
             area.counters.parks += 1;
             parked.extend(idx);
             tiles += 1;

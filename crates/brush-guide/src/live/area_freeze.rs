@@ -19,6 +19,24 @@ use burn::tensor::{Bool, Tensor, TensorData};
 use glam::Vec3;
 use std::collections::BTreeSet;
 
+/// The mask that holds rows still, and what it was built for.
+#[derive(Debug, Default)]
+pub(super) struct HeldMask {
+    /// The resident tiles whose rows the trainer holds: the left ones, or with
+    /// `area_freeze` inactive every resident tile not active.
+    pub(super) keys: BTreeSet<TileKey>,
+    /// Rows the trainer held when the mask was last built.
+    pub(super) rows: u32,
+    /// Held rows no step ever trained, when the mask was last built.
+    pub(super) untrained_rows: u32,
+    /// The active tiles the mask was last built for (sorted); `None` before any mask with `area_freeze` inactive.
+    pub(super) active: Option<Vec<TileKey>>,
+    /// Rows outside the active tiles were appended since the mask was built (restores, seeds on new ground).
+    pub(super) stale: bool,
+    /// Rows in the active tiles when the mask was last built.
+    pub(super) active_splats: u32,
+}
+
 impl LiveModel {
     /// After a refine and its parks (the refine dropped the trainer's mask, and parks and restores moved rows): marks
     /// the tiles around the newest view as visited and holds the rows outside the active tiles (`area_freeze`
@@ -55,7 +73,7 @@ impl LiveModel {
         }
         let changed = self.area.as_ref().is_some_and(|a| {
             let resident = |k: &&TileKey| a.registry.get(**k).is_some_and(|t| t.resident);
-            !a.frozen_keys.iter().filter(resident).eq(keys.iter())
+            !a.mask.keys.iter().filter(resident).eq(keys.iter())
         });
         if changed {
             self.hold_rows(splats, Held::In(keys)).await;
@@ -106,9 +124,9 @@ impl LiveModel {
             Some(c) => c.into_data_async().await.ok().and_then(|d| d.convert::<i64>().try_to_vec::<i64>().ok()),
             None => None,
         };
-        area.held_untrained_rows = untrained.and_then(|v| v.first().copied()).map_or(0, |v| v.max(0) as u32);
-        area.frozen_keys = keys;
-        area.frozen_rows = count;
+        area.mask.untrained_rows = untrained.and_then(|v| v.first().copied()).map_or(0, |v| v.max(0) as u32);
+        area.mask.keys = keys;
+        area.mask.rows = count;
     }
 }
 

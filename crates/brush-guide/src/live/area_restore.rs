@@ -10,7 +10,7 @@ use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use brush_train::rows::SplatRows;
 use glam::Vec3;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 /// How far away a junction view may see a restored tile's box, in metres.
@@ -23,6 +23,16 @@ const STALE_WINDOWS: u32 = 10;
 /// A deferral streak notes its shortfall at its first deferral and every this many after, so a tile larger than the
 /// room eviction keeps free still gets room eventually, without evicting the live area at every refine.
 pub(super) const DEFER_RENOTE_EVERY: u32 = 10;
+
+/// The deferral streaks of parked tiles that did not fit the splat budget.
+#[derive(Debug, Default)]
+pub(super) struct Deferrals {
+    /// Parked tiles in a deferral streak (deferred at the last keyframe or since, and not back), with the streak's
+    /// deferrals so far. A streak logs once and notes its shortfall every `DEFER_RENOTE_EVERY` deferrals.
+    pub(super) streaks: BTreeMap<TileKey, u32>,
+    /// Tiles deferred since the last keyframe ended; a streak whose tile is not among them ends with the keyframe.
+    pub(super) now: BTreeSet<TileKey>,
+}
 
 /// Why parked tiles come back; the log names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,10 +114,10 @@ impl LiveModel {
         let junction_steps = self.config.area_junction_steps;
         let area = self.area.as_mut().expect("area training is on");
         let ms = t.elapsed().as_secs_f64() * 1e3;
-        area.counters.note_restore(ms, area.file_bytes.values().sum());
+        area.counters.note_restore(ms, area.parking.file_bytes.values().sum());
         log::info!("area: restore event {tiles} tiles, {restored} splats in {ms:.1} ms ({reason})");
         if tiles > 0 {
-            area.mask_stale = true;
+            area.mask.stale = true;
             area.junction.steps_left = junction_steps;
             // A running junction starts over with other views: its decoded batches would fill the cache.
             area.junction.cache.clear();
@@ -162,9 +172,9 @@ impl LiveModel {
         let splats = trainer.append_rows(splats, &tile.rows);
         area.registry.mark_restored(key, keyframes, self.iter);
         remove_tile_files(dir, key);
-        area.file_bytes.remove(&key);
-        area.deferring.remove(&key);
-        area.deferred_now.remove(&key);
+        area.parking.file_bytes.remove(&key);
+        area.defer.streaks.remove(&key);
+        area.defer.now.remove(&key);
         area.junction.boxes.extend(rows_box(&tile.rows));
         area.counters.restores += 1;
         (splats, Restore::Restored { splats: n, spread })
@@ -176,8 +186,8 @@ impl LiveModel {
     pub(super) fn defer(&mut self, key: TileKey, shortfall: u32) {
         let area = self.area.as_mut().expect("area training is on");
         area.counters.deferrals += 1;
-        area.deferred_now.insert(key);
-        let streak = area.deferring.entry(key).or_insert(0);
+        area.defer.now.insert(key);
+        let streak = area.defer.streaks.entry(key).or_insert(0);
         *streak += 1;
         if *streak == 1 {
             log::info!("area: restore of tile {} deferred, {shortfall} splats over the budget", key.stem());
@@ -192,8 +202,8 @@ impl LiveModel {
     /// keyframe. No-op without area training.
     pub(super) fn end_deferral_streaks(&mut self) {
         if let Some(area) = self.area.as_mut() {
-            let now = std::mem::take(&mut area.deferred_now);
-            area.deferring.retain(|k, _| now.contains(k));
+            let now = std::mem::take(&mut area.defer.now);
+            area.defer.streaks.retain(|k, _| now.contains(k));
         }
     }
 
@@ -203,9 +213,9 @@ impl LiveModel {
         remove_tile_files(dir, key);
         let area = self.area.as_mut().expect("area training is on");
         area.registry.drop_tile(key);
-        area.file_bytes.remove(&key);
-        area.deferring.remove(&key);
-        area.deferred_now.remove(&key);
+        area.parking.file_bytes.remove(&key);
+        area.defer.streaks.remove(&key);
+        area.defer.now.remove(&key);
         area.counters.drops += 1;
     }
 

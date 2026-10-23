@@ -60,7 +60,7 @@ async fn held_and_left(live: &LiveModel) -> (Vec<bool>, Vec<bool>) {
     };
     assert_eq!(held.len(), n, "the mask is out of step with the splats");
     let means: Vec<f32> = splats.means().into_data_async().await.unwrap().try_to_vec().unwrap();
-    let keys: Vec<TileKey> = live.area.as_ref().unwrap().frozen_keys.iter().copied().collect();
+    let keys: Vec<TileKey> = live.area.as_ref().unwrap().mask.keys.iter().copied().collect();
     (held, crate::area::rows_in(&keys, &means, 1.0))
 }
 
@@ -89,7 +89,7 @@ async fn a_left_tile_in_view_stays_as_the_walker_left_it() {
     train(&mut live, 5).await;
     add(&mut live, &dir, 1, Vec3::new(6.0, 0.0, 2.0), Vec3::ZERO).await;
     // Keyframe 1 seeds into the left tiles too; its rows are not held until the next refine.
-    let keys = live.area.as_ref().unwrap().frozen_keys.clone();
+    let keys = live.area.as_ref().unwrap().mask.keys.clone();
     let kf0_rows = async |live: &LiveModel| {
         let rows = rows_where(live, |p| keys.contains(&TileKey::of(p, 1.0))).await;
         rows.select(&(0..rows.len()).filter(|&i| rows.origin[i] == Some(0)).collect::<Vec<_>>())
@@ -166,11 +166,11 @@ async fn eviction_at_the_cap_never_takes_held_rows() {
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
     train(&mut live, 5).await;
     // With parking on, the refine would park the left tiles first (`left_tiles_park_before_an_eviction_bites`).
-    live.area.as_mut().unwrap().parking_off = true;
+    live.area.as_mut().unwrap().parking.off = true;
     let (pos, away) = (Vec3::new(6.0, 0.0, 2.0), Vec3::new(6.0, 0.0, 10.0));
     add_seeing(&mut live, &dir, 1, pos, away, &[away]).await;
     let held = live.area_report().unwrap().frozen_rows;
-    let keys = live.area.as_ref().unwrap().frozen_keys.clone();
+    let keys = live.area.as_ref().unwrap().mask.keys.clone();
     let in_left = |p: Vec3| keys.contains(&TileKey::of(p, 1.0));
     let before = rows_where(&live, in_left).await;
     assert!(held as usize == before.len() && held > 10, "{held} held, {} in the left tiles", before.len());
@@ -344,7 +344,7 @@ async fn a_refine_records_what_it_evicted() {
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
     train(&mut live, 5).await;
-    live.area.as_mut().unwrap().parking_off = true;
+    live.area.as_mut().unwrap().parking.off = true;
     add(&mut live, &dir, 1, Vec3::new(0.3, 0.0, 2.0), Vec3::new(0.3, 0.0, 0.0)).await;
     let before = live.num_evicted();
     train(&mut live, 5).await;

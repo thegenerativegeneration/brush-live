@@ -50,7 +50,7 @@ async fn held_rows_over_the_cap_park_farthest_first_even_in_view() {
 
     let cap = held / 2;
     let (mut live, dir) = looking_back("cap-half", (cap as f32 + 0.5) / 20_000.0).await;
-    let keys = live.area.as_ref().unwrap().frozen_keys.clone();
+    let keys = live.area.as_ref().unwrap().mask.keys.clone();
     let before = rows_where(&live, |p| keys.contains(&TileKey::of(p, 1.0))).await;
     train(&mut live, 5).await;
     let r = live.area_report().unwrap();
@@ -61,7 +61,7 @@ async fn held_rows_over_the_cap_park_farthest_first_even_in_view() {
     let dist = |k: &TileKey| k.footprint_distance(centre, 1.0);
     let parked = area.registry.parked_keys();
     let nearest_parked = parked.iter().map(dist).fold(f32::INFINITY, f32::min);
-    assert!(area.frozen_keys.iter().all(|k| dist(k) <= nearest_parked), "a nearer held tile parked first");
+    assert!(area.mask.keys.iter().all(|k| dist(k) <= nearest_parked), "a nearer held tile parked first");
     for k in &parked {
         assert_eq!(area.registry.get(*k).unwrap().last_seen_step, live.iter, "parked tile {k:?} was not in view");
     }
