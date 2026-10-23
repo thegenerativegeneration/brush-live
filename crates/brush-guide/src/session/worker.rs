@@ -8,6 +8,7 @@ mod eval_schedule;
 mod fisher;
 mod holdout;
 mod holdout_seam;
+mod jsonl;
 mod poses;
 
 use super::preview::{PREVIEW_FLOATS, PreviewClock, PreviewSnapshot};
@@ -18,7 +19,7 @@ use crate::keyframe::decode_keyframe;
 use crate::live::{LiveModel, StepTotals};
 use crate::protocol::{Cell, KeyframeHeader};
 use crate::schedule::{Cadence, IterThrottle};
-use crate::scores::voxel::{RawVoxel, VoxelAggregator};
+use crate::scores::voxel::VoxelAggregator;
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::Device;
 use drain::{Drain, try_take};
@@ -459,7 +460,7 @@ impl Worker {
             background: composited,
             views: r.per_view.clone(),
         };
-        if let Err(e) = eval_log::append(&self.session_dir.join("eval.jsonl"), &record) {
+        if let Err(e) = jsonl::append_jsonl(&self.session_dir.join("eval.jsonl"), &record) {
             log::warn!("could not append eval.jsonl: {e}");
         }
         true
@@ -663,43 +664,6 @@ fn publish_counts(status_tx: &watch::Sender<StatusMsg>, live: &LiveModel) {
         s.num_splats = live.splats().map_or(0, |s| s.num_splats());
         s.train_iters = u64::from(live.iter());
     });
-}
-
-/// One JSON line: the round's version and each voxel as
-/// `[kx, ky, kz, coverage, sigma]` (voxel index, mean coverage, positional
-/// σ in metres, `null` when infinite).
-fn append_raw_round(path: &Path, version: u64, raw: &[RawVoxel]) -> std::io::Result<()> {
-    use std::io::Write;
-    let voxels: Vec<(i32, i32, i32, f32, f32)> = raw
-        .iter()
-        .map(|r| (r.key.x, r.key.y, r.key.z, r.coverage, r.sigma))
-        .collect();
-    let line = serde_json::json!({ "version": version, "voxels": voxels });
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{line}")
-}
-
-/// One JSON line: the round's version and each voxel as
-/// `[kx, ky, kz, n, spread, px_per_m, coverage]`.
-fn append_ingredient_round(
-    path: &Path,
-    version: u64,
-    rows: &[(glam::IVec3, f32, f32, f32, f32)],
-) -> std::io::Result<()> {
-    use std::io::Write;
-    let voxels: Vec<(i32, i32, i32, f32, f32, f32, f32)> = rows
-        .iter()
-        .map(|(k, n, s, p, c)| (k.x, k.y, k.z, *n, *s, *p, *c))
-        .collect();
-    let line = serde_json::json!({ "version": version, "voxels": voxels });
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(file, "{line}")
 }
 
 #[cfg(test)]

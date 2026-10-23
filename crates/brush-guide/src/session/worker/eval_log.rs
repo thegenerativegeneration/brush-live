@@ -1,7 +1,6 @@
 //! One JSON line per held-out eval in `session_dir/eval.jsonl`, for the replay measurement report.
 
 use serde::Serialize;
-use std::path::Path;
 
 /// One held-out view's scores.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
@@ -82,16 +81,9 @@ pub(super) struct EvalRecord {
     pub views: Vec<ViewScore>,
 }
 
-/// Appends `record` as one line.
-pub(super) fn append(path: &Path, record: &EvalRecord) -> std::io::Result<()> {
-    use std::io::Write;
-    let line = serde_json::to_string(record).map_err(std::io::Error::other)?;
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "{line}")
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::jsonl::append_jsonl;
     use super::*;
 
     fn record(iter: u32) -> EvalRecord {
@@ -174,8 +166,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("eval-log-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("eval.jsonl");
-        append(&path, &record(100)).unwrap();
-        append(&path, &record(200)).unwrap();
+        append_jsonl(&path, &record(100)).unwrap();
+        append_jsonl(&path, &record(200)).unwrap();
         let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
             .unwrap()
             .lines()

@@ -5,11 +5,14 @@
 //! importance next to the trainer's, for comparing the two. The live
 //! eviction importance comes from training alone (`brush_train::evict`).
 
-use super::{Worker, append_ingredient_round, append_raw_round};
+use super::jsonl::append_jsonl;
+use super::Worker;
 use crate::scores::importance::importances;
 use crate::scores::metrics::gaussian_metrics;
 use crate::scores::pass::{PassOutput, PassView, score_pass};
+use crate::scores::voxel::RawVoxel;
 use crate::session::splat_read::SplatRead;
+use std::path::Path;
 use web_time::Instant;
 
 /// One pass's outputs, for the caller's log and dumps.
@@ -172,6 +175,33 @@ fn coverage_ingredients(
             (k, a.n / a.op, spread, a.ppm, a.cov / a.op)
         })
         .collect()
+}
+
+/// One JSON line: the round's version and each voxel as
+/// `[kx, ky, kz, coverage, sigma]` (voxel index, mean coverage, positional
+/// σ in metres, `null` when infinite).
+fn append_raw_round(path: &Path, version: u64, raw: &[RawVoxel]) -> std::io::Result<()> {
+    let voxels: Vec<(i32, i32, i32, f32, f32)> = raw
+        .iter()
+        .map(|r| (r.key.x, r.key.y, r.key.z, r.coverage, r.sigma))
+        .collect();
+    let line = serde_json::json!({ "version": version, "voxels": voxels });
+    append_jsonl(path, &line)
+}
+
+/// One JSON line: the round's version and each voxel as
+/// `[kx, ky, kz, n, spread, px_per_m, coverage]`.
+fn append_ingredient_round(
+    path: &Path,
+    version: u64,
+    rows: &[(glam::IVec3, f32, f32, f32, f32)],
+) -> std::io::Result<()> {
+    let voxels: Vec<(i32, i32, i32, f32, f32, f32, f32)> = rows
+        .iter()
+        .map(|(k, n, s, p, c)| (k.x, k.y, k.z, *n, *s, *p, *c))
+        .collect();
+    let line = serde_json::json!({ "version": version, "voxels": voxels });
+    append_jsonl(path, &line)
 }
 
 #[cfg(test)]
