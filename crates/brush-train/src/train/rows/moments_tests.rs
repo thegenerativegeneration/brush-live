@@ -29,7 +29,6 @@ fn twin(t: &SplatTrainer) -> SplatTrainer {
         profile: t.profile,
         lpips: t.lpips.clone(),
         sh_background: t.sh_background.clone(),
-        sh_pixel_centres: t.sh_pixel_centres.clone(),
         adam_clamped: t.adam_clamped,
         sh_pruned: t.sh_pruned,
         last_frozen: t.last_frozen.clone(),

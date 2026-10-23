@@ -10,7 +10,7 @@ use brush_render::camera::Camera;
 use brush_render::kernels::camera_model::CameraModel;
 use burn::tensor::module::{adaptive_avg_pool2d, interpolate};
 use burn::tensor::ops::{InterpolateMode, InterpolateOptions};
-use burn::tensor::{Device, Gradients, Tensor};
+use burn::tensor::{Device, Gradients, Int, Tensor, s};
 use glam::{UVec2, Vec3};
 
 /// Band-0 constant, matching `brush_render::kernels::sh::SH_C0`.
@@ -266,6 +266,9 @@ pub struct ShBackground {
     coeffs: Tensor<2>,
     adam: AdamScaled,
     state: AdamState<2>,
+    /// [`pixel_centres`] of the block grid at the last composited size; directions are
+    /// rebuilt from it on the GPU each step, so nothing per view is cached.
+    grid_centres: Option<(UVec2, Tensor<2>)>,
 }
 
 impl ShBackground {
@@ -281,6 +284,7 @@ impl ShBackground {
             coeffs: Tensor::<2>::zeros([9, 3], device).require_grad(),
             adam: AdamScaled::new(1e-8),
             state: AdamState::new(Some(scaling), false),
+            grid_centres: None,
         }
     }
 
@@ -313,6 +317,50 @@ impl ShBackground {
         let coeffs = self.coeffs.clone().inner();
         let centres = pixel_centres(block_grid_size(size), &coeffs.device());
         globe_background(coeffs, centres, camera, size).1
+    }
+
+    /// [`pixel_centres`] of the block grid `grid`, kept while the grid stays the same size.
+    fn grid_centres(&mut self, grid: UVec2) -> Tensor<2> {
+        match &self.grid_centres {
+            Some((s, c)) if *s == grid => c.clone(),
+            _ => {
+                let c = pixel_centres(grid, &self.coeffs.device());
+                self.grid_centres = Some((grid, c.clone()));
+                c
+            }
+        }
+    }
+
+    /// The prediction `pred` (`[h, w, 4]`, RGB + alpha) with the globe composited into
+    /// RGB behind the render's own alpha; the alpha channel is untouched. Also the
+    /// background alpha penalty (Splatfacto-W) when `alpha_weight > 0`: where the
+    /// globe already matches the photo `gt_packed`, opacity is a floater. The globe
+    /// is evaluated on a coarse block grid and upsampled; the penalty uses the same grid.
+    pub fn composite(
+        &mut self,
+        pred: Tensor<3>,
+        gt_packed: Tensor<2, Int>,
+        camera: &Camera,
+        img_size: UVec2,
+        alpha_weight: f32,
+    ) -> (Tensor<3>, Option<Tensor<1>>) {
+        let grid = block_grid_size(img_size);
+        let (grid_h, grid_w) = (grid.y as usize, grid.x as usize);
+        let centres = self.grid_centres(grid);
+        let (bg_grid, bg_image) = globe_background(self.coeffs(), centres, camera, img_size);
+        let rgb = pred.clone().slice(s![.., .., 0..3]);
+        let alpha = pred.slice(s![.., .., 3..4]);
+        let mut penalty = None;
+        if alpha_weight > 0.0 {
+            let gt_grid = block_mean(brush_loss::unpack_gt_rgb(gt_packed, None), grid);
+            let mask: Tensor<2> =
+                Tensor::from_inner(background_match_mask(gt_grid, bg_grid.clone().inner()));
+            let alpha_grid = block_mean(alpha.clone(), grid).reshape([grid_h, grid_w]);
+            let covered = alpha_grid * mask.clone();
+            penalty = Some(covered.sum() / mask.sum().clamp_min(1.0) * alpha_weight);
+        }
+        let composited = rgb + (1.0f32 - alpha.clone()) * bg_image;
+        (Tensor::cat(vec![composited, alpha], 2), penalty)
     }
 
     /// The coefficients, on the autodiff graph — composite with this (not

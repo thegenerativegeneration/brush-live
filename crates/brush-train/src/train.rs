@@ -8,10 +8,7 @@ use crate::{
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
-    sh_background::{
-        ShBackground, background_match_mask, block_grid_size, block_mean, globe_background,
-        pixel_centres,
-    },
+    sh_background::ShBackground,
     splat_init::bounds_from_pos,
     stats::{RefineRecord, trained_only},
 };
@@ -117,10 +114,6 @@ pub struct SplatTrainer {
     /// is off, so the flag-off step never builds a basis, a background image,
     /// or any extra graph node (see `step`'s `if let Some(..)` guard).
     sh_background: Option<ShBackground>,
-    /// Pixel centres for the SH background at the last render size (see
-    /// `sh_background::pixel_centres`); directions are rebuilt from it on the
-    /// GPU each step, so nothing per view is cached.
-    sh_pixel_centres: Option<(glam::UVec2, Tensor<2>)>,
     /// Optimizer elements whose step hit `adam_scaled::MAX_NORMALIZED_STEP`, read back at each refine.
     adam_clamped: u64,
     /// Splats refine pruned for a diverged colour (|sh0| > [`MAX_SH0`]).
@@ -259,7 +252,6 @@ impl SplatTrainer {
             evict: None,
             origin: None,
             sh_background,
-            sh_pixel_centres: None,
             adam_clamped: 0,
             sh_pruned: 0,
             last_frozen: None,
@@ -634,18 +626,6 @@ impl SplatTrainer {
         }
     }
 
-    /// [`pixel_centres`] of the globe's block grid `grid`, kept while the grid stays the same size.
-    fn sh_grid_centres(&mut self, grid: glam::UVec2, device: &Device) -> Tensor<2> {
-        match &self.sh_pixel_centres {
-            Some((s, c)) if *s == grid => c.clone(),
-            _ => {
-                let c = pixel_centres(grid, device);
-                self.sh_pixel_centres = Some((grid, c.clone()));
-                c
-            }
-        }
-    }
-
     pub async fn step(&mut self, batch: SceneBatch, splats: Splats) -> (Splats, TrainStepStats) {
         let mut splats = splats;
 
@@ -747,18 +727,9 @@ impl SplatTrainer {
                 self.config.ssim_every,
                 self.step_count,
             );
-            // Only composite when there's a real alpha channel and a non-zero
-            // bg to mix in; the kernel skips the per-pixel `(1-a)*bg` math
-            // entirely when this is None. `ImageLossConfig::composite_bg`
-            // only takes one flat `Vec3`, so it can't express the SH
-            // background's per-pixel globe — when the globe is on, the gt
-            // side gets no compositing at all (not even flat-colour), and
-            // only the pred side is asked to explain transparent/sky pixels.
-            // That's exact for the globe's real target (photographed sky:
-            // `has_alpha` is false there, so this branch is `None` either
-            // way). It under-composites transparent GT for a
-            // synthetic/matted dataset with real alpha and the globe on —
-            // out of scope here; see `docs/superpowers/notes/sh-globe.md`.
+            // Only composite when there's a real alpha channel and a non-zero bg.
+            // With the globe on, GT gets no compositing: the globe explains
+            // transparent pixels on the prediction side instead.
             let composite_bg = (has_alpha && background != glam::Vec3::ZERO
                 && self.sh_background.is_none())
             .then_some(background);
@@ -781,36 +752,15 @@ impl SplatTrainer {
             // accumulated alpha into channel 3 regardless of the render
             // background — see `kernels::rasterize`'s `final_a`), keeping
             // the alpha channel itself untouched for the alpha-match path.
-            let mut globe_alpha_penalty = None;
-            let pred_final = if self.sh_background.is_some() {
-                // The globe is evaluated on a coarse block grid and upsampled;
-                // the alpha penalty works on the same grid.
-                let grid = block_grid_size(img_size);
-                let (grid_h, grid_w) = (grid.y as usize, grid.x as usize);
-                let centres = self.sh_grid_centres(grid, &device);
-                let coeffs = self.sh_background.as_ref().expect("checked is_some above").coeffs();
-                let (bg_grid, bg_image) = globe_background(coeffs, centres, &camera, img_size);
-                let rgb = pred_image.clone().slice(s![.., .., 0..3]);
-                let alpha = pred_image.clone().slice(s![.., .., 3..4]);
-                let weight = self.config.sh_background_alpha_weight;
-                if weight > 0.0 {
-                    // Splatfacto-W's background alpha loss: where the globe
-                    // already matches the photo, opacity there is a floater.
-                    let gt_grid =
-                        block_mean(brush_loss::unpack_gt_rgb(gt_packed.clone(), None), grid);
-                    let mask: Tensor<2> = Tensor::from_inner(background_match_mask(
-                        gt_grid,
-                        bg_grid.clone().inner(),
-                    ));
-                    let alpha_grid = block_mean(alpha.clone(), grid).reshape([grid_h, grid_w]);
-                    let covered = alpha_grid * mask.clone();
-                    globe_alpha_penalty =
-                        Some(covered.sum() / mask.sum().clamp_min(1.0) * weight);
-                }
-                let composited = rgb + (1.0f32 - alpha.clone()) * bg_image;
-                Tensor::cat(vec![composited, alpha], 2)
-            } else {
-                pred_image.clone()
+            let (pred_final, globe_alpha_penalty) = match self.sh_background.as_mut() {
+                Some(bg) => bg.composite(
+                    pred_image.clone(),
+                    gt_packed.clone(),
+                    &camera,
+                    img_size,
+                    self.config.sh_background_alpha_weight,
+                ),
+                None => (pred_image.clone(), None),
             };
 
             // The kernel takes the RGBA image as rendered (or, with the

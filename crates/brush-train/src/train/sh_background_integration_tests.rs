@@ -124,8 +124,4 @@ async fn flag_off_builds_no_background_module_or_basis_cache() {
         trainer.sh_background.is_none(),
         "flag off must never construct the globe module"
     );
-    assert!(
-        trainer.sh_pixel_centres.is_none(),
-        "flag off must never build the pixel-centre grid"
-    );
 }
