@@ -56,14 +56,14 @@ impl EvalExtras {
         session_dir: &Path,
         iter: u32,
     ) -> Self {
-        let seam = extras && (finish || received >= config.eval_seam_from);
+        let seam = extras && (finish || received >= config.eval.seam_from);
         Self {
-            lpips: extras && config.eval_lpips,
-            lpips_ids: config.eval_extras_views.clone(),
-            seam_band_m: if seam { config.eval_seam_band_m } else { 0.0 },
-            tile_size_m: config.area_tile_size_m,
-            save_dir: (extras && !config.eval_save_views.is_empty()).then(|| session_dir.join("eval_renders")),
-            save_ids: config.eval_save_views.clone(),
+            lpips: extras && config.eval.lpips,
+            lpips_ids: config.eval.extras_views.clone(),
+            seam_band_m: if seam { config.eval.seam_band_m } else { 0.0 },
+            tile_size_m: config.area.tile_size_m,
+            save_dir: (extras && !config.eval.save_views.is_empty()).then(|| session_dir.join("eval_renders")),
+            save_ids: config.eval.save_views.clone(),
             iter,
         }
     }
@@ -125,8 +125,8 @@ impl Holdout {
     /// Holdout under `config`: every `holdout_every`-th keyframe up to `holdout_max_received` received ones.
     pub(super) fn from_config(config: &GuideConfig) -> Self {
         Self {
-            max_received: config.holdout_max_received,
-            ..Self::new(config.holdout_every, config.eval_interval_s)
+            max_received: config.holdout.max_received,
+            ..Self::new(config.holdout.every, config.eval.interval_s)
         }
     }
 
@@ -337,7 +337,7 @@ async fn score_view(
 /// LPIPS forward on noise, one seam render of `splats` and one composite over a fresh SH background, as configured.
 /// Nothing without a holdout.
 pub(crate) async fn warm_up_eval(config: &GuideConfig, splats: &Splats, camera: &Camera, size: glam::UVec2) {
-    if config.holdout_every < 2 {
+    if config.holdout.every < 2 {
         return;
     }
     let device = splats.device();
@@ -348,7 +348,7 @@ pub(crate) async fn warm_up_eval(config: &GuideConfig, splats: &Splats, camera: 
             log::warn!("warm-up: SH background composite failed: {e}");
         }
     }
-    if config.eval_lpips {
+    if config.eval.lpips {
         let model = lpips::load_vgg_lpips(&device);
         let noise = || {
             Tensor::<4>::random(
@@ -361,7 +361,7 @@ pub(crate) async fn warm_up_eval(config: &GuideConfig, splats: &Splats, camera: 
             log::warn!("warm-up: LPIPS failed: {e}");
         }
     }
-    if config.eval_seam_band_m > 0.0 {
+    if config.eval.seam_band_m > 0.0 {
         match read_means(splats).await {
             Ok(means) => drop(surface_points(splats, &means, camera, size).await),
             Err(e) => log::warn!("warm-up: seam render skipped: {e}"),

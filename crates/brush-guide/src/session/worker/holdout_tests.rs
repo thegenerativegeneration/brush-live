@@ -1,6 +1,7 @@
 //! Tests of `holdout.rs`.
 
 use super::*;
+use crate::config::{EvalConfig, HoldoutConfig};
 use brush_dataset::load_image::LoadImage;
 use brush_render::gaussian_splats::{SplatRenderMode, inverse_sigmoid};
 use brush_vfs::BrushVfs;
@@ -50,7 +51,10 @@ fn next_is_held_changes_no_state() {
 
 #[test]
 fn nothing_is_held_out_after_max_received() {
-    let config = GuideConfig { holdout_every: 2, holdout_max_received: 5, ..GuideConfig::default() };
+    let config = GuideConfig {
+        holdout: HoldoutConfig { every: 2, max_received: 5, ..Default::default() },
+        ..Default::default()
+    };
     let mut h = Holdout::from_config(&config);
     let mut held = Vec::new();
     for i in 1..=10 {
@@ -63,12 +67,15 @@ fn nothing_is_held_out_after_max_received() {
 #[test]
 fn extras_follow_the_config_and_the_seam_waits_for_its_count_or_finish() {
     let config = GuideConfig {
-        eval_lpips: true,
-        eval_seam_band_m: 0.5,
-        eval_seam_from: 214,
-        eval_extras_views: vec![9, 99],
-        eval_save_views: vec![9],
-        ..GuideConfig::default()
+        eval: EvalConfig {
+            lpips: true,
+            seam_band_m: 0.5,
+            seam_from: 214,
+            extras_views: vec![9, 99],
+            save_views: vec![9],
+            ..Default::default()
+        },
+        ..Default::default()
     };
     let dir = Path::new("/session");
     let at = |extras, received, finish| EvalExtras::for_eval(&config, extras, received, finish, dir, 7);
@@ -80,7 +87,8 @@ fn extras_follow_the_config_and_the_seam_waits_for_its_count_or_finish() {
     assert_eq!(at(true, 50, true).seam_band_m, 0.5, "finish always splits");
     let periodic = at(false, 300, false);
     assert!(!periodic.lpips && periodic.seam_band_m == 0.0 && periodic.save_dir.is_none());
-    let all = EvalExtras::for_eval(&GuideConfig { eval_lpips: true, ..GuideConfig::default() }, true, 1, false, dir, 0);
+    let lpips = GuideConfig { eval: EvalConfig { lpips: true, ..Default::default() }, ..Default::default() };
+    let all = EvalExtras::for_eval(&lpips, true, 1, false, dir, 0);
     assert!(all.lpips_for(19), "no list: every view");
 }
 
@@ -270,8 +278,12 @@ async fn seam_split_keeps_its_pixels_over_the_sh_background() {
 #[tokio::test]
 async fn warm_up_composites_over_a_globe_at_the_keyframe_size() {
     let device: burn::tensor::Device = brush_cube::test_helpers::test_device().await.into();
-    let config = GuideConfig { holdout_every: 2, sh_background: true, eval_lpips: false, eval_seam_band_m: 0.0,
-        ..GuideConfig::default() };
+    let config = GuideConfig {
+        sh_background: true,
+        holdout: HoldoutConfig { every: 2, ..Default::default() },
+        eval: EvalConfig { lpips: false, seam_band_m: 0.0, ..Default::default() },
+        ..Default::default()
+    };
     let camera = Camera::new(glam::Vec3::ZERO, glam::Quat::IDENTITY, 1.0, 0.8, glam::vec2(0.5, 0.5),
         brush_render::kernels::camera_model::CameraModel::Pinhole);
     warm_up_eval(&config, &one_splat(&device, false), &camera, glam::uvec2(500, 375)).await;

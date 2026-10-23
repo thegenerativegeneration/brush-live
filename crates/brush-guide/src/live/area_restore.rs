@@ -111,7 +111,7 @@ impl LiveModel {
             }
         }
         crate::timing::wait_splats(&splats).await;
-        let junction_steps = self.config.area_junction_steps;
+        let junction_steps = self.config.area.junction_steps;
         let area = self.area.as_mut().expect("area training is on");
         let ms = t.elapsed().as_secs_f64() * 1e3;
         area.counters.note_restore(ms, area.parking.file_bytes.values().sum());

@@ -9,12 +9,13 @@ use glam::Vec3;
 
 /// inactive_at_cap with the defaults' engagement, 1 m tiles, a per-tile cap of 5 % of `max_splats` and `hysteresis`.
 fn engage_config(radius: f32, hysteresis: f32) -> GuideConfig {
-    GuideConfig {
-        area_freeze: AreaFreeze::InactiveAtCap,
-        area_engage_on_leave: true,
-        area_tile_max_fraction: 0.05,
-        area_hysteresis_m: hysteresis,
-        ..active_config(radius)
+    {
+        let mut c = active_config(radius);
+        c.area.freeze = AreaFreeze::InactiveAtCap;
+        c.area.engage_on_leave = true;
+        c.area.tile_max_fraction = 0.05;
+        c.area.hysteresis_m = hysteresis;
+        c
     }
 }
 

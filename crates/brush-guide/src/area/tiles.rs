@@ -50,13 +50,13 @@ pub struct AreaParams {
 impl AreaParams {
     /// `None` when area training is off (`area_radius_m <= 0`).
     pub fn from_config(c: &GuideConfig) -> Option<AreaParams> {
-        (c.area_radius_m > 0.0).then_some(AreaParams {
-            tile_size: c.area_tile_size_m,
-            radius: c.area_radius_m,
-            hysteresis: c.area_hysteresis_m,
-            seen_window: c.area_seen_window_steps,
-            min_resident_keyframes: c.area_min_resident_keyframes,
-            far_seed: c.area_far_seed_m,
+        (c.area.radius_m > 0.0).then_some(AreaParams {
+            tile_size: c.area.tile_size_m,
+            radius: c.area.radius_m,
+            hysteresis: c.area.hysteresis_m,
+            seen_window: c.area.seen_window_steps,
+            min_resident_keyframes: c.area.min_resident_keyframes,
+            far_seed: c.area.far_seed_m,
         })
     }
 }

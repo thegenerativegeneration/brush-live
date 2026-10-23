@@ -186,7 +186,7 @@ async fn warm_up_gated(config: &GuideConfig, device: &Device, mut gate: Option<&
         );
         last = Some(trained);
     }
-    if let Some(splats) = last.filter(|_| config.holdout_every >= 2) {
+    if let Some(splats) = last.filter(|_| config.holdout.every >= 2) {
         let t = Instant::now();
         crate::session::warm_up_eval(config, &splats, &camera, image).await;
         log::info!("warm-up: eval extras in {:.0} ms", t.elapsed().as_secs_f64() * 1e3);

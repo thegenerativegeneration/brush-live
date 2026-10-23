@@ -3,7 +3,6 @@
 //! new restore empties the junction's batch cache.
 
 use super::*;
-use crate::config::GuideConfig;
 use crate::live::area::tests::{add, area_config, device, tmp};
 use crate::live::area_restore::tests::{add_seeing, drift_rows, not_left_from_6m, parked_origin, parked_origin_with, train};
 
@@ -41,7 +40,7 @@ async fn a_deferred_restore_comes_back_once_a_seen_left_tile_parks() {
     let dir = tmp("room-deferred");
     // Radius 2 + hysteresis 10: tiles park, and are left, beyond 12 m. The seed spacing follows max_splats ×
     // seed_view_fraction; a fraction of 1 keeps the seeds dense once the cap is lowered below.
-    let config = GuideConfig { area_hysteresis_m: 10.0, seed_view_fraction: 1.0, ..area_config(2.0) };
+    let config = { let mut c = area_config(2.0); c.area.hysteresis_m = 10.0; c.seeding.view_fraction = 1.0; c };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
@@ -103,7 +102,7 @@ async fn a_deferral_streak_notes_its_shortfall_once() {
 /// counts as restored at keyframe 2, so for one keyframe it cannot be parked for room (left tiles could be).
 #[tokio::test]
 async fn a_deferred_restore_comes_back_once_room_is_made() {
-    let config = GuideConfig { area_min_resident_keyframes: 2, ..area_config(2.0) };
+    let config = { let mut c = area_config(2.0); c.area.min_resident_keyframes = 2; c };
     let (mut live, dir) = parked_origin_with("restore-retry", config).await;
     let area = live.area.as_mut().unwrap();
     for key in area.registry.resident_keys() {

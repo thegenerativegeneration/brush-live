@@ -206,9 +206,9 @@ struct Between {
 
 fn eval_schedule_of(config: &GuideConfig) -> EvalSchedule {
     EvalSchedule::new(
-        config.eval_every_keyframes,
-        config.eval_interval_s,
-        config.eval_extras_at.clone(),
+        config.eval.every_keyframes,
+        config.eval.interval_s,
+        config.eval.extras_at.clone(),
     )
 }
 

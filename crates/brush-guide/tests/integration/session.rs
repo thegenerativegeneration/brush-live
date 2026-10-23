@@ -1,6 +1,6 @@
 use crate::test_scene;
 
-use brush_guide::config::{AreaFreeze, GuideConfig};
+use brush_guide::config::{AreaConfig, AreaFreeze, GuideConfig, HoldoutConfig};
 use brush_guide::live::PoseUpdateStats;
 use brush_guide::protocol::{
     ClientHeader, PoseUpdate, ServerHeader, decode_cells, decode_frame, encode_frame,
@@ -254,8 +254,8 @@ async fn held_out_keyframes_stay_out_of_training() {
     let device = test_scene::device().await.autodiff();
     let dir = std::env::temp_dir().join(format!("brush-guide-holdout-{}", std::process::id()));
     let config = GuideConfig {
-        holdout_every: 2,
-        ..GuideConfig::default()
+        holdout: HoldoutConfig { every: 2, ..Default::default() },
+        ..Default::default()
     };
     let session = GuideSession::start(config, device, dir.clone());
     for (i, a) in [0.0f32, 0.5, 1.0, 1.5].iter().enumerate() {
@@ -418,15 +418,18 @@ async fn finish_writes_parked_tiles_into_the_ply() {
     let device = test_scene::device().await.autodiff();
     let dir = std::env::temp_dir().join(format!("brush-guide-session-final-{}", std::process::id()));
     let config = GuideConfig {
-        area_freeze: AreaFreeze::Inactive,
         refine_every: 5,
         max_train_steps: Some(40),
-        area_radius_m: 2.0,
-        area_tile_size_m: 1.0,
-        area_hysteresis_m: 0.0,
-        area_seen_window_steps: 0,
-        area_min_resident_keyframes: 0,
-        ..GuideConfig::default()
+        area: AreaConfig {
+            freeze: AreaFreeze::Inactive,
+            radius_m: 2.0,
+            tile_size_m: 1.0,
+            hysteresis_m: 0.0,
+            seen_window_steps: 0,
+            min_resident_keyframes: 0,
+            ..Default::default()
+        },
+        ..Default::default()
     };
     let session = GuideSession::start(config, device, dir.clone());
     let (h, p) = test_scene::keyframe(0, Vec3::new(0.0, 0.0, 2.0));

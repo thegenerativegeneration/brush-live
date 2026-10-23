@@ -131,7 +131,7 @@ impl LiveModel {
                 _ => std::fs::create_dir_all(&tiles_dir),
             };
             match prepared {
-                Ok(()) => Some(AreaState { engaged: !self.config.area_engage_on_leave, ..AreaState::new(p) }),
+                Ok(()) => Some(AreaState { engaged: !self.config.area.engage_on_leave, ..AreaState::new(p) }),
                 Err(e) => {
                     log::warn!("area training off: cannot prepare {}: {e}", tiles_dir.display());
                     None
@@ -170,9 +170,9 @@ impl LiveModel {
     /// The newest view is always among them, even when its position is not finite. A changed active set is logged
     /// with the view count.
     pub(super) fn refresh_area_views(&mut self) {
-        let view_m = self.config.area_view_m;
+        let view_m = self.config.area.view_m;
         let engaged = self.area_engaged();
-        let every = !engaged || (self.config.area_freeze == AreaFreeze::InactiveAtCap && !self.holds_inactive());
+        let every = !engaged || (self.config.area.freeze == AreaFreeze::InactiveAtCap && !self.holds_inactive());
         let Some(area) = self.area.as_mut() else {
             return;
         };

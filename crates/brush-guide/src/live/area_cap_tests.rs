@@ -5,7 +5,7 @@ use super::tests::{by_row, rows_where};
 use super::*;
 use crate::area::{ParkedTile, decode_tile, encode_tile, read_tile};
 use brush_train::rows::SplatRows;
-use crate::config::{AreaFreeze, GuideConfig};
+use crate::config::{AreaConfig, AreaFreeze, GuideConfig};
 use crate::live::area::tests::{add, area_config, device, tmp};
 use crate::live::area_restore::tests::train;
 use std::path::PathBuf;
@@ -13,13 +13,13 @@ use std::path::PathBuf;
 /// Keyframe 0 at the origin, then keyframe 1 6 m on looking back at it: the origin tiles are left, held and in view
 /// (a seen window of 1000 steps keeps them from parking unseen). The budget is 20 000 splats.
 async fn looking_back(name: &str, fraction: f32) -> (LiveModel, PathBuf) {
-    looking_back_with(name, GuideConfig { area_held_fraction: fraction, ..area_config(2.0) }).await
+    looking_back_with(name, { let mut c = area_config(2.0); c.area.held_fraction = fraction; c }).await
 }
 
 /// [`looking_back`] with `config` (its seen window set to 1000 steps).
 async fn looking_back_with(name: &str, config: GuideConfig) -> (LiveModel, PathBuf) {
     let dir = tmp(name);
-    let config = GuideConfig { area_seen_window_steps: 1000, ..config };
+    let config = GuideConfig { area: AreaConfig { seen_window_steps: 1000, ..config.area }, ..config };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
@@ -83,7 +83,7 @@ async fn held_rows_over_the_cap_park_farthest_first_even_in_view() {
 #[tokio::test]
 async fn area_off_has_no_cap() {
     let dir = tmp("cap-area-off");
-    let config = GuideConfig { area_held_fraction: 0.0, ..area_config(0.0) };
+    let config = { let mut c = area_config(0.0); c.area.held_fraction = 0.0; c };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
@@ -101,7 +101,12 @@ async fn area_off_has_no_cap() {
 #[tokio::test]
 async fn hold_off_left_rows_train_and_the_cap_parks_the_farthest() {
     let hold_off =
-        |fraction| GuideConfig { area_freeze: AreaFreeze::Off, area_held_fraction: fraction, ..area_config(2.0) };
+        |fraction| {
+            let mut c = area_config(2.0);
+            c.area.freeze = AreaFreeze::Off;
+            c.area.held_fraction = fraction;
+            c
+        };
     let (mut live, dir) = looking_back_with("cap-hold-off", hold_off(1.0)).await;
     let left = live.area.as_ref().unwrap().registry.left_keys(Vec3::new(6.0, 0.0, 2.0));
     let in_left = |p: Vec3| left.contains(&TileKey::of(p, 1.0));

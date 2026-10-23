@@ -55,6 +55,7 @@ serde = { version = "1.0.215", default-features = false, features = [
     "alloc",
 ] }
 serde_json = { version = "1.0.133", default-features = false }
+serde_with = { version = "3.14", default-features = false, features = ["alloc"] }
 
 rand = "0.10.0"
 tracing = "0.1.41"

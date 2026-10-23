@@ -169,7 +169,7 @@ fn summary_splits_resident_tiles_by_distance_and_sight() {
 fn area_is_on_by_radius() {
     let mut c = GuideConfig::default();
     assert!(AreaParams::from_config(&c).is_some_and(|p| p.radius == 50.0 && p.tile_size == 10.0));
-    c.area_radius_m = 0.0;
+    c.area.radius_m = 0.0;
     assert!(AreaParams::from_config(&c).is_none());
 }
 

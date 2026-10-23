@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::GuideConfig;
+use crate::config::{GuideConfig, MonoConfig};
 use brush_render::kernels::camera_model::CameraModel;
 
 const RANGE: (f32, f32) = (0.3, 3.0);
@@ -296,7 +296,7 @@ fn mostly_masked_lidar_fits_on_features_but_keeps_the_lidar_min_depth() {
     );
     let seed = seed.expect("fitted");
     assert_eq!(seed.scale, 2.5);
-    assert_eq!(seed.min_depth_m, config.mono_min_depth_with_lidar_m);
+    assert_eq!(seed.min_depth_m, config.mono.min_depth_with_lidar_m);
 
     let (seed, _) = mono_seed_for(Some(&mono), None, &cam(), size(), &pts, &config, None);
     assert_eq!(
@@ -311,8 +311,8 @@ fn switched_off_absent_or_rejected_mono_gives_no_seed() {
     let mono = map(16, 12, |_, _| 2.0);
     let pts = features(25, 5.0);
     let off = GuideConfig {
-        mono_seeding: false,
-        ..GuideConfig::default()
+        mono: MonoConfig { seeding: false, ..Default::default() },
+        ..Default::default()
     };
     let (seed, fit) = mono_seed_for(Some(&mono), None, &cam(), size(), &pts, &off, None);
     assert!(seed.is_none());

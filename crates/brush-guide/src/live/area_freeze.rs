@@ -49,7 +49,7 @@ impl LiveModel {
         let Some(keys) = self.left_resident_keys(centre) else {
             return;
         };
-        match self.config.area_freeze {
+        match self.config.area.freeze {
             AreaFreeze::Inactive | AreaFreeze::InactiveAtCap => {
                 self.note_cap(splats.num_splats());
                 self.hold_inactive(splats).await;
@@ -68,7 +68,7 @@ impl LiveModel {
         let Some(keys) = self.left_resident_keys(centre) else {
             return;
         };
-        if self.config.area_freeze != AreaFreeze::Left {
+        if self.config.area.freeze != AreaFreeze::Left {
             return;
         }
         let changed = self.area.as_ref().is_some_and(|a| {

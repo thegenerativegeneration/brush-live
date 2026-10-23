@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::area::{TileKey, rows_in};
-use crate::config::{AreaFreeze, GuideConfig};
+use crate::config::{AreaConfig, AreaFreeze, GuideConfig, SeedConfig};
 use crate::live::area::tests::{active_config, add, area_config, device, tmp};
 use crate::live::area_freeze::Held;
 use crate::live::area_freeze::tests::{by_row, rows_where};
@@ -25,13 +25,13 @@ async fn counts(live: &LiveModel, tile_size: f32) -> BTreeMap<TileKey, usize> {
 
 /// The `area_tile_max_fraction` that makes the per-tile cap `cap` rows at `live`'s `max_splats`.
 fn cap_at(live: &mut LiveModel, cap: u32) {
-    live.config.area_tile_max_fraction = cap as f32 / live.config.max_splats as f32;
+    live.config.area.tile_max_fraction = cap as f32 / live.config.max_splats as f32;
     assert_eq!(live.config.area_tile_cap(), cap);
 }
 
 /// Every key point projects into one keyframe's view and seeds (alpha below 2 everywhere).
 fn seeding_everywhere(config: GuideConfig) -> GuideConfig {
-    GuideConfig { seed_alpha_threshold: 2.0, ..config }
+    GuideConfig { seeding: SeedConfig { alpha_threshold: 2.0, ..config.seeding }, ..config }
 }
 
 /// Keyframe 0 at the origin, a refine, then a cap of 1 row per tile: keyframe 1 seeds onto the same ground and no
@@ -68,7 +68,7 @@ async fn seeds_into_a_full_tile_are_dropped() {
 /// growth candidate (gradient threshold 0, all selected) or none (`grow` false: no growth, no force-split).
 async fn one_tile(name: &str, grow: bool) -> (LiveModel, std::path::PathBuf) {
     let dir = tmp(name);
-    let config = GuideConfig { area_tile_size_m: 10.0, area_radius_m: 20.0, ..area_config(2.0) };
+    let config = { let mut c = area_config(2.0); c.area.tile_size_m = 10.0; c.area.radius_m = 20.0; c };
     let mut live = LiveModel::new(config, device().await);
     if grow {
         live.train_config.growth_grad_threshold = 0.0;
@@ -127,7 +127,7 @@ async fn an_over_cap_tile_shrinks_to_its_cap() {
 /// Rows outside the active tiles (a 1 m tile wall seen from 5 m, two tiles active).
 async fn wall(name: &str, freeze: AreaFreeze) -> (LiveModel, std::path::PathBuf) {
     let dir = tmp(name);
-    let mut live = LiveModel::new(GuideConfig { area_freeze: freeze, ..active_config(2.0) }, device().await);
+    let mut live = LiveModel::new({ let mut c = active_config(2.0); c.area.freeze = freeze; c }, device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(-0.3, 0.0, 5.0), Vec3::new(-0.3, 0.0, 0.0)).await;
     (live, dir)
@@ -195,7 +195,7 @@ async fn walked(name: &str) -> (LiveModel, std::path::PathBuf, [BTreeSet<TileKey
 async fn walked_with(name: &str, config: GuideConfig) -> (LiveModel, std::path::PathBuf, [BTreeSet<TileKey>; 3]) {
     let dir = tmp(name);
     // A seen window of 1000 steps: no tile parks after the refine for being unseen.
-    let config = GuideConfig { area_seen_window_steps: 1000, ..config };
+    let config = GuideConfig { area: AreaConfig { seen_window_steps: 1000, ..config.area }, ..config };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
@@ -252,7 +252,7 @@ async fn at_the_cap_left_then_far_inactive_tiles_park_before_any_eviction() {
 /// 6 m behind the newest view (within reach of a restore, so they do not park; trained, then held).
 #[tokio::test]
 async fn parks_come_before_the_eviction_fallback() {
-    let config = GuideConfig { evict_headroom: 0.9, evict_min_age: 0, ..active_config(2.0) };
+    let config = { let mut c = active_config(2.0); c.eviction.headroom = 0.9; c.eviction.min_age = 0; c };
     let (mut live, dir, [left, far, active]) = walked_with("budget-room-fallback", config).await;
     add(&mut live, &dir, 3, Vec3::new(8.0, 0.0, 2.0), Vec3::new(8.0, 0.0, 8.0)).await;
     train(&mut live, 2).await;
@@ -279,14 +279,15 @@ async fn parks_come_before_the_eviction_fallback() {
 #[tokio::test]
 async fn at_the_cap_with_nothing_to_park_the_eviction_falls_back_and_growth_goes_on() {
     let dir = tmp("budget-fallback");
-    let config = GuideConfig {
-        area_freeze: AreaFreeze::InactiveAtCap,
-        area_radius_m: 50.0,
-        area_seen_window_steps: 1000,
-        area_tile_max_fraction: 0.0,
-        evict_min_age: 0,
-        evict_headroom: 0.5,
-        ..active_config(2.0)
+    let config = {
+        let mut c = active_config(2.0);
+        c.area.freeze = AreaFreeze::InactiveAtCap;
+        c.area.radius_m = 50.0;
+        c.area.seen_window_steps = 1000;
+        c.area.tile_max_fraction = 0.0;
+        c.eviction.min_age = 0;
+        c.eviction.headroom = 0.5;
+        c
     };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
@@ -321,7 +322,7 @@ async fn at_the_cap_with_nothing_to_park_the_eviction_falls_back_and_growth_goes
 async fn an_all_active_capture_evicts_without_a_limit() {
     for all_active in [true, false] {
         let dir = tmp(&format!("budget-all-active-{all_active}"));
-        let config = GuideConfig { area_freeze: AreaFreeze::InactiveAtCap, ..active_config(50.0) };
+        let config = { let mut c = active_config(50.0); c.area.freeze = AreaFreeze::InactiveAtCap; c };
         let mut live = LiveModel::new(config, device().await);
         live.enable_area(dir.join("tiles"));
         add(&mut live, &dir, 0, Vec3::new(-0.3, 0.0, 5.0), Vec3::new(-0.3, 0.0, 0.0)).await;
@@ -360,7 +361,7 @@ async fn an_all_active_capture_evicts_without_a_limit() {
 #[tokio::test]
 async fn the_eviction_keeps_each_active_tiles_fair_share() {
     let (mut live, dir, [_, _, active]) = walked("budget-fair").await;
-    live.config.area_tile_max_fraction = 0.4;
+    live.config.area.tile_max_fraction = 0.4;
     let all = rows_where(&live, |_| true).await;
     let rows = counts(&live, 1.0).await;
     let n_active = live.area.as_ref().unwrap().active.tiles.len() as u32;
@@ -375,13 +376,13 @@ async fn the_eviction_keeps_each_active_tiles_fair_share() {
     }
     let in_tile: Vec<bool> = rows_in(&keys[..1], &all.means, 1.0);
     assert!(budget.group.iter().zip(&in_tile).all(|(&g, &t)| (g == 0) == t), "groups follow the tiles");
-    live.config.area_freeze = AreaFreeze::InactiveAtCap;
+    live.config.area.freeze = AreaFreeze::InactiveAtCap;
     live.set_row_budget(&all.means);
     assert!(!live.trainer.as_ref().unwrap().row_budget().unwrap().limit_eviction, "inactive_at_cap below the cap");
-    live.config.area_freeze = AreaFreeze::Left;
+    live.config.area.freeze = AreaFreeze::Left;
     live.set_row_budget(&all.means);
     assert!(!live.trainer.as_ref().unwrap().row_budget().unwrap().limit_eviction);
-    live.config.area_tile_max_fraction = 0.0;
+    live.config.area.tile_max_fraction = 0.0;
     live.set_row_budget(&all.means);
     assert!(live.trainer.as_ref().unwrap().row_budget().is_none());
     std::fs::remove_dir_all(dir).ok();

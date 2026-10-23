@@ -1,4 +1,4 @@
-use super::{AreaFreeze, GuideConfig};
+use super::{AreaConfig, AreaFreeze, GuideConfig};
 use serde_json::Value;
 
 /// Every top-level key of the serialized default config, sorted.
@@ -287,7 +287,7 @@ fn default_json_is_pinned() {
 #[test]
 fn partial_group_override_keeps_the_rest() {
     let cfg: GuideConfig = serde_json::from_str(r#"{"evict_headroom": 0.5, "holdout_every": 3}"#).expect("parses");
-    assert_eq!((cfg.evict_headroom, cfg.holdout_every), (0.5, 3));
+    assert_eq!((cfg.eviction.headroom, cfg.holdout.every), (0.5, 3));
     let got = serde_json::to_value(cfg).expect("serializes");
     let defaults = default_json();
     for key in KEYS.iter().filter(|k| !["evict_headroom", "holdout_every"].contains(k)) {
@@ -311,11 +311,11 @@ fn unknown_keys_are_ignored() {
 #[test]
 fn defaults_and_old_configs_parse() {
     let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-    assert_eq!(cfg.seed_stride_px, 4);
-    assert_eq!(cfg.seed_view_fraction, 0.03);
+    assert_eq!(cfg.seeding.stride_px, 4);
+    assert_eq!(cfg.seeding.view_fraction, 0.03);
     let cfg: GuideConfig = serde_json::from_str(r#"{"seed_stride_px": 8}"#).expect("parses");
-    assert_eq!(cfg.seed_stride_px, 8);
-    assert_eq!(cfg.seed_view_fraction, 0.03);
+    assert_eq!(cfg.seeding.stride_px, 8);
+    assert_eq!(cfg.seeding.view_fraction, 0.03);
 }
 
 #[test]
@@ -341,14 +341,14 @@ fn finish_fisher_defaults_to_off_and_parses() {
 #[test]
 fn mono_defaults_and_overrides() {
     let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-    assert!(cfg.mono_seeding);
-    assert_eq!(cfg.mono_min_depth_with_lidar_m, 4.5);
-    assert_eq!(cfg.mono_scale_range, (0.3, 3.0));
+    assert!(cfg.mono.seeding);
+    assert_eq!(cfg.mono.min_depth_with_lidar_m, 4.5);
+    assert_eq!(cfg.mono.scale_range, (0.3, 3.0));
     let cfg: GuideConfig =
         serde_json::from_str(r#"{"mono_seeding": false, "mono_scale_range": [0.5, 2.0]}"#)
             .expect("parses");
-    assert!(!cfg.mono_seeding);
-    assert_eq!(cfg.mono_scale_range, (0.5, 2.0));
+    assert!(!cfg.mono.seeding);
+    assert_eq!(cfg.mono.scale_range, (0.5, 2.0));
 }
 
 #[test]
@@ -363,22 +363,22 @@ fn moving_anchored_splats_is_on_by_default_and_can_be_turned_off() {
 #[test]
 fn eval_extras_default_off_and_parse() {
     let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-    assert_eq!((cfg.eval_every_keyframes, cfg.eval_lpips, cfg.eval_seam_band_m), (0, false, 0.0));
-    assert!(cfg.eval_extras_at.is_empty());
-    assert!(cfg.eval_save_views.is_empty());
-    assert!(cfg.eval_extras_views.is_empty());
-    assert_eq!((cfg.eval_seam_from, cfg.holdout_max_received), (0, 0));
-    assert_eq!(cfg.area_tile_size_m, 10.0);
+    assert_eq!((cfg.eval.every_keyframes, cfg.eval.lpips, cfg.eval.seam_band_m), (0, false, 0.0));
+    assert!(cfg.eval.extras_at.is_empty());
+    assert!(cfg.eval.save_views.is_empty());
+    assert!(cfg.eval.extras_views.is_empty());
+    assert_eq!((cfg.eval.seam_from, cfg.holdout.max_received), (0, 0));
+    assert_eq!(cfg.area.tile_size_m, 10.0);
     let cfg: GuideConfig = serde_json::from_str(
         r#"{"eval_every_keyframes": 50, "eval_extras_at": [117, 413], "eval_lpips": true, "eval_save_views": [19, 59]}"#,
     )
     .expect("parses");
-    assert_eq!(cfg.eval_save_views, vec![19, 59]);
+    assert_eq!(cfg.eval.save_views, vec![19, 59]);
     let cfg: GuideConfig = serde_json::from_str(
         r#"{"eval_extras_views": [9, 109], "eval_seam_from": 674, "holdout_max_received": 674}"#,
     )
     .expect("parses");
-    assert_eq!((cfg.eval_extras_views, cfg.eval_seam_from, cfg.holdout_max_received), (vec![9, 109], 674, 674));
+    assert_eq!((cfg.eval.extras_views, cfg.eval.seam_from, cfg.holdout.max_received), (vec![9, 109], 674, 674));
 }
 
 #[test]
@@ -392,31 +392,31 @@ fn train_radius_defaults_to_off_and_parses() {
 #[test]
 fn area_defaults_and_overrides() {
     let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-    assert_eq!((cfg.area_radius_m, cfg.area_hysteresis_m, cfg.area_seen_window_steps), (50.0, 5.0, 1000));
-    assert_eq!((cfg.area_min_resident_keyframes, cfg.area_junction_steps, cfg.area_restore_min_seeds), (20, 200, 8));
-    assert_eq!((cfg.area_restore_inconsistency_m, cfg.area_far_seed_m), (1.0, 10.0));
+    assert_eq!((cfg.area.radius_m, cfg.area.hysteresis_m, cfg.area.seen_window_steps), (50.0, 5.0, 1000));
+    assert_eq!((cfg.area.min_resident_keyframes, cfg.area.junction_steps, cfg.area.restore_min_seeds), (20, 200, 8));
+    assert_eq!((cfg.area.restore_inconsistency_m, cfg.area.far_seed_m), (1.0, 10.0));
     let cfg: GuideConfig = serde_json::from_str(r#"{"area_radius_m": 25}"#).expect("parses");
-    assert_eq!(cfg.area_radius_m, 25.0);
+    assert_eq!(cfg.area.radius_m, 25.0);
 }
 
 #[test]
 fn held_fraction_defaults_to_a_quarter_and_parses() {
     let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-    assert_eq!(cfg.area_held_fraction, 0.25);
+    assert_eq!(cfg.area.held_fraction, 0.25);
     let cfg: GuideConfig = serde_json::from_str(r#"{"area_held_fraction": 1.0}"#).expect("parses");
-    assert_eq!(cfg.area_held_fraction, 1.0);
+    assert_eq!(cfg.area.held_fraction, 1.0);
 }
 
 #[test]
 fn freeze_defaults_to_inactive_at_cap_and_parses() {
     let cfg: GuideConfig = serde_json::from_str("{}").expect("parses");
-    assert_eq!(cfg.area_freeze, AreaFreeze::InactiveAtCap);
-    assert_eq!((cfg.area_view_m, cfg.area_active_tiles, cfg.area_active_min_rows), (15.0, 3, 50));
-    assert_eq!(cfg.area_freeze_at, 0.9);
-    assert!(cfg.area_engage_on_leave);
-    let capped = GuideConfig { area_tile_max_fraction: 0.4, max_splats: 25_000, ..cfg.clone() };
+    assert_eq!(cfg.area.freeze, AreaFreeze::InactiveAtCap);
+    assert_eq!((cfg.area.view_m, cfg.area.active_tiles, cfg.area.active_min_rows), (15.0, 3, 50));
+    assert_eq!(cfg.area.freeze_at, 0.9);
+    assert!(cfg.area.engage_on_leave);
+    let capped = { let mut c = cfg.clone(); c.area.tile_max_fraction = 0.4; c.max_splats = 25_000; c };
     assert_eq!(capped.area_tile_cap(), 10_000);
-    assert_eq!(GuideConfig { area_tile_max_fraction: 0.0, ..cfg }.area_tile_cap(), 0);
+    assert_eq!(GuideConfig { area: AreaConfig { tile_max_fraction: 0.0, ..cfg.area }, ..cfg }.area_tile_cap(), 0);
     let modes = [
         ("left", AreaFreeze::Left),
         ("none", AreaFreeze::Off),
@@ -426,22 +426,22 @@ fn freeze_defaults_to_inactive_at_cap_and_parses() {
     for (json, want) in modes {
         let cfg: GuideConfig =
             serde_json::from_str(&format!(r#"{{"area_freeze": "{json}"}}"#)).expect("parses");
-        assert_eq!(cfg.area_freeze, want);
+        assert_eq!(cfg.area.freeze, want);
     }
     let cfg: GuideConfig =
         serde_json::from_str(r#"{"area_tile_max_fraction": 0.25, "max_splats": 20000}"#).expect("parses");
     assert_eq!(cfg.area_tile_cap(), 5_000);
     let cfg: GuideConfig = serde_json::from_str(r#"{"area_view_m": 20, "area_active_tiles": 5}"#).expect("parses");
-    assert_eq!((cfg.area_view_m, cfg.area_active_tiles), (20.0, 5));
+    assert_eq!((cfg.area.view_m, cfg.area.active_tiles), (20.0, 5));
     let cfg: GuideConfig =
         serde_json::from_str(r#"{"area_freeze_at": 0.8, "area_tile_max_fraction": 0}"#).expect("parses");
-    assert_eq!((cfg.area_freeze_at, cfg.area_tile_max_fraction), (0.8, 0.0));
+    assert_eq!((cfg.area.freeze_at, cfg.area.tile_max_fraction), (0.8, 0.0));
 }
 
 #[test]
 fn the_default_config_has_no_per_tile_cap() {
     let cfg = GuideConfig::default();
-    assert_eq!(cfg.area_tile_max_fraction, 0.0);
+    assert_eq!(cfg.area.tile_max_fraction, 0.0);
     assert_eq!(cfg.area_tile_cap(), 0);
     let parsed: GuideConfig = serde_json::from_str("{}").expect("parses");
     assert_eq!(parsed.area_tile_cap(), 0);

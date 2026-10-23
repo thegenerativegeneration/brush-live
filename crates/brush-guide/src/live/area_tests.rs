@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::GuideConfig;
+use crate::config::{AreaConfig, GuideConfig};
 use crate::keyframe::decode_keyframe;
 use crate::live::ViewPose;
 use crate::protocol::KeyframeHeader;
@@ -55,30 +55,34 @@ pub(in crate::live) fn keyframe_toward(id: u64, pos: Vec3, target: Vec3) -> (Key
 /// from the first keyframe (`area_engage_on_leave` false).
 pub(in crate::live) fn area_config(radius: f32) -> GuideConfig {
     GuideConfig {
-        area_freeze: crate::config::AreaFreeze::Left,
         refine_every: 5,
         all_loader_rebuild_every: 1,
         max_splats: 20_000,
-        area_radius_m: radius,
-        area_tile_size_m: 1.0,
-        area_hysteresis_m: 0.0,
-        area_seen_window_steps: 0,
-        area_min_resident_keyframes: 0,
-        area_junction_steps: 10,
-        area_engage_on_leave: false,
-        ..GuideConfig::default()
+        area: AreaConfig {
+            freeze: crate::config::AreaFreeze::Left,
+            radius_m: radius,
+            tile_size_m: 1.0,
+            hysteresis_m: 0.0,
+            seen_window_steps: 0,
+            min_resident_keyframes: 0,
+            junction_steps: 10,
+            engage_on_leave: false,
+            ..Default::default()
+        },
+        ..Default::default()
     }
 }
 
 /// [`area_config`] training only the active tiles: the tiles within 2.5 m and up to 2 tiles in view within 8 m, any
 /// with rows.
 pub(in crate::live) fn active_config(radius: f32) -> GuideConfig {
-    GuideConfig {
-        area_freeze: crate::config::AreaFreeze::Inactive,
-        area_view_m: 8.0,
-        area_active_tiles: 2,
-        area_active_min_rows: 1,
-        ..area_config(radius)
+    {
+        let mut c = area_config(radius);
+        c.area.freeze = crate::config::AreaFreeze::Inactive;
+        c.area.view_m = 8.0;
+        c.area.active_tiles = 2;
+        c.area.active_min_rows = 1;
+        c
     }
 }
 

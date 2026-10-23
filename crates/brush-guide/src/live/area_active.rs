@@ -42,7 +42,7 @@ pub(super) struct TileHeights {
 impl LiveModel {
     /// Whether area training is on with an active set (`area_freeze` inactive or inactive_at_cap).
     pub(super) fn trains_active_tiles(&self) -> bool {
-        self.area.is_some() && matches!(self.config.area_freeze, AreaFreeze::Inactive | AreaFreeze::InactiveAtCap)
+        self.area.is_some() && matches!(self.config.area.freeze, AreaFreeze::Inactive | AreaFreeze::InactiveAtCap)
     }
 
     /// Ranks the active set for `camera` ([`rank_active`], the last set as incumbents) over the resident tiles that
@@ -55,10 +55,10 @@ impl LiveModel {
             return;
         }
         let rule = ActiveRule {
-            view_m: self.config.area_view_m,
-            max: self.config.area_active_tiles,
-            min_rows: self.config.area_active_min_rows,
-            tile_size: self.config.area_tile_size_m,
+            view_m: self.config.area.view_m,
+            max: self.config.area.active_tiles,
+            min_rows: self.config.area.active_min_rows,
+            tile_size: self.config.area.tile_size_m,
         };
         let area = self.area.as_mut().expect("area training is on");
         let mut heights = area.heights.last.clone();

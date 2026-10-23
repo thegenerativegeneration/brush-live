@@ -43,7 +43,7 @@ impl Args {
             config.evict = false;
         }
         if let Some(h) = self.evict_headroom {
-            config.evict_headroom = h;
+            config.eviction.headroom = h;
         }
     }
 }

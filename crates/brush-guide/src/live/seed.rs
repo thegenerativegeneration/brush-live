@@ -69,8 +69,8 @@ impl LiveModel {
             size.x,
             size.y,
             self.config.max_splats,
-            self.config.seed_view_fraction,
-            self.config.seed_stride_px,
+            self.config.seeding.view_fraction,
+            self.config.seeding.stride_px,
         )
     }
 
@@ -84,7 +84,7 @@ impl LiveModel {
             depth: kf.depth.as_ref(),
             points: &kf.points,
             stride: self.seed_stride(size),
-            alpha_threshold: self.config.seed_alpha_threshold,
+            alpha_threshold: self.config.seeding.alpha_threshold,
             mono,
         });
         log::debug!(
@@ -186,7 +186,7 @@ impl LiveModel {
             depth: kf.depth.as_ref(),
             points: &kf.points,
             stride: (self.seed_stride(size) / 4).max(1),
-            alpha_threshold: self.config.seed_alpha_threshold,
+            alpha_threshold: self.config.seeding.alpha_threshold,
             mono,
         })
     }
@@ -209,7 +209,7 @@ impl LiveModel {
             return (splats, seeds, Dropped::default());
         };
         let pos = kf.camera.position;
-        let min_seeds = self.config.area_restore_min_seeds as usize;
+        let min_seeds = self.config.area.restore_min_seeds as usize;
         let mut triage = area.registry.triage_seeds(&seeds.means, pos, min_seeds);
         let tried: BTreeSet<TileKey> = area.registry.parked_within_radius(pos).into_iter().collect();
         triage.restore.retain(|k| !tried.contains(k));

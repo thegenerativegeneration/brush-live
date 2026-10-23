@@ -261,7 +261,7 @@ pub fn mono_seed_for<'a>(
     config: &GuideConfig,
     recent: Option<f32>,
 ) -> (Option<MonoSeed<'a>>, ScaleFit) {
-    let Some(mono) = mono.filter(|_| config.mono_seeding) else {
+    let Some(mono) = mono.filter(|_| config.mono.seeding) else {
         return (None, ScaleFit::Absent);
     };
     let fit = fit_scale(
@@ -271,14 +271,14 @@ pub fn mono_seed_for<'a>(
         camera,
         image_size,
         points,
-        config.mono_scale_range,
+        config.mono.scale_range,
         recent,
     );
     let seed = fit.scale().map(|scale| MonoSeed {
         depth: mono,
         scale,
         min_depth_m: if lidar.is_some() {
-            config.mono_min_depth_with_lidar_m
+            config.mono.min_depth_with_lidar_m
         } else {
             0.0
         },

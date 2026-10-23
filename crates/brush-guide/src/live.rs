@@ -371,10 +371,10 @@ impl LiveModel {
                 self.profiling = self.config.profile_steps;
                 if self.config.evict {
                     trainer.enable_eviction(EvictConfig {
-                        headroom: self.config.evict_headroom,
-                        min_age: self.config.evict_min_age,
-                        max_cell_fraction: self.config.evict_max_cell_fraction,
-                        recent_refines: self.config.evict_recent_refines,
+                        headroom: self.config.eviction.headroom,
+                        min_age: self.config.eviction.min_age,
+                        max_cell_fraction: self.config.eviction.max_cell_fraction,
+                        recent_refines: self.config.eviction.recent_refines,
                     });
                 }
                 self.trainer = Some(trainer);

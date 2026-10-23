@@ -41,7 +41,7 @@ impl LiveModel {
     /// ([`super::area_engage`]), always with `area_freeze` inactive, with inactive_at_cap while the resident rows are
     /// at the cap ([`Self::note_cap`]), never otherwise.
     pub(super) fn holds_inactive(&self) -> bool {
-        match (&self.area, self.config.area_freeze) {
+        match (&self.area, self.config.area.freeze) {
             (Some(a), AreaFreeze::Inactive) => a.engaged,
             (Some(a), AreaFreeze::InactiveAtCap) => a.at_cap,
             _ => false,
@@ -55,10 +55,10 @@ impl LiveModel {
     /// during a keyframe (its view not yet in) the keyframe does that once its view is in. No-op in other modes,
     /// without area training or before it engages ([`super::area_engage`]).
     pub(super) fn note_cap(&mut self, resident: u32) {
-        if self.config.area_freeze != AreaFreeze::InactiveAtCap || !self.area_engaged() {
+        if self.config.area.freeze != AreaFreeze::InactiveAtCap || !self.area_engaged() {
             return;
         }
-        let (max, at) = (self.config.max_splats as f32, self.config.area_freeze_at);
+        let (max, at) = (self.config.max_splats as f32, self.config.area.freeze_at);
         let Some(area) = self.area.as_mut() else {
             return;
         };
@@ -166,7 +166,7 @@ impl LiveModel {
         let max_splats = self.config.max_splats;
         let room = max_splats.saturating_sub(current);
         let evict = trainer.pending_evictions(current).max(self.last_refine_evicted.saturating_sub(room));
-        let fraction = self.config.area_held_fraction;
+        let fraction = self.config.area.held_fraction;
         let held_over = if fraction < 1.0 {
             let cap = (fraction.max(0.0) * max_splats as f32) as u32;
             area.registry.left_resident_splats(centre).saturating_sub(cap)

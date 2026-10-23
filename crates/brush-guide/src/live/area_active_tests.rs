@@ -119,7 +119,7 @@ async fn the_mask_follows_the_active_set() {
 async fn the_training_views_see_an_active_tile() {
     for freeze in [AreaFreeze::Inactive, AreaFreeze::Left, AreaFreeze::Off] {
         let dir = tmp(&format!("active-views-{freeze:?}"));
-        let mut live = LiveModel::new(GuideConfig { area_freeze: freeze, ..active_config(2.0) }, device().await);
+        let mut live = LiveModel::new({ let mut c = active_config(2.0); c.area.freeze = freeze; c }, device().await);
         live.enable_area(dir.join("tiles"));
         facing_wall(&mut live, &dir, 0, 0.0).await;
         add(&mut live, &dir, 1, Vec3::new(0.0, 0.0, 5.0), Vec3::new(0.0, 0.0, 10.0)).await;
@@ -167,7 +167,7 @@ async fn without_an_active_box_the_radius_views_train() {
 async fn seeds_outside_the_active_tiles_are_dropped_but_new_ground_seeds() {
     for freeze in [AreaFreeze::Inactive, AreaFreeze::Left] {
         let dir = tmp(&format!("active-seeds-{freeze:?}"));
-        let config = GuideConfig { area_freeze: freeze, area_active_tiles: 1, ..active_config(3.0) };
+        let config = { let mut c = active_config(3.0); c.area.freeze = freeze; c.area.active_tiles = 1; c };
         let mut live = LiveModel::new(config, device().await);
         live.enable_area(dir.join("tiles"));
         facing_wall(&mut live, &dir, 0, 0.0).await;
@@ -232,7 +232,7 @@ async fn a_restored_tile_outside_the_active_set_is_held_at_once() {
     live.splats = Some(splats);
     assert_eq!(live.area_report().unwrap().counters.parks, 1);
     // The same view again, seeding nothing: only the restore appends rows.
-    live.config.seed_alpha_threshold = -1.0;
+    live.config.seeding.alpha_threshold = -1.0;
     facing_wall(&mut live, &dir, 1, -0.3).await;
     assert_eq!(live.area_report().unwrap().counters.restores, 1);
     assert_eq!(active(&live), set, "the active set changed");
@@ -291,7 +291,7 @@ async fn below_the_cap_every_view_trains_as_with_area_off() {
     let mut members = Vec::new();
     for radius in [2.0, 0.0] {
         let dir = tmp(&format!("at-cap-views-{radius}"));
-        let config = GuideConfig { area_freeze: AreaFreeze::InactiveAtCap, ..active_config(radius) };
+        let config = { let mut c = active_config(radius); c.area.freeze = AreaFreeze::InactiveAtCap; c };
         let mut live = LiveModel::new(config, device().await);
         live.enable_area(dir.join("tiles"));
         five_views(&mut live, &dir).await;
@@ -316,10 +316,11 @@ async fn below_the_cap_every_view_trains_as_with_area_off() {
 #[tokio::test]
 async fn at_the_cap_the_active_views_train_and_each_flip_rebuilds_the_loaders_once() {
     let dir = tmp("at-cap-flip");
-    let config = GuideConfig {
-        area_freeze: AreaFreeze::InactiveAtCap,
-        area_seen_window_steps: 1000,
-        ..active_config(10.0)
+    let config = {
+        let mut c = active_config(10.0);
+        c.area.freeze = AreaFreeze::InactiveAtCap;
+        c.area.seen_window_steps = 1000;
+        c
     };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));

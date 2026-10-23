@@ -91,8 +91,8 @@ fn golden_case(g: &Golden, config: &GuideConfig) -> serde_json::Value {
 /// Deterministic cases at the fit's and the seeding gate's boundaries.
 fn edge_cases(config: &GuideConfig) -> Vec<serde_json::Value> {
     let camera = cam();
-    let min_depth = config.mono_min_depth_with_lidar_m;
-    let (low, high) = config.mono_scale_range;
+    let min_depth = config.mono.min_depth_with_lidar_m;
+    let (low, high) = config.mono.scale_range;
     let mut cases = Vec::new();
     let mut push = |mono: &DepthMap, lidar: Option<&DepthMap>, points: &[Vec3], uvs: &[[f32; 2]]| {
         cases.push(golden_case(&Golden { mono, lidar, camera: &camera, points, uvs, recent: None }, config));
@@ -153,7 +153,7 @@ fn recent_cases(config: &GuideConfig) -> Vec<serde_json::Value> {
     push(&flat, None, &feature_points(2.0, 1.5), 0.7);
     push(&one, Some(&lidar_from(&one, 1.5, Some(2))), &[], 0.7);
     // A feature fit outside the range is rejected, not replaced by the recent scale.
-    push(&flat, None, &feature_points(2.0, config.mono_scale_range.1 * 1.0001), 0.7);
+    push(&flat, None, &feature_points(2.0, config.mono.scale_range.1 * 1.0001), 0.7);
     // Recent scale with large mono values: the seeding cap applies to the scaled depth.
     let large = column_mono([60.0, 52.0, 50.0, 49.9, 40.0, 2.0, 1.0, 0.1]);
     push(&large, None, &[], 2.0);
@@ -274,8 +274,8 @@ fn write_swift_fixture() {
     let fixture = serde_json::json!({
         "image": { "width": size().x, "height": size().y, "fx": focal.x, "fy": focal.y, "cx": center.x, "cy": center.y },
         "min_confidence": config.min_depth_confidence,
-        "range": [config.mono_scale_range.0, config.mono_scale_range.1],
-        "min_depth_with_lidar_m": config.mono_min_depth_with_lidar_m,
+        "range": [config.mono.scale_range.0, config.mono.scale_range.1],
+        "min_depth_with_lidar_m": config.mono.min_depth_with_lidar_m,
         "case_count": cases.len(),
         "cases": cases,
         "recent_cases": recent_cases(&config),

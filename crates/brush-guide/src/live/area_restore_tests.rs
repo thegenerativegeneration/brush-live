@@ -67,7 +67,7 @@ async fn coming_back_restores_by_distance_and_starts_a_junction() {
 /// Radius 2 m and hysteresis 5 m: from 6 m the origin tiles are beyond the radius but not left (seeds in
 /// left tiles are dropped).
 pub(in crate::live) fn not_left_from_6m() -> GuideConfig {
-    GuideConfig { area_hysteresis_m: 5.0, ..area_config(2.0) }
+    { let mut c = area_config(2.0); c.area.hysteresis_m = 5.0; c }
 }
 
 /// A parked tile within radius + far_seed that the keyframe's seeds hit comes back before seeding, and the keyframe
@@ -91,7 +91,7 @@ async fn seeds_in_a_near_parked_tile_restore_it_before_seeding() {
 /// A parked tile seen from beyond radius + far_seed stays parked and gets no seeds.
 #[tokio::test]
 async fn far_seeds_leave_a_parked_tile_parked() {
-    let config = GuideConfig { area_far_seed_m: 1.0, ..not_left_from_6m() };
+    let config = { let mut c = not_left_from_6m(); c.area.far_seed_m = 1.0; c };
     let (mut live, dir) = parked_origin_with("far-seeds", config).await;
     let parked_tiles = live.area_report().unwrap().summary.parked_tiles;
     add(&mut live, &dir, 2, Vec3::new(0.0, 0.0, 6.0), Vec3::ZERO).await;
@@ -104,7 +104,7 @@ async fn far_seeds_leave_a_parked_tile_parked() {
 /// Seeds below the restore threshold that land in a parked tile are dropped, not appended.
 #[tokio::test]
 async fn few_seeds_in_a_parked_tile_are_dropped_not_appended() {
-    let config = GuideConfig { area_restore_min_seeds: 1_000_000, ..not_left_from_6m() };
+    let config = { let mut c = not_left_from_6m(); c.area.restore_min_seeds = 1_000_000; c };
     let (mut live, dir) = parked_origin_with("few-seeds", config).await;
     add(&mut live, &dir, 2, Vec3::new(0.0, 0.0, 6.0), Vec3::ZERO).await;
     assert_eq!(live.area_report().unwrap().counters.restores, 0);
@@ -126,7 +126,7 @@ pub(in crate::live) async fn drift_rows(live: &mut LiveModel, means: Vec<f32>) {
 /// not a second copy. (Beyond that they join its file: `area_park_tests`.)
 #[tokio::test]
 async fn resident_rows_in_a_near_parked_tile_restore_it_once() {
-    let config = GuideConfig { area_hysteresis_m: 5.0, ..area_config(2.0) };
+    let config = { let mut c = area_config(2.0); c.area.hysteresis_m = 5.0; c };
     let (mut live, dir) = parked_origin_with("restore-rows", config).await;
     // 5 m from the origin tiles: beyond the radius (no restore by distance), within radius + hysteresis.
     let centre = Vec3::new(5.0, 0.0, 2.0);
@@ -344,7 +344,7 @@ async fn a_restore_decays_the_first_moments_by_the_steps_parked() {
 /// A tile parked for more than 10 seen windows comes back unscored (importance `+inf`); a shorter park keeps it.
 #[tokio::test]
 async fn a_long_park_resets_the_importance() {
-    let config = GuideConfig { area_seen_window_steps: 1, ..area_config(2.0) };
+    let config = { let mut c = area_config(2.0); c.area.seen_window_steps = 1; c };
     let (mut live, dir, key, taken) = one_tile_parked("restore-stale", config.clone()).await;
     assert!(taken.importance.iter().any(|i| i.is_finite()), "the refine scored the rows");
     live.iter += 10;
@@ -440,7 +440,7 @@ async fn seeds_never_land_in_a_tile_parked_for_room() {
     // The seed spacing follows max_splats × seed_view_fraction; a fraction of 1 keeps it at its minimum once the cap
     // is lowered below.
     // Hysteresis 10 m: from x = 20 the origin parks; from 10 m back it is not left, so its seeds still count.
-    let config = GuideConfig { area_hysteresis_m: 10.0, seed_view_fraction: 1.0, ..area_config(2.0) };
+    let config = { let mut c = area_config(2.0); c.area.hysteresis_m = 10.0; c.seeding.view_fraction = 1.0; c };
     let (mut live, dir) = parked_origin_with("room-seeds", config).await;
     // The walker stands at x = 4 looking away from the origin. Behind it, within radius + hysteresis (so it does
     // not park) and seen by no view, a resident tile at x = 3 holds 5 rows.

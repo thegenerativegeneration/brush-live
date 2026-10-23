@@ -331,7 +331,7 @@ impl LiveModel {
             return None;
         }
         let spread = move_spread(&tile.rows, &moves);
-        let limit = self.config.area_restore_inconsistency_m;
+        let limit = self.config.area.restore_inconsistency_m;
         if spread > limit {
             log::info!(
                 "area: drop inconsistent tile {} (views disagree by {spread:.2} m, limit {limit:.2} m)",

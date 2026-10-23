@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::area::TileKey;
-use crate::config::GuideConfig;
 use crate::live::area::tests::{add, area_config, device, tmp};
 use crate::live::area_restore::tests::{add_seeing, drift_rows, parked_origin, train};
 use crate::live::area::tests::add_at;
@@ -153,13 +152,14 @@ async fn a_restored_tile_trains_again() {
 #[tokio::test]
 async fn eviction_at_the_cap_never_takes_held_rows() {
     let dir = tmp("freeze-evict");
-    let config = GuideConfig {
-        max_splats: 60,
-        seed_view_fraction: 1.0,
-        evict_min_age: 0,
-        evict_max_cell_fraction: 1.0,
-        area_seen_window_steps: 1000,
-        ..area_config(2.0)
+    let config = {
+        let mut c = area_config(2.0);
+        c.seeding.view_fraction = 1.0;
+        c.eviction.min_age = 0;
+        c.eviction.max_cell_fraction = 1.0;
+        c.area.seen_window_steps = 1000;
+        c.max_splats = 60;
+        c
     };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
@@ -270,13 +270,14 @@ async fn seeds_on_unvisited_far_ground_still_land() {
 #[tokio::test]
 async fn left_tiles_park_before_an_eviction_bites() {
     let dir = tmp("freeze-park-before-evict");
-    let config = GuideConfig {
-        max_splats: 60,
-        seed_view_fraction: 1.0,
-        evict_min_age: 0,
-        evict_max_cell_fraction: 1.0,
-        area_seen_window_steps: 1000,
-        ..area_config(2.0)
+    let config = {
+        let mut c = area_config(2.0);
+        c.seeding.view_fraction = 1.0;
+        c.eviction.min_age = 0;
+        c.eviction.max_cell_fraction = 1.0;
+        c.area.seen_window_steps = 1000;
+        c.max_splats = 60;
+        c
     };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
@@ -306,7 +307,7 @@ async fn left_tiles_park_before_an_eviction_bites() {
 #[tokio::test]
 async fn the_last_refines_evictions_park_left_tiles_before_the_next() {
     let dir = tmp("freeze-park-last-evicted");
-    let config = GuideConfig { area_seen_window_steps: 1000, ..area_config(2.0) };
+    let config = { let mut c = area_config(2.0); c.area.seen_window_steps = 1000; c };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
     add(&mut live, &dir, 0, Vec3::new(0.0, 0.0, 2.0), Vec3::ZERO).await;
@@ -333,12 +334,13 @@ async fn the_last_refines_evictions_park_left_tiles_before_the_next() {
 #[tokio::test]
 async fn a_refine_records_what_it_evicted() {
     let dir = tmp("freeze-last-evicted");
-    let config = GuideConfig {
-        max_splats: 60,
-        seed_view_fraction: 1.0,
-        evict_min_age: 0,
-        evict_max_cell_fraction: 1.0,
-        ..area_config(2.0)
+    let config = {
+        let mut c = area_config(2.0);
+        c.seeding.view_fraction = 1.0;
+        c.eviction.min_age = 0;
+        c.eviction.max_cell_fraction = 1.0;
+        c.max_splats = 60;
+        c
     };
     let mut live = LiveModel::new(config, device().await);
     live.enable_area(dir.join("tiles"));
