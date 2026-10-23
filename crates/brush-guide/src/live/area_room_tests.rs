@@ -5,7 +5,7 @@
 use super::*;
 use crate::config::GuideConfig;
 use crate::live::area::tests::{add, area_config, device, tmp};
-use crate::live::area_restore::tests::{drift_rows, not_left_from_6m, parked_origin, parked_origin_with, train};
+use crate::live::area_restore::tests::{add_seeing, drift_rows, not_left_from_6m, parked_origin, parked_origin_with, train};
 
 /// Keeps a few resident rows at (1.5, 0, 1.5), next to where the walker comes back, so parking for room never has
 /// to take every resident row.
@@ -95,6 +95,45 @@ async fn a_deferral_streak_notes_its_shortfall_once() {
     live.defer(a, 5);
     assert_eq!(pending(&live), base + 5, "a new streak notes its shortfall");
     assert_eq!(live.area_report().unwrap().counters.deferrals, 5, "every deferral counts");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Review I3: a restore at the cap is deferred without reading the tile file, logged once per streak, and comes
+/// back within a few keyframes once a refine makes room (here by parking the area the walker left). The area at x = 20
+/// counts as restored at keyframe 2, so for one keyframe it cannot be parked for room (left tiles could be).
+#[tokio::test]
+async fn a_deferred_restore_comes_back_once_room_is_made() {
+    let config = GuideConfig { area_min_resident_keyframes: 2, ..area_config(2.0) };
+    let (mut live, dir) = parked_origin_with("restore-retry", config).await;
+    let area = live.area.as_mut().unwrap();
+    for key in area.registry.resident_keys() {
+        area.registry.mark_restored(key, 2, live.iter);
+    }
+    let tiles = dir.join("tiles");
+    let (pos, away) = (Vec3::new(0.3, 0.0, 2.0), Vec3::new(0.3, 0.0, -3.0));
+    let registry = &live.area.as_ref().unwrap().registry;
+    let near = registry.parked_within_radius(pos);
+    assert!(near.len() >= 2, "{near:?}");
+    let smallest = near.iter().map(|&k| registry.get(k).unwrap().splats).min().unwrap();
+    assert!(smallest >= 4, "room for seeds but for no tile: {smallest}");
+    // A deferral that read this file would drop the tile.
+    std::fs::write(crate::area::park_file::tile_path(&tiles, near[0]), b"not a tile").unwrap();
+    live.config.max_splats = live.splats().unwrap().num_splats() + smallest - 1;
+    // The keyframe looks past the parked tiles, so its seeds (3 m beyond them) stay resident.
+    add_seeing(&mut live, &dir, 2, pos, away, &[away]).await;
+    let r = live.area_report().unwrap();
+    assert_eq!((r.counters.restores, r.counters.drops), (0, 0), "{r:?}");
+    assert!(r.counters.deferrals as usize >= near.len(), "{r:?}");
+    assert_eq!(live.area.as_ref().unwrap().defer.streaks.len(), near.len());
+    let mut retries = 0;
+    while live.area_report().unwrap().counters.restores == 0 {
+        retries += 1;
+        assert!(retries <= 3, "still deferred: {:?}", live.area_report().unwrap());
+        train(&mut live, 5).await;
+        add_seeing(&mut live, &dir, 2 + retries, pos, away, &[away]).await;
+    }
+    let area = live.area.as_ref().unwrap();
+    assert!(area.defer.streaks.keys().all(|k| area.registry.get(*k).is_some_and(|t| !t.resident)), "streaks end");
     std::fs::remove_dir_all(dir).ok();
 }
 

@@ -22,15 +22,15 @@ use std::collections::BTreeSet;
 /// The mask that holds rows still, and what it was built for.
 #[derive(Debug, Default)]
 pub(super) struct HeldMask {
-    /// The resident tiles whose rows the trainer holds: the left ones, or with
-    /// `area_freeze` inactive every resident tile not active.
+    /// The resident tiles whose rows the trainer holds: the left ones, or with `area_freeze` inactive every
+    /// resident tile not active.
     pub(super) keys: BTreeSet<TileKey>,
     /// Rows the trainer held when the mask was last built.
     pub(super) rows: u32,
     /// Held rows no step ever trained, when the mask was last built.
     pub(super) untrained_rows: u32,
     /// The active tiles the mask was last built for (sorted); `None` before any mask with `area_freeze` inactive.
-    pub(super) active: Option<Vec<TileKey>>,
+    pub(super) built_for: Option<Vec<TileKey>>,
     /// Rows outside the active tiles were appended since the mask was built (restores, seeds on new ground).
     pub(super) stale: bool,
     /// Rows in the active tiles when the mask was last built.

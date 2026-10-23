@@ -128,7 +128,7 @@ impl LiveModel {
         };
         let mut active = area.active.tiles.clone();
         active.sort_unstable();
-        if area.mask.stale || area.mask.active.as_ref() != Some(&active) {
+        if area.mask.stale || area.mask.built_for.as_ref() != Some(&active) {
             self.hold_inactive(splats).await;
         }
     }
@@ -150,7 +150,7 @@ impl LiveModel {
             true => area.registry.resident_keys().into_iter().filter(|k| !active.contains(k)).collect(),
             false => BTreeSet::new(),
         };
-        area.mask.active = Some(active.into_iter().collect());
+        area.mask.built_for = Some(active.into_iter().collect());
         area.mask.stale = false;
         area.mask.active_splats = n.saturating_sub(area.mask.rows);
     }
