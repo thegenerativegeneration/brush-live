@@ -30,9 +30,9 @@ use rand::SeedableRng;
 use crate::profile::{StepProfile, device_sync, lap};
 use tracing::{Instrument, trace_span};
 
-mod rows;
+mod row_surgery;
 
-mod evict;
+mod refine_evict;
 
 mod radius;
 
@@ -41,7 +41,7 @@ mod divergence;
 mod row_state;
 
 use divergence::RefineTally;
-use evict::RefineEvictions;
+use refine_evict::RefineEvictions;
 use row_state::RowState;
 
 pub const BOUND_PERCENTILE: f32 = 0.8;
@@ -558,7 +558,7 @@ impl SplatTrainer {
         new: Splats,
         new_floor: Option<Tensor<1>>,
         slot: Option<u32>,
-        moments: Option<rows::MomentTails>,
+        moments: Option<row_surgery::MomentTails>,
     ) -> Splats {
         let n = new.num_splats() as usize;
         if n == 0 {
