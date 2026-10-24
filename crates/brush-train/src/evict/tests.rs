@@ -1,6 +1,9 @@
 //! Unit tests for cell quotas, recent-cell demand and eviction counts.
 
 use super::*;
+use crate::config::TrainConfig;
+use crate::stats::RefineRecord;
+use burn::tensor::Bool;
 
 #[test]
 fn picks_lowest_within_the_cell_quota() {

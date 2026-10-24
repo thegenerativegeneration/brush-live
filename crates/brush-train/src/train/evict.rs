@@ -3,7 +3,7 @@
 
 use super::{SplatTrainer, radius};
 use crate::budget::{EvictionRelax, RowBudget};
-use crate::evict::{growth_demand, read_bool, read_f32, recent_demand, select_evictions};
+use crate::evict::{PickInputs, growth_demand, read_bool, read_f32, recent_demand, select_evictions};
 use crate::stats::{RefineRecord, trained_only};
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::{Bool, Tensor, TensorData};
@@ -291,15 +291,17 @@ impl Pick<'_> {
         let limit = quota.map(|q| (budget.expect("a quota comes with a budget").group.as_slice(), q));
         select_evictions(
             life,
-            splats.means(),
-            self.means,
-            exclude,
-            protect,
             config,
             want,
-            self.untrained_held.cloned(),
-            limit,
-            prior,
+            PickInputs {
+                means: splats.means(),
+                means_cpu: self.means,
+                exclude,
+                protect,
+                untrained_held: self.untrained_held.cloned(),
+                limit,
+                prior,
+            },
         )
         .await
     }
