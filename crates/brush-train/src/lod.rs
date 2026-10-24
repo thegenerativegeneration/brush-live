@@ -10,7 +10,8 @@ use glam::Vec3;
 
 /// Decimate splats to `target_count` using pre-computed per-Gaussian scores.
 /// Higher scores are considered more important and kept.
-pub async fn decimate_to_count(mut splats: Splats, scores: &[f32], target_count: u32) -> Splats {
+pub async fn decimate_to_count(splats: Splats, scores: &[f32], target_count: u32) -> Splats {
+    let mut splats = splats.bake_min_scale();
     let num = splats.num_splats();
     if target_count >= num {
         return splats;
@@ -145,4 +146,50 @@ pub async fn compute_pup_scores(
         .iter()
         .map(log_det_6x6)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brush_render::gaussian_splats::{SplatRenderMode, inverse_sigmoid};
+
+    async fn scales_of(splats: &Splats) -> Vec<f32> {
+        splats
+            .scales()
+            .into_data_async()
+            .await
+            .expect("readback")
+            .try_into_vec::<f32>()
+            .expect("f32")
+    }
+
+    #[tokio::test]
+    async fn decimating_with_a_floor_bakes_it_first() {
+        let device: Device = brush_cube::test_helpers::test_device().await.into();
+        let n = 4;
+        let splats = Splats::from_raw(
+            (0..n).flat_map(|i| [i as f32 * 0.1, 0.0, 2.0]).collect(),
+            [1.0, 0.0, 0.0, 0.0].repeat(n),
+            vec![-3.0; n * 3],
+            vec![0.5; n * 3],
+            vec![inverse_sigmoid(0.5); n],
+            SplatRenderMode::Default,
+            &device,
+        )
+        .with_min_scale(Tensor::from_floats([0.1, 0.2, 0.3, 0.4], &device));
+
+        let baked = scales_of(&splats.clone().bake_min_scale()).await;
+        let out = decimate_to_count(splats, &[0., 3., 1., 2.], 2).await;
+
+        assert!(out.min_scale.is_none());
+        assert_eq!(out.num_splats(), 2);
+        let kept = scales_of(&out).await;
+        let expected: Vec<f32> = [1, 3]
+            .iter()
+            .flat_map(|&i| baked[i * 3..i * 3 + 3].to_vec())
+            .collect();
+        for (k, e) in kept.iter().zip(&expected) {
+            assert!((k - e).abs() < 1e-5, "{kept:?} vs {expected:?}");
+        }
+    }
 }
