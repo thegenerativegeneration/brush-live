@@ -265,14 +265,24 @@ pub unsafe extern "C" fn bge_new(
 }
 
 /// Adds one keyframe frame (emits `Ack`) or applies one poses frame (emits nothing); blocks until done. A rejected
-/// frame emits `Error` "keyframe <id>: …" or "poses: …". Waits while paused. Returns 0 on success, 1 otherwise.
+/// frame emits `Error` "keyframe <id>: …" or "poses: …". Waits while paused. Returns 0 on success, 1 otherwise
+/// (also for a null `e`, which has nowhere to emit an `Error`).
 ///
 /// # Safety
-/// `e` comes from `bge_new`; `frame` points to `len` readable bytes.
+/// `e` comes from `bge_new` or is null; `frame` points to `len` readable bytes, and may be null if `len` is 0
+/// (an empty frame; with `len` above 0, a null `frame` emits `Error` "push: no frame").
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_push(e: *mut BgeEngine, frame: *const u8, len: usize) -> i32 {
-    let e = unsafe { &*e };
-    let bytes = unsafe { std::slice::from_raw_parts(frame, len) };
+    let Some(e) = (unsafe { e.as_ref() }) else { return 1 };
+    if frame.is_null() && len > 0 {
+        e.out.error("push: no frame");
+        return 1;
+    }
+    let bytes = if frame.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(frame, len) }
+    };
     match e.runtime.block_on(e.session.push_frame(bytes)) {
         Ok(Pushed::Keyframe(id)) => {
             e.out.send(&encode_frame(&ServerHeader::Ack { keyframe_id: id }, &[]));
@@ -287,13 +297,13 @@ pub unsafe extern "C" fn bge_push(e: *mut BgeEngine, frame: *const u8, len: usiz
 }
 
 /// Writes the splat as PLY to `ply_path` and emits `Splat`; training pauses
-/// until the next keyframe. Returns 0 on success, 1 otherwise (`Error` emitted).
+/// until the next keyframe. Returns 0 on success, 1 otherwise (`Error` emitted, except for a null `e`).
 ///
 /// # Safety
-/// `e` comes from `bge_new`; `ply_path` is NUL-terminated UTF-8.
+/// `e` comes from `bge_new` or is null; `ply_path` is NUL-terminated UTF-8 or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_finish(e: *mut BgeEngine, ply_path: *const c_char) -> i32 {
-    let e = unsafe { &*e };
+    let Some(e) = (unsafe { e.as_ref() }) else { return 1 };
     let Some(path) = (unsafe { str_arg(ply_path) }) else {
         e.out.error("finish: no path");
         return 1;
@@ -314,10 +324,10 @@ pub unsafe extern "C" fn bge_finish(e: *mut BgeEngine, ply_path: *const c_char) 
 /// snapshots published afterwards carry `generation`.
 ///
 /// # Safety
-/// `e` comes from `bge_new`.
+/// `e` comes from `bge_new` or is null (no-op).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_reset(e: *mut BgeEngine, generation: u64) {
-    let e = unsafe { &*e };
+    let Some(e) = (unsafe { e.as_ref() }) else { return };
     e.runtime.block_on(e.session.reset(generation));
 }
 
@@ -325,10 +335,10 @@ pub unsafe extern "C" fn bge_reset(e: *mut BgeEngine, generation: u64) {
 /// thread; returns after the step, round or warm-up size in progress.
 ///
 /// # Safety
-/// `e` comes from `bge_new`.
+/// `e` comes from `bge_new` or is null (no-op).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_pause(e: *mut BgeEngine) {
-    let e = unsafe { &*e };
+    let Some(e) = (unsafe { e.as_ref() }) else { return };
     if !e.holds_prewarm.swap(true, Ordering::SeqCst) {
         prewarm::hold();
     }
@@ -348,10 +358,10 @@ pub unsafe extern "C" fn bge_pause(e: *mut BgeEngine) {
 /// Resumes after `bge_pause`; held keyframes are added in order.
 ///
 /// # Safety
-/// `e` comes from `bge_new`.
+/// `e` comes from `bge_new` or is null (no-op).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
-    let e = unsafe { &*e };
+    let Some(e) = (unsafe { e.as_ref() }) else { return };
     if let Some(warmup) = &e.warmup {
         let _ = warmup.pause.send(false);
     }
@@ -398,13 +408,15 @@ pub unsafe extern "C" fn bge_warm_up(config_json: *const c_char) -> i32 {
 /// Writes the warm-up's progress: sizes done and sizes in total of the warm-up running now (0, 0 before any).
 ///
 /// # Safety
-/// `done` and `total` are valid for writes.
+/// `done` and `total` are valid for writes or null (that one is skipped).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_warm_up_progress(done: *mut u32, total: *mut u32) {
     let (d, t) = brush_guide::warmup::progress();
-    unsafe {
-        *done = d;
-        *total = t;
+    if !done.is_null() {
+        unsafe { *done = d };
+    }
+    if !total.is_null() {
+        unsafe { *total = t };
     }
 }
 

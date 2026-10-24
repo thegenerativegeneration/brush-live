@@ -32,6 +32,24 @@ pub struct BenchParams {
     pub max_iters_per_s: f32,
 }
 
+impl BenchParams {
+    /// A zero rate would divide the keyframe interval by zero; a NaN or negative time panics `Duration`.
+    pub fn validate(&self) -> Result<(), String> {
+        for (key, value, min_open) in [
+            ("rate", self.rate, true),
+            ("duration_s", self.duration_s, false),
+            ("sample_s", self.sample_s, true),
+        ] {
+            let ok = value.is_finite() && if min_open { value > 0.0 } else { value >= 0.0 };
+            if !ok {
+                let bound = if min_open { "above" } else { "at least" };
+                return Err(format!("{key} must be finite and {bound} 0, got {value}"));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Serialize)]
 struct Sample {
     t_s: f32,
@@ -162,6 +180,7 @@ pub async fn run(
     out_dir: &Path,
     host: impl Fn() -> HostSample,
 ) -> anyhow::Result<()> {
+    params.validate().map_err(anyhow::Error::msg)?;
     let frames = load_frames(wire_dir, params.width)?;
     if frames.is_empty() {
         bail!("no frames in {}", wire_dir.display());
@@ -274,7 +293,8 @@ pub struct GuideBenchParams {
 /// (the error is printed to stderr).
 ///
 /// # Safety
-/// `wire_dir` and `out_dir` must be valid NUL-terminated UTF-8 paths and `params` a valid pointer.
+/// `wire_dir` and `out_dir` must be valid NUL-terminated UTF-8 paths and `params` a valid pointer; any of the three
+/// may be null (reported, returns 1).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn guide_bench_run(
     wire_dir: *const c_char,
@@ -282,6 +302,12 @@ pub unsafe extern "C" fn guide_bench_run(
     params: *const GuideBenchParams,
     host: Option<extern "C" fn() -> HostSample>,
 ) -> i32 {
+    for (name, null) in [("wire_dir", wire_dir.is_null()), ("out_dir", out_dir.is_null()), ("params", params.is_null())] {
+        if null {
+            eprintln!("bench: {name} missing");
+            return 1;
+        }
+    }
     let (wire_dir, out_dir, p) = unsafe {
         (
             CStr::from_ptr(wire_dir).to_string_lossy().into_owned(),
@@ -329,6 +355,56 @@ pub unsafe extern "C" fn guide_bench_run(
         Err(e) => {
             eprintln!("bench: {e:#}");
             1
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> BenchParams {
+        BenchParams {
+            max_splats: 100_000,
+            width: 960,
+            duration_s: 600.0,
+            rate: 2.0,
+            sample_s: 10.0,
+            loader_cache_mb: 1024,
+            max_iters_per_s: 0.0,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_zero_rate_and_nan_durations() {
+        assert_eq!(params().validate(), Ok(()));
+        let cases: [(BenchParams, &str); 4] = [
+            (BenchParams { rate: 0.0, ..params() }, "rate must be finite and above 0, got 0"),
+            (BenchParams { rate: f32::NAN, ..params() }, "rate must be finite and above 0, got NaN"),
+            (BenchParams { duration_s: -1.0, ..params() }, "duration_s must be finite and at least 0, got -1"),
+            (BenchParams { sample_s: 0.0, ..params() }, "sample_s must be finite and above 0, got 0"),
+        ];
+        for (p, message) in cases {
+            assert_eq!(p.validate(), Err(message.to_owned()));
+        }
+    }
+
+    #[test]
+    fn guide_bench_run_with_null_paths_returns_1() {
+        let p = GuideBenchParams {
+            max_splats: 1000,
+            width: 64,
+            duration_s: 0.0,
+            rate: 1.0,
+            sample_s: 1.0,
+            loader_cache_mb: 1,
+            max_iters_per_s: 0.0,
+        };
+        let dir = c"/tmp/x".as_ptr();
+        unsafe {
+            assert_eq!(guide_bench_run(std::ptr::null(), dir, &p, None), 1);
+            assert_eq!(guide_bench_run(dir, std::ptr::null(), &p, None), 1);
+            assert_eq!(guide_bench_run(dir, dir, std::ptr::null(), None), 1);
         }
     }
 }

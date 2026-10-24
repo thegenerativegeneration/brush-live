@@ -43,22 +43,25 @@ impl Default for BgePreview {
 /// `interval_ms`; < 0: off.
 ///
 /// # Safety
-/// `e` comes from `bge_new`.
+/// `e` comes from `bge_new` or is null (no-op).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_set_preview(e: *mut BgeEngine, interval_ms: i32) {
-    let e = unsafe { &*e };
+    let Some(e) = (unsafe { e.as_ref() }) else { return };
     let interval = u64::try_from(interval_ms).ok().map(Duration::from_millis);
     e.runtime.block_on(e.session.set_preview(interval));
 }
 
 /// Fills `out` with the newest snapshot if its version is above
-/// `after_version` and returns 1; returns 0 otherwise.
+/// `after_version` and returns 1; returns 0 otherwise, also for a null `e` or `out`.
 ///
 /// # Safety
-/// `e` comes from `bge_new`; `out` points to a writable `BgePreview`.
+/// `e` comes from `bge_new` or is null; `out` points to a writable `BgePreview` or is null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_preview_latest(e: *mut BgeEngine, after_version: u64, out: *mut BgePreview) -> i32 {
-    let e = unsafe { &*e };
+    let Some(e) = (unsafe { e.as_ref() }) else { return 0 };
+    if out.is_null() {
+        return 0;
+    }
     let Some(snap) = e.session.preview().borrow().clone() else { return 0 };
     if snap.version <= after_version {
         return 0;
