@@ -7,7 +7,6 @@ use brush_dataset::scene::SceneView;
 use brush_dataset::scene_loader::SceneLoader;
 use brush_render::gaussian_splats::Splats;
 use brush_train::config::TrainConfig;
-use brush_train::profile::StepProfile;
 use brush_train::evict::{EvictConfig, ProtectCone};
 use brush_train::train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds};
 use burn::module::Module;
@@ -30,11 +29,14 @@ mod area_sight;
 mod draw;
 mod loaders;
 mod poses;
+mod profile;
 mod seed;
 use area_restore::RestoreReason;
 use draw::{Draw, choose_draw, load_batch};
 pub use area_export::FinalExport;
 pub use poses::{PoseUpdateStats, ViewPose};
+pub use profile::PROFILE_LOG_EVERY;
+use profile::{StepSeconds, log_step_profile};
 
 #[cfg(test)]
 mod scale_history_tests;
@@ -44,33 +46,6 @@ mod scale_history_tests;
 struct LoadArgs {
     #[command(flatten)]
     load: LoadDatasetConfig,
-}
-
-/// With debug timing on, the step profile is logged every this many steps.
-pub const PROFILE_LOG_EVERY: u32 = 100;
-
-/// Seconds behind [`StepPhases`] that are not refine.
-#[derive(Clone, Copy, Debug, Default)]
-struct StepSeconds {
-    batch: f64,
-    forward: f64,
-    loss: f64,
-    backward: f64,
-    optimizer: f64,
-    stats: f64,
-    area: f64,
-    hold: f64,
-}
-
-impl StepSeconds {
-    fn add_profile(&mut self, p: &StepProfile, batch_s: f64) {
-        self.batch += batch_s;
-        self.forward += p.forward_s;
-        self.loss += p.loss_s;
-        self.backward += p.backward_s;
-        self.optimizer += p.optimizer_s;
-        self.stats += p.stats_noise_s;
-    }
 }
 
 /// Splats trained incrementally as keyframes arrive. Splats are kept on the
@@ -278,19 +253,7 @@ impl LiveModel {
         {
             self.step_s.add_profile(&p, std::mem::take(&mut self.batch_s));
         }
-        let ms = |s: f64| (s * 1e3) as u64;
-        let s = &self.step_s;
-        StepPhases {
-            batch_ms: ms(s.batch),
-            forward_ms: ms(s.forward),
-            loss_ms: ms(s.loss),
-            backward_ms: ms(s.backward),
-            optimizer_ms: ms(s.optimizer),
-            stats_ms: ms(s.stats),
-            refine_ms: ms(self.refine_total_s),
-            area_ms: ms(s.area),
-            hold_ms: ms(s.hold),
-        }
+        self.step_s.phases(self.refine_total_s)
     }
 
     /// The last training step's mean LR and position scale; zeros before the first.
@@ -456,19 +419,7 @@ impl LiveModel {
             && p.steps > 0
         {
             self.step_s.add_profile(&p, self.batch_s);
-            let ms = |s: f64| s * 1e3 / f64::from(p.steps);
-            log::debug!(
-                target: crate::timing::TARGET,
-                "step profile over {} steps at {} splats: batch {:.2} ms, forward {:.2}, loss {:.2}, backward {:.2}, optimizer {:.2}, stats+noise {:.2} ms",
-                p.steps,
-                splats.num_splats(),
-                ms(std::mem::take(&mut self.batch_s)),
-                ms(p.forward_s),
-                ms(p.loss_s),
-                ms(p.backward_s),
-                ms(p.optimizer_s),
-                ms(p.stats_noise_s)
-            );
+            log_step_profile(&p, std::mem::take(&mut self.batch_s), splats.num_splats());
         }
         if self.iter.is_multiple_of(self.config.refine_every) {
             splats = self.refine(splats).await;
