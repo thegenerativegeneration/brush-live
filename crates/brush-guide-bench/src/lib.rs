@@ -7,7 +7,6 @@ use anyhow::{Context, bail};
 use brush_guide::config::GuideConfig;
 use brush_guide::protocol::{ClientHeader, KeyframeHeader, decode_frame};
 use brush_guide::session::GuideSession;
-// cubecl's AutoGraphicsApi picks Metal only on macOS and asks for Vulkan on iOS.
 use brush_guide::gpu::{Metal, init_device};
 use burn_wgpu::WgpuDevice;
 use image::ImageEncoder;
@@ -183,6 +182,7 @@ pub async fn run(
     // Once per process: the host app runs several benches in a row.
     static DEVICE_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !DEVICE_READY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // cubecl's AutoGraphicsApi picks Metal only on macOS and asks for Vulkan on iOS.
         init_device::<Metal>(64).await;
     }
     let device = burn::tensor::Device::from(WgpuDevice::default()).autodiff();
