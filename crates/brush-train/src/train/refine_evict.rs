@@ -3,7 +3,11 @@
 
 use super::{SplatTrainer, radius};
 use crate::budget::{EvictionRelax, RowBudget};
-use crate::evict::{PickInputs, growth_demand, read_bool, read_f32, recent_demand, select_evictions};
+use crate::config::TrainConfig;
+use crate::evict::{
+    EvictConfig, Eviction, PickInputs, ProtectCone, SplatLife, growth_demand, read_bool, read_f32, recent_demand,
+    select_evictions,
+};
 use crate::stats::{RefineRecord, trained_only};
 use brush_render::gaussian_splats::Splats;
 use burn::tensor::{Bool, Tensor, TensorData};
@@ -23,7 +27,6 @@ impl SplatTrainer {
         full: Option<Tensor<1, Bool>>,
     ) -> (Tensor<1, Bool>, Vec<usize>) {
         self.tally.eviction_fell_back = false;
-        let mut fell_back = false;
         let Some(ev) = self.evict.as_mut() else {
             return (dead, Vec::new());
         };
@@ -31,8 +34,7 @@ impl SplatTrainer {
             return (dead, Vec::new());
         };
         life.tick();
-        let window = ev.config.recent_refines;
-        let active = ev.recent.active(window);
+        let active = ev.recent.active(ev.config.recent_refines);
         if !active {
             ev.recent.backlog = 0;
             if ev.seed_shortfall == 0 {
@@ -40,63 +42,14 @@ impl SplatTrainer {
             }
         }
         let current = splats.num_splats();
-        let mut means = None;
-        if active {
-            let num_dead = dead
-                .clone()
-                .int()
-                .sum()
-                .into_scalar_async::<i32>()
-                .await
-                .expect("dead count readback") as u32;
-            let untrained = radius::either(refiner.untrained(), full);
-            let demand =
-                growth_demand(refiner, &self.config, iter, num_dead, untrained.as_ref()).await;
-            let limit = crate::evict::growth_limit(self.config.max_splats, ev.config.headroom);
-            if current.saturating_add(demand) > limit {
-                let m = read_f32(splats.means()).await;
-                let in_recent = ev.recent.mask(&m, window);
-                let oversized = if self.config.split_at_screen_size > 0.0 {
-                    read_bool(trained_only(
-                        refiner.above_screen_size(self.config.split_at_screen_size),
-                        untrained.as_ref(),
-                    ))
-                    .await
-                } else {
-                    vec![]
-                };
-                let growing =
-                    iter >= self.config.growth_start_iter && iter < self.config.growth_stop_iter;
-                let above = if growing {
-                    read_bool(trained_only(
-                        refiner.above_threshold(self.config.growth_grad_threshold),
-                        untrained.as_ref(),
-                    ))
-                    .await
-                } else {
-                    vec![]
-                };
-                let recent = recent_demand(
-                    &in_recent,
-                    &oversized,
-                    &above,
-                    self.config.growth_select_fraction,
-                );
-                ev.recent.backlog = ev.recent.backlog.saturating_add(recent);
-                means = Some(m);
-            } else {
-                ev.recent.backlog = 0;
-            }
-        }
+        let means = if active {
+            add_recent_demand(ev, &self.config, iter, splats, refiner, &dead, full).await
+        } else {
+            None
+        };
         let shortfall = std::mem::take(&mut ev.seed_shortfall);
         let backlog = ev.recent.backlog;
-        let want = crate::evict::evict_count(
-            current,
-            backlog,
-            shortfall,
-            self.config.max_splats,
-            ev.config.headroom,
-        );
+        let want = crate::evict::evict_count(current, backlog, shortfall, self.config.max_splats, ev.config.headroom);
         if want == 0 {
             return (dead, Vec::new());
         }
@@ -106,42 +59,10 @@ impl SplatTrainer {
         };
         // Held rows no step ever trained (raw seeds on ground outside the active tiles) do not block the budget.
         let untrained_held = held.as_ref().map(|h| h.clone().bool_and(life.trained.clone().lower_elem(0.5)));
-        let pick = Pick { means: &means, held: held.as_ref(), untrained_held: untrained_held.as_ref() };
-        let (mut mask, mut picked) = pick.victims(life, splats, (ev.protect, &ev.config), dead.clone(), budget, want, &[]).await;
-        // Short of `want` under the fair shares: widen to the fallback, and from opened groups on to no limit, each
-        // pick continuing the last (their cells and groups keep what they gave).
-        let mut tiers = Vec::new();
-        if let Some(b) = budget.filter(|b| b.limit_eviction) {
-            if let Some(fallback) = b.fallback.clone() {
-                let opens_groups = matches!(fallback, EvictionRelax::Groups(_));
-                let mut wide = b.clone();
-                wide.relax(fallback);
-                if opens_groups {
-                    let mut all = wide.clone();
-                    all.relax(EvictionRelax::Unlimited);
-                    tiers.push(wide);
-                    tiers.push(all);
-                } else {
-                    tiers.push(wide);
-                }
-            }
-        }
-        let limited = picked.len();
-        for wide in &tiers {
-            if picked.len() >= want as usize {
-                break;
-            }
-            let rest = want - picked.len() as u32;
-            let (more_mask, more) = pick
-                .victims(life, splats, (ev.protect, &ev.config), dead.clone().bool_or(mask.clone()), Some(wide), rest, &picked)
-                .await;
-            mask = mask.bool_or(more_mask);
-            picked.extend(more);
-        }
-        if picked.len() > limited {
-            log::info!("evict: limited eviction found {limited} of {want}; widened, {} more", picked.len() - limited);
-            fell_back = true;
-        }
+        let (held, untrained_held) = (held.as_ref(), untrained_held.as_ref());
+        let pick = Pick { life, splats, protect: ev.protect, config: &ev.config, means: &means, held, untrained_held };
+        let (mask, mut picked) = pick.victims(dead.clone(), budget, want, &[]).await;
+        let (mask, fell_back) = pick.widen(&widening_tiers(budget), &dead, want, mask, &mut picked).await;
         picked.sort_unstable();
         let count = picked.len();
         if count > 0 {
@@ -261,8 +182,83 @@ pub(super) struct RefineEvictions {
     pub for_total: usize,
 }
 
-/// What one eviction pick shares between the limited pass and the widened one.
+/// Adds the growth demand of recently observed cells to `ev`'s backlog when this refine's growth would pass the
+/// growth limit, and clears the backlog when it would not. Returns the means it read for that, if any.
+async fn add_recent_demand(
+    ev: &mut Eviction,
+    config: &TrainConfig,
+    iter: u32,
+    splats: &Splats,
+    refiner: &RefineRecord,
+    dead: &Tensor<1, Bool>,
+    full: Option<Tensor<1, Bool>>,
+) -> Option<Vec<f32>> {
+    let num_dead = dead
+        .clone()
+        .int()
+        .sum()
+        .into_scalar_async::<i32>()
+        .await
+        .expect("dead count readback") as u32;
+    let untrained = radius::either(refiner.untrained(), full);
+    let demand = growth_demand(refiner, config, iter, num_dead, untrained.as_ref()).await;
+    let limit = crate::evict::growth_limit(config.max_splats, ev.config.headroom);
+    if splats.num_splats().saturating_add(demand) <= limit {
+        ev.recent.backlog = 0;
+        return None;
+    }
+    let m = read_f32(splats.means()).await;
+    let in_recent = ev.recent.mask(&m, ev.config.recent_refines);
+    let oversized = if config.split_at_screen_size > 0.0 {
+        read_bool(trained_only(
+            refiner.above_screen_size(config.split_at_screen_size),
+            untrained.as_ref(),
+        ))
+        .await
+    } else {
+        vec![]
+    };
+    let growing = iter >= config.growth_start_iter && iter < config.growth_stop_iter;
+    let above = if growing {
+        read_bool(trained_only(
+            refiner.above_threshold(config.growth_grad_threshold),
+            untrained.as_ref(),
+        ))
+        .await
+    } else {
+        vec![]
+    };
+    let recent = recent_demand(&in_recent, &oversized, &above, config.growth_select_fraction);
+    ev.recent.backlog = ev.recent.backlog.saturating_add(recent);
+    Some(m)
+}
+
+/// The budgets a limited eviction short of its want widens to, in order: none unless `budget` limits eviction and
+/// has a fallback; the fallback; and after a fallback that opens groups, no limit.
+pub(super) fn widening_tiers(budget: Option<&RowBudget>) -> Vec<RowBudget> {
+    let Some(b) = budget.filter(|b| b.limit_eviction) else {
+        return Vec::new();
+    };
+    let Some(fallback) = b.fallback.clone() else {
+        return Vec::new();
+    };
+    let opens_groups = matches!(fallback, EvictionRelax::Groups(_));
+    let mut wide = b.clone();
+    wide.relax(fallback);
+    if !opens_groups {
+        return vec![wide];
+    }
+    let mut all = wide.clone();
+    all.relax(EvictionRelax::Unlimited);
+    vec![wide, all]
+}
+
+/// What one eviction pick shares between the limited pass and the widened ones.
 struct Pick<'a> {
+    life: &'a SplatLife,
+    splats: &'a Splats,
+    protect: Option<ProtectCone>,
+    config: &'a EvictConfig,
     means: &'a [f32],
     held: Option<&'a Tensor<1, Bool>>,
     untrained_held: Option<&'a Tensor<1, Bool>>,
@@ -274,9 +270,6 @@ impl Pick<'_> {
     /// by an earlier pick of this refine) used of their cells' and groups' shares.
     async fn victims(
         &self,
-        life: &crate::evict::SplatLife,
-        splats: &Splats,
-        (protect, config): (Option<crate::evict::ProtectCone>, &crate::evict::EvictConfig),
         dead: Tensor<1, Bool>,
         budget: Option<&RowBudget>,
         want: u32,
@@ -290,19 +283,49 @@ impl Pick<'_> {
         let quota = budget.and_then(|b| b.quota());
         let limit = quota.map(|q| (budget.expect("a quota comes with a budget").group.as_slice(), q));
         select_evictions(
-            life,
-            config,
+            self.life,
+            self.config,
             want,
             PickInputs {
-                means: splats.means(),
+                means: self.splats.means(),
                 means_cpu: self.means,
                 exclude,
-                protect,
+                protect: self.protect,
                 untrained_held: self.untrained_held.cloned(),
                 limit,
                 prior,
             },
         )
         .await
+    }
+
+    /// Short of `want` under the fair shares: widens to each of `tiers` in turn until `picked` holds `want`, each pick
+    /// continuing the last (their cells and groups keep what they gave), and adds the victims to `mask` and `picked`.
+    /// Returns the mask and whether a wider tier found any.
+    async fn widen(
+        &self,
+        tiers: &[RowBudget],
+        dead: &Tensor<1, Bool>,
+        want: u32,
+        mut mask: Tensor<1, Bool>,
+        picked: &mut Vec<usize>,
+    ) -> (Tensor<1, Bool>, bool) {
+        let limited = picked.len();
+        for wide in tiers {
+            if picked.len() >= want as usize {
+                break;
+            }
+            let rest = want - picked.len() as u32;
+            let (more_mask, more) = self
+                .victims(dead.clone().bool_or(mask.clone()), Some(wide), rest, picked)
+                .await;
+            mask = mask.bool_or(more_mask);
+            picked.extend(more);
+        }
+        if picked.len() <= limited {
+            return (mask, false);
+        }
+        log::info!("evict: limited eviction found {limited} of {want}; widened, {} more", picked.len() - limited);
+        (mask, true)
     }
 }

@@ -20,6 +20,40 @@ fn halves(g0: GroupBudget, g1: GroupBudget, limit_eviction: bool) -> RowBudget {
     RowBudget { group, groups: vec![g0, g1], limit_eviction, evict_held: false, fallback: None }
 }
 
+/// A limited budget of the 60-splat model: group 0 may give 2 rows, group 1 none.
+fn limited() -> RowBudget {
+    halves(group(u32::MAX, false, 2), group(u32::MAX, false, 0), true)
+}
+
+/// No budget, one without a fallback or one that does not limit eviction widens to nothing.
+#[test]
+fn without_a_limited_fallback_nothing_widens() {
+    assert!(super::refine_evict::widening_tiers(None).is_empty());
+    assert!(super::refine_evict::widening_tiers(Some(&limited())).is_empty(), "no fallback");
+    let unlimited = RowBudget { limit_eviction: false, fallback: Some(EvictionRelax::Unlimited), ..limited() };
+    assert!(super::refine_evict::widening_tiers(Some(&unlimited)).is_empty(), "eviction not limited");
+}
+
+/// An `Unlimited` fallback widens once, to no limit.
+#[test]
+fn an_unlimited_fallback_widens_once() {
+    let tiers = super::refine_evict::widening_tiers(Some(&RowBudget { fallback: Some(EvictionRelax::Unlimited), ..limited() }));
+    assert_eq!(tiers.len(), 1);
+    assert_eq!(tiers[0].quota(), None);
+    assert!(!tiers[0].evict_held);
+}
+
+/// A `Groups` fallback opens its groups and held rows, then lifts the limit.
+#[test]
+fn a_groups_fallback_widens_then_lifts_the_limit() {
+    let tiers = super::refine_evict::widening_tiers(Some(&RowBudget { fallback: Some(EvictionRelax::Groups(vec![1])), ..limited() }));
+    assert_eq!(tiers.len(), 2);
+    assert_eq!(tiers[0].quota(), Some(vec![2, u32::MAX]));
+    assert!(tiers[0].evict_held);
+    assert_eq!(tiers[1].quota(), None);
+    assert!(tiers[1].evict_held);
+}
+
 /// The importance of the splats left after a refine, in order.
 async fn kept_importance(trainer: &SplatTrainer) -> Vec<f32> {
     let life = trainer.rows.life.as_ref().unwrap();
