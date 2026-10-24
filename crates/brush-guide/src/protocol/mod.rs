@@ -106,7 +106,8 @@ pub enum ServerHeader {
 }
 
 /// Cumulative milliseconds of the training step's phases since the model started. The phases up to `stats_ms`
-/// count only with `GuideConfig::profile_steps`; `refine_ms`, `area_ms` and `hold_ms` are always timed (wall time, no GPU sync added).
+/// count only with `GuideConfig::profile_steps`; `refine_ms`, `area_ms` and `hold_ms` are always timed (wall
+/// time, no GPU sync added).
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct StepPhases {
@@ -216,8 +217,8 @@ fn payload_sizes(h: &KeyframeHeader) -> Option<PayloadSizes> {
     })
 }
 
-/// The declared block sizes, after checking that the payload has exactly
-/// their total length.
+/// The declared block sizes, after checking that the header declares no
+/// confidence without depth and that the payload has exactly their total length.
 fn checked_sizes(h: &KeyframeHeader, payload: &[u8]) -> Result<PayloadSizes, ProtocolError> {
     if h.depth_confidence && h.depth_size.is_none() {
         return Err(ProtocolError::ConfidenceWithoutDepth);
@@ -265,8 +266,8 @@ pub fn split_keyframe_payload<'a>(
 }
 
 /// The mono-depth block's size and raw float16 bytes (the payload's last
-/// block), `None` when the header declares none. Checks the payload length
-/// like `split_keyframe_payload`.
+/// block), `None` when the header declares none. Checks the header and the
+/// payload length like `split_keyframe_payload`.
 pub fn mono_block<'a>(
     h: &KeyframeHeader,
     payload: &'a [u8],
