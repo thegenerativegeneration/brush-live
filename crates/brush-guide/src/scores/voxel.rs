@@ -1,4 +1,4 @@
-use crate::live::SIGHT_FAR_M;
+use crate::area::SIGHT_FAR_M;
 use crate::protocol::Cell;
 use crate::scores::metrics::{FisherRidge, position_sigma};
 use brush_train::cone::ViewCone;

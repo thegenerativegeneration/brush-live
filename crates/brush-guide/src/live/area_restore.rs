@@ -5,7 +5,7 @@
 //! drift into a parked tile far from the walker join its file instead: [`super::area_park`].)
 
 use super::LiveModel;
-use super::area_sight::SIGHT_FAR_M;
+use crate::area::SIGHT_FAR_M;
 use crate::area::{TileKey, apply_moves, junction_views, remove_tile_files};
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;

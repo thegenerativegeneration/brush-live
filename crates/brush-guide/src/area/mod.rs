@@ -23,7 +23,7 @@ pub use park_file::{
 };
 pub use pose_replay::{CameraPose, MIN_SLOT_SHARE, apply_moves, move_spread, slot_moves};
 pub use tiles::{AreaParams, AreaSummary, TileInfo, TileKey, TileRegistry, group_rows, rows_in};
-pub use views::{area_views, camera_sees_box, junction_views, membership_additions, projected_area};
+pub use views::{SIGHT_FAR_M, area_views, camera_sees_box, junction_views, membership_additions, projected_area};
 
 use serde::Serialize;
 

@@ -34,7 +34,6 @@ mod profile;
 mod seed;
 use area_restore::RestoreReason;
 use draw::{Draw, choose_draw, load_batch};
-pub(crate) use area_sight::SIGHT_FAR_M;
 pub use area_export::FinalExport;
 pub use poses::{PoseUpdateStats, ViewPose};
 pub use profile::PROFILE_LOG_EVERY;
@@ -350,7 +349,7 @@ impl LiveModel {
         self.hold_inactive_if_stale(&splats).await;
         self.splats = Some(splats);
         if let Some(t) = self.trainer.as_mut() {
-            t.set_protect_cone(Some(view_cone(&kf.view.camera)));
+            t.set_protect_cone(Some(ViewCone::of_camera(&kf.view.camera)));
         }
 
         self.views.push(kf.view);
@@ -468,9 +467,4 @@ impl LiveModel {
         self.step_s.area += area_s;
         splats
     }
-}
-
-/// The camera's viewing cone, as `session::worker` approximates a view.
-fn view_cone(c: &brush_render::camera::Camera) -> ViewCone {
-    ViewCone::of_camera(c)
 }

@@ -4,6 +4,11 @@ use brush_render::camera::Camera;
 use brush_render::kernels::camera_model::CameraModel;
 use glam::{Vec2, Vec3};
 
+/// How deep a view sees, metres: the views that see a resident tile for the floor and the score round, the far tiles
+/// room parking spares because the newest view sees them, the junction views that see a restored tile's box, and the
+/// score round's cameras that orient a voxel's normal ([`crate::scores::voxel`]).
+pub const SIGHT_FAR_M: f32 = 100.0;
+
 /// Distance from a camera below which a box counts as behind it.
 const NEAR: f32 = 0.01;
 

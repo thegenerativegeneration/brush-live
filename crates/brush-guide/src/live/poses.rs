@@ -1,6 +1,7 @@
 //! Corrected camera poses for views already added: a map correction on the phone moved their keyframes.
 
-use super::{LiveModel, view_cone};
+use super::LiveModel;
+use brush_train::cone::ViewCone;
 use crate::keyframe::{KeyframeError, arkit_pose};
 use crate::pose_eq::same_pose;
 use brush_render::camera::Camera;
@@ -92,7 +93,7 @@ impl LiveModel {
         let newest = self.views.len() - 1;
         if let Some(t) = self.trainer.as_mut() {
             if moves.iter().any(|(i, _)| *i as usize == newest) {
-                t.set_protect_cone(Some(view_cone(&self.views[newest].camera)));
+                t.set_protect_cone(Some(ViewCone::of_camera(&self.views[newest].camera)));
             }
             if let Some(splats) = self.splats.take() {
                 self.splats = Some(t.move_by_origin(splats, &moves));

@@ -13,7 +13,7 @@
 //!   views that see an active tile train ([`LiveModel::note_cap`]).
 
 use super::LiveModel;
-use super::area_sight::SIGHT_FAR_M;
+use crate::area::SIGHT_FAR_M;
 use crate::area::{
     FairShare, TileKey, camera_sees_box, far_inactive_to_park, keep_under_tile_cap, near_tiles, row_budget,
     tile_counts,
