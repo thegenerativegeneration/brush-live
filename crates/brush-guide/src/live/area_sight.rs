@@ -4,9 +4,9 @@
 //! them never sets a resident splat's floor. Parked rows keep the floor they were parked with, and held rows keep
 //! theirs through a refine.
 //!
-//! Views are bucketed by pose ([`crate::area::representatives`]): the frustum tests run on one representative per bucket and
-//! every view of the bucket takes its result, and only the representatives (with the newest view) orient the score
-//! round's normals, so that vote stops growing where the walk passes the same place again.
+//! Views are bucketed by pose ([`crate::area::representatives`]): the frustum tests run on one representative per
+//! bucket and every view of the bucket takes its result, and only the representatives (with the newest view) orient
+//! the score round's normals, so that vote stops growing where the walk passes the same place again.
 
 use super::LiveModel;
 use crate::area::representatives;

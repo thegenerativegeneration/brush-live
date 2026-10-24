@@ -152,7 +152,7 @@ pub fn block_mean(x: Tensor<3>, grid: UVec2) -> Tensor<3> {
 }
 
 /// Pixel centres `(x + 0.5, y + 0.5)` of every pixel at `size`, `[h*w, 2]`,
-/// in [`pixel_dirs`]'s order. Depends only on the size, so the trainer builds
+/// in `pixel_dirs`'s order. Depends only on the size, so the trainer builds
 /// it once per render size and [`world_dirs`] turns it into directions on the
 /// GPU for each camera.
 pub fn pixel_centres(size: UVec2, device: &Device) -> Tensor<2> {
@@ -167,7 +167,7 @@ pub fn pixel_centres(size: UVec2, device: &Device) -> Tensor<2> {
     Tensor::<1>::from_floats(out.as_slice(), device).reshape([n, 2])
 }
 
-/// The tensor form of [`pixel_dirs`]: world-space unit ray directions,
+/// The tensor form of `pixel_dirs`: world-space unit ray directions,
 /// `[h*w, 3]`, from [`pixel_centres`]. Only the camera's intrinsics and
 /// rotation are uploaded per call. Same pinhole-only restriction.
 pub fn world_dirs(centres: Tensor<2>, camera: &Camera, size: UVec2) -> Tensor<2> {

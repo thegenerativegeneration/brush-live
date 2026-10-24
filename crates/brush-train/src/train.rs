@@ -775,7 +775,7 @@ impl SplatTrainer {
             let mut grads = splats.bwd_validate(loss).await;
 
             // The globe's coefficients are a leaf in this same graph (built
-            // from `sh_bg.image(..)` above, composited with the splats'
+            // from `bg.composite(..)` above, composited with the splats'
             // render by ordinary tensor ops) — this is the same `backward()`
             // the splat gradients just came out of, not a second one.
             if let Some(sh_bg) = self.sh_background.as_mut() {
