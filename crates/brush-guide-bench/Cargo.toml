@@ -1,7 +1,8 @@
-# Spike (throwaway): measures the live guidance engine on the iPhone and the Mac
-# by replaying a capture's recorded wire frames into a GuideSession.
+# Dev tool, not shipped: measures the live guidance engine on the iPhone (`ios/Bench`) and the Mac by replaying a
+# capture's recorded wire frames into a GuideSession.
 [package]
 name = "brush-guide-bench"
+publish = false
 edition.workspace = true
 version.workspace = true
 license.workspace = true

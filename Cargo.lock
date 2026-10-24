@@ -1145,7 +1145,6 @@ dependencies = [
  "brush-cube",
  "brush-dataset",
  "brush-guide",
- "brush-process",
  "burn",
  "clap",
  "env_logger",

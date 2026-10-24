@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 brush-guide.path = "../brush-guide"
-brush-process.path = "../brush-process"
 brush-dataset.path = "../brush-dataset"
 burn.workspace = true
 anyhow.workspace = true
