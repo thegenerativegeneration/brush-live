@@ -7,7 +7,8 @@ use brush_dataset::scene::SceneView;
 use brush_dataset::scene_loader::SceneLoader;
 use brush_render::gaussian_splats::Splats;
 use brush_train::config::TrainConfig;
-use brush_train::evict::{EvictConfig, ProtectCone};
+use brush_train::cone::ViewCone;
+use brush_train::evict::EvictConfig;
 use brush_train::train::{BOUND_PERCENTILE, SplatTrainer, get_splat_bounds};
 use burn::module::Module;
 use burn::tensor::Device;
@@ -33,6 +34,7 @@ mod profile;
 mod seed;
 use area_restore::RestoreReason;
 use draw::{Draw, choose_draw, load_batch};
+pub(crate) use area_sight::SIGHT_FAR_M;
 pub use area_export::FinalExport;
 pub use poses::{PoseUpdateStats, ViewPose};
 pub use profile::PROFILE_LOG_EVERY;
@@ -469,10 +471,6 @@ impl LiveModel {
 }
 
 /// The camera's viewing cone, as `session::worker` approximates a view.
-fn view_cone(c: &brush_render::camera::Camera) -> ProtectCone {
-    ProtectCone {
-        position: c.position,
-        forward: c.rotation * Vec3::Z,
-        cos_half_fov: (0.5 * c.fov_x.max(c.fov_y) as f32).cos(),
-    }
+fn view_cone(c: &brush_render::camera::Camera) -> ViewCone {
+    ViewCone::of_camera(c)
 }

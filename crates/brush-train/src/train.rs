@@ -3,8 +3,9 @@ use std::f32::consts::FRAC_1_SQRT_2;
 use crate::{
     adam_scaled::{AdamScaled, AdamState},
     budget::{EvictionRelax, RowBudget},
+    cone::ViewCone,
     config::TrainConfig,
-    evict::{EvictConfig, Eviction, ProtectCone, SplatLife},
+    evict::{EvictConfig, Eviction, SplatLife},
     msg::{RefineStats, TrainStepStats},
     multinomial::multinomial_sample,
     quat_vec::quaternion_vec_multiply,
@@ -446,7 +447,7 @@ impl SplatTrainer {
     }
 
     /// Splats inside `cone` are never evicted.
-    pub fn set_protect_cone(&mut self, cone: Option<ProtectCone>) {
+    pub fn set_protect_cone(&mut self, cone: Option<ViewCone>) {
         if let Some(e) = self.evict.as_mut() {
             e.protect = cone;
         }

@@ -13,6 +13,7 @@
 //!   views that see an active tile train ([`LiveModel::note_cap`]).
 
 use super::LiveModel;
+use super::area_sight::SIGHT_FAR_M;
 use crate::area::{
     FairShare, TileKey, camera_sees_box, far_inactive_to_park, keep_under_tile_cap, near_tiles, row_budget,
     tile_counts,
@@ -213,7 +214,7 @@ impl LiveModel {
                 let (Some(cam), Some((lo, hi))) = (camera.as_ref(), registry.tile_box(k)) else {
                     return false;
                 };
-                camera_sees_box(cam, lo, hi, SIGHT_M)
+                camera_sees_box(cam, lo, hi, SIGHT_FAR_M)
             };
             far_inactive_to_park(registry, evict - freed, current - freed, centre, keyframes, &keep, seen)
         } else {
@@ -280,9 +281,6 @@ struct RoomNeed {
     /// The newest view's camera position.
     centre: Vec3,
 }
-
-/// How deep the newest camera's view reaches when room parking spares the far tiles it sees, metres.
-const SIGHT_M: f32 = 100.0;
 
 #[cfg(test)]
 #[path = "area_budget_tests.rs"]

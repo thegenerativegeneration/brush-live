@@ -5,6 +5,7 @@
 //! drift into a parked tile far from the walker join its file instead: [`super::area_park`].)
 
 use super::LiveModel;
+use super::area_sight::SIGHT_FAR_M;
 use crate::area::{TileKey, apply_moves, junction_views, remove_tile_files};
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
@@ -12,9 +13,6 @@ use brush_train::rows::SplatRows;
 use glam::Vec3;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-
-/// How far away a junction view may see a restored tile's box, in metres.
-const JUNCTION_FAR_M: f32 = 100.0;
 
 /// A restored tile keeps its rows' eviction importance unless it was parked for more than this many seen windows;
 /// then the importance is `+inf` (unscored) until the next refine scores it.
@@ -220,7 +218,7 @@ impl LiveModel {
     }
 
     /// The junction's views: the area's views and the newest view that see one of the junction's boxes up to
-    /// [`JUNCTION_FAR_M`]. No-op without area training; without boxes there are no junction views.
+    /// [`SIGHT_FAR_M`]. No-op without area training; without boxes there are no junction views.
     pub(super) fn refresh_junction_views(&mut self) {
         let Some(area) = self.area.as_mut() else {
             return;
@@ -235,7 +233,7 @@ impl LiveModel {
             candidates.into_iter().filter_map(|i| Some((i, self.views.get(i)?.camera))).collect();
         let mut views = BTreeSet::new();
         for &(lo, hi) in &area.junction.boxes {
-            views.extend(junction_views(&cameras, lo, hi, JUNCTION_FAR_M));
+            views.extend(junction_views(&cameras, lo, hi, SIGHT_FAR_M));
         }
         area.junction.views = views.into_iter().collect();
     }

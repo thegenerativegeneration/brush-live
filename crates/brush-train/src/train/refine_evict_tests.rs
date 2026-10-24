@@ -2,7 +2,8 @@
 //! that optimizer and per-splat state stay row-aligned with the splats.
 
 use super::*;
-use crate::evict::{EvictConfig, ProtectCone};
+use crate::cone::ViewCone;
+use crate::evict::EvictConfig;
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};
 use brush_render::AlphaMode;
 use brush_render::camera::Camera;
@@ -184,7 +185,7 @@ async fn splats_in_the_protect_cone_are_kept() {
     record_importance(&mut trainer, &(0..N).map(|i| i as f32).collect::<Vec<_>>());
     // Splats sit at x = 0.01·i, z = 2. A cone from the origin along +z with
     // half angle atan(0.195 / 2) covers i < 20.
-    trainer.set_protect_cone(Some(ProtectCone {
+    trainer.set_protect_cone(Some(ViewCone {
         position: glam::Vec3::ZERO,
         forward: glam::Vec3::Z,
         cos_half_fov: (0.195f32 / 2.0).atan().cos(),

@@ -2,7 +2,8 @@
 //! inputs of the voxel aggregation.
 
 use crate::readback::read_f32;
-use crate::scores::voxel::{GaussianScore, SplatGeom, ViewCone};
+use crate::scores::voxel::{GaussianScore, SplatGeom};
+use brush_train::cone::ViewCone;
 use brush_render::camera::Camera;
 use brush_render::gaussian_splats::Splats;
 use glam::{Quat, Vec3};
@@ -62,14 +63,7 @@ impl SplatRead {
 }
 
 pub(super) fn view_cones(cameras: &[Camera]) -> Vec<ViewCone> {
-    cameras
-        .iter()
-        .map(|c| ViewCone {
-            position: c.position,
-            forward: c.rotation * Vec3::Z,
-            cos_half_fov: (0.5 * c.fov_x.max(c.fov_y) as f32).cos(),
-        })
-        .collect()
+    cameras.iter().map(ViewCone::of_camera).collect()
 }
 
 /// World direction of the Gaussian's shortest scale axis; zero for a

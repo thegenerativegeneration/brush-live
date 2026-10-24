@@ -1,5 +1,7 @@
+use crate::live::SIGHT_FAR_M;
 use crate::protocol::Cell;
 use crate::scores::metrics::{FisherRidge, position_sigma};
+use brush_train::cone::ViewCone;
 use glam::{IVec3, Mat3, Vec3};
 use std::collections::HashMap;
 
@@ -37,24 +39,6 @@ impl GaussianScore {
             axis: self.axis,
             flatness: self.flatness,
         }
-    }
-}
-
-/// How far a [`ViewCone`] sees, metres: the sight rule's depth (`live::area_sight`).
-pub const CONE_FAR_M: f32 = 100.0;
-
-/// A keyframe camera approximated as a cone for "does this camera see the voxel", up to [`CONE_FAR_M`].
-pub struct ViewCone {
-    pub position: Vec3,
-    pub forward: Vec3,
-    pub cos_half_fov: f32,
-}
-
-impl ViewCone {
-    pub fn sees(&self, p: Vec3) -> bool {
-        let d = p - self.position;
-        let len = d.length();
-        len > 1e-4 && len <= CONE_FAR_M && d.dot(self.forward) >= self.cos_half_fov * len
     }
 }
 
@@ -231,11 +215,11 @@ fn voxel_sigma(info: &[f64; 9], scale: &UncertaintyScale) -> f32 {
     }
 }
 
-/// Flips `n` towards the cameras that see `p` (majority vote); with no seeing
+/// Flips `n` towards the cameras that see `p` up to [`SIGHT_FAR_M`] (majority vote); with no seeing
 /// camera or a tie, towards the nearest camera.
 fn orient(n: Vec3, p: Vec3, cameras: &[ViewCone]) -> Vec3 {
     let vote = |c: &ViewCone| if n.dot(c.position - p) >= 0.0 { 1 } else { -1 };
-    let mut votes: i32 = cameras.iter().filter(|c| c.sees(p)).map(vote).sum();
+    let mut votes: i32 = cameras.iter().filter(|c| c.sees(p, SIGHT_FAR_M)).map(vote).sum();
     if votes == 0
         && let Some(c) = cameras.iter().min_by(|a, b| {
             a.position

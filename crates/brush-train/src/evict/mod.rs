@@ -26,6 +26,8 @@ mod life;
 mod picker;
 mod recent;
 
+use crate::cone::ViewCone;
+
 #[cfg(test)]
 pub(crate) use picker::{pick_evictions, pick_evictions_within};
 pub(crate) use life::SplatLife;
@@ -50,15 +52,6 @@ pub const MIN_CELL_SEEDS: usize = 8;
 
 /// Edge of the cells `EvictConfig::max_cell_fraction` applies to, in metres.
 pub const EVICT_CELL_M: f32 = 1.0;
-
-/// A view cone (apex, unit axis, cos of the half angle) whose splats are
-/// never evicted, e.g. the newest keyframe's camera.
-#[derive(Clone, Copy, Debug)]
-pub struct ProtectCone {
-    pub position: glam::Vec3,
-    pub forward: glam::Vec3,
-    pub cos_half_fov: f32,
-}
 
 /// The count eviction prunes down to.
 pub fn evict_target(max_splats: u32, headroom: f32) -> u32 {
@@ -101,7 +94,8 @@ pub fn evict_count(
 #[cfg_attr(test, derive(Clone))]
 pub(crate) struct Eviction {
     pub config: EvictConfig,
-    pub protect: Option<ProtectCone>,
+    /// Splats inside this cone are never evicted, e.g. the newest keyframe's camera.
+    pub protect: Option<ViewCone>,
     pub seed_shortfall: u32,
     pub recent: RecentCells,
 }

@@ -15,7 +15,9 @@ use brush_render::camera::Camera;
 use glam::Vec3;
 use std::collections::BTreeSet;
 
-/// How deep a view sees a resident tile for the floor and the score round, metres.
+/// How deep a view sees, metres: the views that see a resident tile for the floor and the score round, the far tiles
+/// room parking spares because the newest view sees them, the junction views that see a restored tile's box, and the
+/// score round's cameras that orient a voxel's normal ([`crate::scores::voxel`]).
 pub const SIGHT_FAR_M: f32 = 100.0;
 
 /// The views that see the resident model, and the voters among them.

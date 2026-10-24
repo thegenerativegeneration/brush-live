@@ -3,9 +3,10 @@
 
 use super::{SplatTrainer, radius};
 use crate::budget::{EvictionRelax, RowBudget};
+use crate::cone::ViewCone;
 use crate::config::TrainConfig;
 use crate::evict::{
-    EvictConfig, Eviction, PickInputs, ProtectCone, SplatLife, growth_demand, read_bool, read_f32, recent_demand,
+    EvictConfig, Eviction, PickInputs, SplatLife, growth_demand, read_bool, read_f32, recent_demand,
     select_evictions,
 };
 use crate::stats::{RefineRecord, trained_only};
@@ -269,7 +270,7 @@ pub(super) fn widening_tiers(budget: Option<&RowBudget>) -> Vec<RowBudget> {
 struct Pick<'a> {
     life: &'a SplatLife,
     splats: &'a Splats,
-    protect: Option<ProtectCone>,
+    protect: Option<ViewCone>,
     config: &'a EvictConfig,
     means: &'a [f32],
     held: Option<&'a Tensor<1, Bool>>,

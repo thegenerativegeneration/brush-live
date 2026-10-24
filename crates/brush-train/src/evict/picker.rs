@@ -1,5 +1,6 @@
-use super::{EvictConfig, ProtectCone, SplatLife, cell_of};
+use super::{EvictConfig, SplatLife, cell_of};
 use crate::budget::GroupLimit;
+use crate::cone::ViewCone;
 use crate::config::TrainConfig;
 use crate::lod::top_k_indices;
 use crate::stats::{RefineRecord, trained_only};
@@ -38,7 +39,7 @@ pub(crate) async fn growth_demand(
 }
 
 /// True for splats whose mean lies inside `cone`.
-fn in_cone(means: Tensor<2>, cone: ProtectCone) -> Tensor<1, Bool> {
+fn in_cone(means: Tensor<2>, cone: ViewCone) -> Tensor<1, Bool> {
     let device = means.device();
     let n = means.dims()[0];
     let p = cone.position;
@@ -60,7 +61,7 @@ pub(crate) struct PickInputs<'a> {
     /// Rows that are never picked.
     pub exclude: Tensor<1, Bool>,
     /// Splats inside this cone are never picked.
-    pub protect: Option<ProtectCone>,
+    pub protect: Option<ViewCone>,
     /// Rows flagged here (held, never trained) rank at importance 0, scored or not, and bypass `limit`.
     pub untrained_held: Option<Tensor<1, Bool>>,
     /// Each row's group and the rows each group may give: a row goes only while its group may give one.
