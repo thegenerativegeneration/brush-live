@@ -222,3 +222,23 @@ async fn opened_groups_short_of_the_want_escalate_to_no_limit() {
     assert_eq!(gone, vec![0.0, 1.0, 2.0, 3.0, 58.0, 59.0]);
     assert!(trainer.eviction_fell_back());
 }
+
+/// A `Groups` fallback that opens no group gives nothing more (group 0's quota is spent on rows 0 and 1), so the
+/// unlimited tier takes the rest: the least important rows not held (6..10), the held rows 2..6 staying.
+#[tokio::test]
+async fn a_fallback_that_falls_short_ends_unlimited() {
+    let imp: Vec<f32> = (0..N).map(|i| i as f32).collect();
+    let (mut trainer, s) = trainer_at_budget(0).await;
+    record_importance(&mut trainer, &imp);
+    // Rows 2..6 held after a step trained them.
+    let flags: Vec<bool> = (0..N).map(|i| (2..6).contains(&i)).collect();
+    trainer.set_frozen_rows(Some(Tensor::<1, Bool>::from_data(TensorData::new(flags, [N]), &s.device().inner())));
+    trainer.note_seed_shortfall(1);
+    trainer.set_row_budget(Some(halves(group(u32::MAX, false, 2), group(u32::MAX, false, 0), true)));
+    trainer.set_eviction_fallback(EvictionRelax::Groups(vec![]));
+    let (_, stats) = trainer.refine(1, s).await;
+    let kept = kept_importance(&trainer).await;
+    let gone: Vec<f32> = imp.iter().copied().filter(|v| !kept.contains(v)).collect();
+    assert_eq!((stats.num_evicted, gone), (6, vec![0.0, 1.0, 6.0, 7.0, 8.0, 9.0]));
+    assert!(trainer.eviction_fell_back());
+}
