@@ -357,8 +357,12 @@ pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_warm_up(config_json: *const c_char) -> i32 {
     let json = unsafe { str_arg(config_json) }.unwrap_or("");
-    let Ok(config) = parse_config(json) else {
-        return 1;
+    let config = match parse_config(json) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("warm-up config: {e}");
+            return 1;
+        }
     };
     set_autotune(json);
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread().enable_all().build() else {
