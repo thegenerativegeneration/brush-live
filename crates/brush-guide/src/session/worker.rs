@@ -20,8 +20,8 @@ use super::splat_read::{SplatRead, view_cones};
 use super::{Command, ScoreSetMsg, StatusMsg, WorkerTimes};
 use crate::config::GuideConfig;
 use crate::keyframe::decode_keyframe;
-use crate::live::{LiveModel, StepTotals};
-use crate::protocol::{Cell, KeyframeHeader};
+use crate::live::LiveModel;
+use crate::protocol::{Cell, KeyframeHeader, StepPhases};
 use crate::schedule::{Cadence, IterThrottle};
 use crate::scores::voxel::VoxelAggregator;
 use brush_render::gaussian_splats::Splats;
@@ -143,7 +143,7 @@ impl ActivityTotals {
         }
     }
 
-    fn to_times(&self, step: StepTotals) -> WorkerTimes {
+    fn to_times(&self, step: StepPhases) -> WorkerTimes {
         let ms = |s: f64| (s * 1e3) as u64;
         WorkerTimes {
             train_ms: ms(self.train),

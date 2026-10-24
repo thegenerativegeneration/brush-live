@@ -9,10 +9,10 @@ pub(crate) use worker::warm_up_eval;
 pub use frames::forward_frames;
 
 use crate::config::GuideConfig;
-use crate::live::{PoseUpdateStats, StepTotals, ViewPose};
+use crate::live::{PoseUpdateStats, ViewPose};
 use crate::protocol::{
-    CELL_BYTES, Cell, ClientHeader, KeyframeHeader, PoseUpdate, ServerHeader, decode_frame,
-    encode_cells, encode_frame,
+    CELL_BYTES, Cell, ClientHeader, KeyframeHeader, PoseUpdate, ServerHeader, StatusPayload, StepPhases,
+    decode_frame, encode_cells, encode_frame,
 };
 use brush_async::Actor;
 use burn::tensor::Device;
@@ -58,7 +58,7 @@ pub struct WorkerTimes {
     /// Time the iteration cap held the next training step back.
     pub throttle_ms: u64,
     /// The training step's phases, from the live model.
-    pub step: StepTotals,
+    pub step: StepPhases,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -79,7 +79,7 @@ pub struct StatusMsg {
 impl StatusMsg {
     pub fn to_frame(&self) -> Vec<u8> {
         encode_frame(
-            &ServerHeader::Status {
+            &ServerHeader::Status(StatusPayload {
                 num_keyframes: self.num_keyframes,
                 num_splats: self.num_splats,
                 train_iters_per_s: self.train_iters_per_s,
@@ -94,16 +94,8 @@ impl StatusMsg {
                 throttle_ms: self.times.throttle_ms,
                 adam_clamped: self.adam_clamped,
                 sh_pruned: self.sh_pruned,
-                batch_ms: self.times.step.batch_ms,
-                forward_ms: self.times.step.forward_ms,
-                loss_ms: self.times.step.loss_ms,
-                backward_ms: self.times.step.backward_ms,
-                optimizer_ms: self.times.step.optimizer_ms,
-                stats_ms: self.times.step.stats_ms,
-                refine_ms: self.times.step.refine_ms,
-                area_ms: self.times.step.area_ms,
-                hold_ms: self.times.step.hold_ms,
-            },
+                step: self.times.step,
+            }),
             &[],
         )
     }

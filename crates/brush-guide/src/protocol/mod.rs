@@ -96,60 +96,54 @@ pub enum ServerHeader {
         num_cells: u32,
         cell_bytes: u32,
     },
-    Status {
-        num_keyframes: u32,
-        num_splats: u32,
-        train_iters_per_s: f32,
-        last_score_ms: u32,
-        #[serde(default)]
-        train_iters: u64,
-        #[serde(default)]
-        train_ms: u64,
-        #[serde(default)]
-        ingest_ms: u64,
-        #[serde(default)]
-        preview_ms: u64,
-        #[serde(default)]
-        voxel_ms: u64,
-        #[serde(default)]
-        fisher_ms: u64,
-        #[serde(default)]
-        uptime_ms: u64,
-        #[serde(default)]
-        throttle_ms: u64,
-        /// Optimizer elements whose step was clamped since the session started (inconsistent optimizer state).
-        #[serde(default)]
-        adam_clamped: u64,
-        /// Splats pruned for a diverged colour since the session started.
-        #[serde(default)]
-        sh_pruned: u64,
-        /// Cumulative training-step phases in ms (see `live::StepTotals`); the phases from `batch_ms` to
-        /// `stats_ms` are 0 without step profiling.
-        #[serde(default)]
-        batch_ms: u64,
-        #[serde(default)]
-        forward_ms: u64,
-        #[serde(default)]
-        loss_ms: u64,
-        #[serde(default)]
-        backward_ms: u64,
-        #[serde(default)]
-        optimizer_ms: u64,
-        #[serde(default)]
-        stats_ms: u64,
-        #[serde(default)]
-        refine_ms: u64,
-        #[serde(default)]
-        area_ms: u64,
-        #[serde(default)]
-        hold_ms: u64,
-    },
+    Status(StatusPayload),
     Splat {
         ply_len: u64,
     },
     Error {
         message: String,
     },
+}
+
+/// Cumulative milliseconds of the training step's phases since the model started. The phases up to `stats_ms`
+/// count only with `GuideConfig::profile_steps`; `refine_ms`, `area_ms` and `hold_ms` are always timed (wall time, no GPU sync added).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct StepPhases {
+    pub batch_ms: u64,
+    pub forward_ms: u64,
+    pub loss_ms: u64,
+    pub backward_ms: u64,
+    pub optimizer_ms: u64,
+    pub stats_ms: u64,
+    pub refine_ms: u64,
+    /// Area and budget bookkeeping inside `LiveModel::refine`, apart from the trainer's own refine.
+    pub area_ms: u64,
+    pub hold_ms: u64,
+}
+
+/// The body of a status frame. The step phases are flattened, so they follow `sh_pruned` in the JSON.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default)]
+pub struct StatusPayload {
+    pub num_keyframes: u32,
+    pub num_splats: u32,
+    pub train_iters_per_s: f32,
+    pub last_score_ms: u32,
+    pub train_iters: u64,
+    pub train_ms: u64,
+    pub ingest_ms: u64,
+    pub preview_ms: u64,
+    pub voxel_ms: u64,
+    pub fisher_ms: u64,
+    pub uptime_ms: u64,
+    pub throttle_ms: u64,
+    /// Optimizer elements whose step was clamped since the session started (inconsistent optimizer state).
+    pub adam_clamped: u64,
+    /// Splats pruned for a diverged colour since the session started.
+    pub sh_pruned: u64,
+    #[serde(flatten)]
+    pub step: StepPhases,
 }
 
 pub fn encode_frame<H: Serialize>(header: &H, payload: &[u8]) -> Vec<u8> {
@@ -225,6 +219,9 @@ fn payload_sizes(h: &KeyframeHeader) -> Option<PayloadSizes> {
 /// The declared block sizes, after checking that the payload has exactly
 /// their total length.
 fn checked_sizes(h: &KeyframeHeader, payload: &[u8]) -> Result<PayloadSizes, ProtocolError> {
+    if h.depth_confidence && h.depth_size.is_none() {
+        return Err(ProtocolError::ConfidenceWithoutDepth);
+    }
     let sizes = payload_sizes(h).ok_or(ProtocolError::SizeOverflow)?;
     if payload.len() != sizes.total {
         return Err(ProtocolError::PayloadSize {
@@ -246,9 +243,6 @@ pub fn split_keyframe_payload<'a>(
     h: &KeyframeHeader,
     payload: &'a [u8],
 ) -> Result<KeyframePayload<'a>, ProtocolError> {
-    if h.depth_confidence && h.depth_size.is_none() {
-        return Err(ProtocolError::ConfidenceWithoutDepth);
-    }
     let sizes = checked_sizes(h, payload)?;
     let (jpeg, rest) = payload.split_at(h.jpeg_len as usize);
     let (depth_bytes, rest) = rest.split_at(sizes.depth);

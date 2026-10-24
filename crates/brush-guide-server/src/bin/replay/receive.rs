@@ -1,7 +1,7 @@
 //! Handling of server frames: visualised, optionally dumped, summarised
 //! on stderr.
 
-use brush_guide::protocol::{CELL_BYTES, Cell, ServerHeader, decode_cells, decode_frame};
+use brush_guide::protocol::{CELL_BYTES, Cell, ServerHeader, StatusPayload, decode_cells, decode_frame};
 use futures_util::{Stream, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -82,7 +82,7 @@ impl Receiver {
                 cell_bytes,
                 ..
             } => self.score_set(version, voxel_size, cell_bytes, payload),
-            ServerHeader::Status {
+            ServerHeader::Status(StatusPayload {
                 num_keyframes,
                 num_splats,
                 train_iters_per_s,
@@ -91,7 +91,7 @@ impl Receiver {
                 sh_pruned,
                 train_iters,
                 ..
-            } => {
+            }) => {
                 if let Some(steps) = &self.steps {
                     steps.send_replace(train_iters);
                 }

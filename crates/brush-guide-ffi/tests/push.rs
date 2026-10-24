@@ -31,7 +31,7 @@ fn replies(frames: &Frames) -> Vec<ServerHeader> {
         .filter(|h| {
             !matches!(
                 h,
-                ServerHeader::Status { .. } | ServerHeader::ScoreSet { .. }
+                ServerHeader::Status(_) | ServerHeader::ScoreSet { .. }
             )
         })
         .cloned()

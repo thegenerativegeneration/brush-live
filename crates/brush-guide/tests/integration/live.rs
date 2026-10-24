@@ -2,7 +2,8 @@ use crate::test_scene;
 
 use brush_guide::config::GuideConfig;
 use brush_guide::keyframe::decode_keyframe;
-use brush_guide::live::{LiveModel, PROFILE_LOG_EVERY, PoseUpdateStats, StepLr, StepTotals, ViewPose};
+use brush_guide::live::{LiveModel, PROFILE_LOG_EVERY, PoseUpdateStats, StepLr, ViewPose};
+use brush_guide::protocol::StepPhases;
 use glam::Vec3;
 
 fn tmp(name: &str) -> std::path::PathBuf {
@@ -247,7 +248,7 @@ async fn step_totals_are_monotone_with_a_mid_window_read() {
         }
     }
     let (mid, end) = (mid.unwrap(), live.step_totals());
-    let sum = |t: &StepTotals| [t.batch_ms, t.forward_ms, t.loss_ms, t.backward_ms, t.optimizer_ms, t.stats_ms, t.refine_ms, t.area_ms, t.hold_ms];
+    let sum = |t: &StepPhases| [t.batch_ms, t.forward_ms, t.loss_ms, t.backward_ms, t.optimizer_ms, t.stats_ms, t.refine_ms, t.area_ms, t.hold_ms];
     for (m, e) in sum(&mid).iter().zip(sum(&end)) {
         assert!(e >= *m, "{mid:?} -> {end:?}");
     }
@@ -267,7 +268,7 @@ async fn reset_clears_step_totals() {
         live.train_step().await;
     }
     live.reset();
-    assert_eq!(live.step_totals(), StepTotals::default());
+    assert_eq!(live.step_totals(), StepPhases::default());
     std::fs::remove_dir_all(dir).ok();
 }
 

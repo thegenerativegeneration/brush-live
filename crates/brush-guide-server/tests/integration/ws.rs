@@ -1,6 +1,6 @@
 use brush_guide::config::GuideConfig;
 use brush_guide::protocol::{
-    ClientHeader, KeyframeHeader, PoseUpdate, ServerHeader, decode_frame, encode_frame,
+    ClientHeader, KeyframeHeader, PoseUpdate, ServerHeader, StatusPayload, decode_frame, encode_frame,
 };
 use futures_util::{SinkExt, StreamExt};
 use glam::{Mat4, Vec3};
@@ -143,7 +143,7 @@ async fn end_to_end() {
         }
     }
     loop {
-        if let ServerHeader::Status { num_keyframes, .. } = next_header(&mut ws).await {
+        if let ServerHeader::Status(StatusPayload { num_keyframes, .. }) = next_header(&mut ws).await {
             assert_eq!(num_keyframes, 3);
             break;
         }
@@ -180,7 +180,7 @@ async fn end_to_end() {
         }
     }
     loop {
-        if let ServerHeader::Status { num_keyframes, .. } = next_header(&mut ws).await {
+        if let ServerHeader::Status(StatusPayload { num_keyframes, .. }) = next_header(&mut ws).await {
             assert!(
                 num_keyframes <= 1,
                 "status of the new session, got {num_keyframes}"
@@ -263,7 +263,7 @@ where
 {
     let mut out = Vec::new();
     while out.len() < n {
-        if let ServerHeader::Status { train_iters, .. } = next_header(ws).await
+        if let ServerHeader::Status(StatusPayload { train_iters, .. }) = next_header(ws).await
             && train_iters > 0
         {
             out.push((train_iters, start.elapsed()));

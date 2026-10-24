@@ -1,7 +1,7 @@
 use super::*;
 
 fn distinct_status() -> ServerHeader {
-    ServerHeader::Status {
+    ServerHeader::Status(StatusPayload {
         num_keyframes: 1,
         num_splats: 2,
         train_iters_per_s: 5.5,
@@ -16,16 +16,18 @@ fn distinct_status() -> ServerHeader {
         throttle_ms: 11,
         adam_clamped: 12,
         sh_pruned: 13,
-        batch_ms: 14,
-        forward_ms: 15,
-        loss_ms: 16,
-        backward_ms: 17,
-        optimizer_ms: 18,
-        stats_ms: 19,
-        refine_ms: 20,
-        area_ms: 21,
-        hold_ms: 22,
-    }
+        step: StepPhases {
+            batch_ms: 14,
+            forward_ms: 15,
+            loss_ms: 16,
+            backward_ms: 17,
+            optimizer_ms: 18,
+            stats_ms: 19,
+            refine_ms: 20,
+            area_ms: 21,
+            hold_ms: 22,
+        },
+    })
 }
 
 #[test]

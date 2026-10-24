@@ -1,6 +1,7 @@
 use crate::config::GuideConfig;
 use crate::keyframe::DecodedKeyframe;
 use crate::mono::ScaleHistory;
+use crate::protocol::StepPhases;
 use brush_dataset::config::LoadDatasetConfig;
 use brush_dataset::scene::SceneView;
 use brush_dataset::scene_loader::SceneLoader;
@@ -14,7 +15,6 @@ use burn::tensor::Device;
 use clap::Parser;
 use glam::{UVec2, Vec3};
 use rand::SeedableRng;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -49,23 +49,7 @@ struct LoadArgs {
 /// With debug timing on, the step profile is logged every this many steps.
 pub const PROFILE_LOG_EVERY: u32 = 100;
 
-/// Cumulative milliseconds of the training step's phases since the model started. The phases up to `stats_ms`
-/// count only with `GuideConfig::profile_steps`; `refine_ms`, `area_ms` and `hold_ms` are always timed (wall time, no GPU sync added).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StepTotals {
-    pub batch_ms: u64,
-    pub forward_ms: u64,
-    pub loss_ms: u64,
-    pub backward_ms: u64,
-    pub optimizer_ms: u64,
-    pub stats_ms: u64,
-    pub refine_ms: u64,
-    /// Area and budget bookkeeping inside `LiveModel::refine`, apart from the trainer's own refine.
-    pub area_ms: u64,
-    pub hold_ms: u64,
-}
-
-/// Seconds behind [`StepTotals`] that are not refine.
+/// Seconds behind [`StepPhases`] that are not refine.
 #[derive(Clone, Copy, Debug, Default)]
 struct StepSeconds {
     batch: f64,
@@ -288,7 +272,7 @@ impl LiveModel {
     }
 
     /// Cumulative phase times since the model started. Takes the trainer's pending step profile first.
-    pub fn step_totals(&mut self) -> StepTotals {
+    pub fn step_totals(&mut self) -> StepPhases {
         if let Some(p) = self.trainer.as_mut().and_then(SplatTrainer::take_profile)
             && p.steps > 0
         {
@@ -296,7 +280,7 @@ impl LiveModel {
         }
         let ms = |s: f64| (s * 1e3) as u64;
         let s = &self.step_s;
-        StepTotals {
+        StepPhases {
             batch_ms: ms(s.batch),
             forward_ms: ms(s.forward),
             loss_ms: ms(s.loss),

@@ -257,7 +257,7 @@ fn oversized_payload_sizes_are_errors_not_panics() {
 
 #[test]
 fn status_header_round_trips_worker_times() {
-    let h = ServerHeader::Status {
+    let h = ServerHeader::Status(StatusPayload {
         num_keyframes: 3,
         num_splats: 10,
         train_iters_per_s: 5.0,
@@ -272,16 +272,8 @@ fn status_header_round_trips_worker_times() {
         throttle_ms: 400,
         adam_clamped: 7,
         sh_pruned: 3,
-        batch_ms: 0,
-        forward_ms: 0,
-        loss_ms: 0,
-        backward_ms: 0,
-        optimizer_ms: 0,
-        stats_ms: 0,
-        refine_ms: 0,
-        area_ms: 0,
-        hold_ms: 0,
-    };
+        step: StepPhases::default(),
+    });
     let frame = encode_frame(&h, &[]);
     let (back, rest): (ServerHeader, _) = decode_frame(&frame).unwrap();
     assert_eq!(back, h);
@@ -290,31 +282,20 @@ fn status_header_round_trips_worker_times() {
 
 #[test]
 fn status_step_fields_round_trip() {
-    let h = ServerHeader::Status {
+    let h = ServerHeader::Status(StatusPayload {
         num_keyframes: 3,
         num_splats: 10,
         train_iters_per_s: 5.0,
         last_score_ms: 12,
-        train_iters: 0,
-        train_ms: 0,
-        ingest_ms: 0,
-        preview_ms: 0,
-        voxel_ms: 0,
-        fisher_ms: 0,
-        uptime_ms: 0,
-        throttle_ms: 0,
-        adam_clamped: 0,
-        sh_pruned: 0,
-        batch_ms: 0,
-        forward_ms: 7,
-        loss_ms: 0,
-        backward_ms: 0,
-        optimizer_ms: 0,
-        stats_ms: 0,
-        refine_ms: 11,
-        area_ms: 5,
-        hold_ms: 3,
-    };
+        step: StepPhases {
+            forward_ms: 7,
+            refine_ms: 11,
+            area_ms: 5,
+            hold_ms: 3,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
     let frame = encode_frame(&h, &[]);
     let (back, _): (ServerHeader, _) = decode_frame(&frame).unwrap();
     assert_eq!(back, h);
@@ -323,10 +304,10 @@ fn status_step_fields_round_trip() {
     let mut frame = (json.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(json);
     let (h, _): (ServerHeader, _) = decode_frame(&frame).unwrap();
-    let ServerHeader::Status { batch_ms, forward_ms, loss_ms, backward_ms, optimizer_ms, stats_ms, refine_ms, area_ms, hold_ms, .. } = h else {
+    let ServerHeader::Status(status) = h else {
         panic!("not a status");
     };
-    assert_eq!([batch_ms, forward_ms, loss_ms, backward_ms, optimizer_ms, stats_ms, refine_ms, area_ms, hold_ms], [0; 9]);
+    assert_eq!(status.step, StepPhases::default());
 }
 
 #[test]
@@ -336,7 +317,7 @@ fn status_header_without_worker_times_decodes() {
     frame.extend_from_slice(json);
     let (h, _): (ServerHeader, _) = decode_frame(&frame).unwrap();
     match h {
-        ServerHeader::Status {
+        ServerHeader::Status(StatusPayload {
             train_iters,
             train_ms,
             ingest_ms,
@@ -348,7 +329,7 @@ fn status_header_without_worker_times_decodes() {
             adam_clamped,
             sh_pruned,
             ..
-        } => assert_eq!(
+        }) => assert_eq!(
             [
                 train_iters,
                 train_ms,
@@ -425,31 +406,13 @@ fn write_golden_fixtures() {
         (
             "status.bin",
             encode_frame(
-                &ServerHeader::Status {
+                &ServerHeader::Status(StatusPayload {
                     num_keyframes: 4,
                     num_splats: 1000,
                     train_iters_per_s: 55.5,
                     last_score_ms: 1200,
-                    train_iters: 0,
-                    train_ms: 0,
-                    ingest_ms: 0,
-                    preview_ms: 0,
-                    voxel_ms: 0,
-                    fisher_ms: 0,
-                    uptime_ms: 0,
-                    throttle_ms: 0,
-                    adam_clamped: 0,
-                    sh_pruned: 0,
-                    batch_ms: 0,
-                    forward_ms: 0,
-                    loss_ms: 0,
-                    backward_ms: 0,
-                    optimizer_ms: 0,
-                    stats_ms: 0,
-                    refine_ms: 0,
-                    area_ms: 0,
-                    hold_ms: 0,
-                },
+                    ..Default::default()
+                }),
                 &[],
             ),
         ),
@@ -521,4 +484,12 @@ fn confidence_without_depth_is_rejected() {
         split_keyframe_payload(&h, b"abc"),
         Err(ProtocolError::ConfidenceWithoutDepth)
     ));
+}
+
+#[test]
+fn mono_block_rejects_confidence_without_depth() {
+    let mut h = kf_header();
+    h.depth_confidence = true;
+    h.depth_size = None;
+    assert!(matches!(mono_block(&h, b"abc"), Err(ProtocolError::ConfidenceWithoutDepth)));
 }

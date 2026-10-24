@@ -42,7 +42,7 @@ fn keyframes_in_acks_status_scores_pause_and_splat_out() {
         assert_eq!(unsafe { bge_push(e, f.as_ptr(), f.len()) }, 0);
     }
     wait_for("three acks", 5, |fs| fs.iter().filter(|h| matches!(h, ServerHeader::Ack { .. })).count() == 3);
-    wait_for("a status", 2, |fs| fs.iter().any(|h| matches!(h, ServerHeader::Status { .. })));
+    wait_for("a status", 2, |fs| fs.iter().any(|h| matches!(h, ServerHeader::Status(_))));
     wait_for("a score set", 60, |fs| fs.iter().any(|h| matches!(h, ServerHeader::ScoreSet { .. })));
 
     unsafe { bge_pause(e) };
