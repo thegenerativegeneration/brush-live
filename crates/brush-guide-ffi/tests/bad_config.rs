@@ -28,3 +28,17 @@ fn a_zero_min_cell_opacity_is_reported_and_no_engine_starts() {
     };
     assert_eq!(message, "engine config: min_cell_opacity must be finite and above 0, got 0");
 }
+
+#[test]
+fn a_missing_session_directory_is_reported_and_no_engine_starts() {
+    let frames: Frames = Mutex::new(Vec::new());
+    let config = CString::new("{}").unwrap();
+    let ctx = &frames as *const Frames as *mut c_void;
+    let e = unsafe { bge_new(config.as_ptr(), std::ptr::null(), collect_into, ctx) };
+    assert!(e.is_null());
+    let frames = frames.lock().unwrap();
+    let [ServerHeader::Error { message }] = &frames[..] else {
+        panic!("expected one Error frame, got {frames:?}");
+    };
+    assert_eq!(message, "engine: session directory missing");
+}

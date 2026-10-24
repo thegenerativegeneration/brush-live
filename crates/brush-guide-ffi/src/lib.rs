@@ -163,6 +163,36 @@ fn parse_config(json: &str) -> Result<GuideConfig, String> {
     Ok(config)
 }
 
+/// Why `init` failed; `Display` is the text `bge_new` sends as an `Error` frame.
+enum InitError {
+    Config(String),
+    Runtime(String),
+    NoGpu,
+}
+
+impl std::fmt::Display for InitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config(e) => write!(f, "engine config: {e}"),
+            Self::Runtime(e) => write!(f, "engine runtime: {e}"),
+            Self::NoGpu => f.write_str("engine: no Metal GPU adapter"),
+        }
+    }
+}
+
+/// Parses the config, applies the autotune keys, then builds the runtime and the process-wide device, in that order
+/// (cubecl reads its config at the first GPU use).
+fn init(json: &str) -> Result<(GuideConfig, tokio::runtime::Runtime, burn::tensor::Device), InitError> {
+    let config = parse_config(json).map_err(InitError::Config)?;
+    set_autotune(json);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| InitError::Runtime(e.to_string()))?;
+    let device = device(&runtime).ok_or(InitError::NoGpu)?;
+    Ok((config, runtime, device))
+}
+
 unsafe fn str_arg<'a>(p: *const c_char) -> Option<&'a str> {
     if p.is_null() {
         return None;
@@ -185,29 +215,17 @@ pub unsafe extern "C" fn bge_new(
 ) -> *mut BgeEngine {
     let out = Arc::new(Out { f: out, ctx });
     let json = unsafe { str_arg(config_json) }.unwrap_or("");
-    let config = match parse_config(json) {
-        Ok(c) => c,
-        Err(e) => {
-            out.error(format!("engine config: {e}"));
-            return std::ptr::null_mut();
-        }
-    };
     let Some(dir) = (unsafe { str_arg(session_dir) }) else {
         out.error("engine: session directory missing");
         return std::ptr::null_mut();
     };
     record_panics(PathBuf::from(dir).join("engine-panic.txt"));
-    set_autotune(json);
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
-        Ok(r) => r,
+    let (config, runtime, device) = match init(json) {
+        Ok(parts) => parts,
         Err(e) => {
-            out.error(format!("engine runtime: {e}"));
+            out.error(e.to_string());
             return std::ptr::null_mut();
         }
-    };
-    let Some(device) = device(&runtime) else {
-        out.error("engine: no Metal GPU adapter");
-        return std::ptr::null_mut();
     };
     let warmup = config.warmup.then(|| {
         let (pause, pause_rx) = watch::channel(false);
@@ -349,19 +367,13 @@ pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_warm_up(config_json: *const c_char) -> i32 {
     let json = unsafe { str_arg(config_json) }.unwrap_or("");
-    let config = match parse_config(json) {
-        Ok(c) => c,
-        Err(e) => {
+    let (config, runtime, device) = match init(json) {
+        Ok(parts) => parts,
+        Err(InitError::Config(e)) => {
             log::warn!("warm-up config: {e}");
             return 1;
         }
-    };
-    set_autotune(json);
-    let Ok(runtime) = tokio::runtime::Builder::new_multi_thread().enable_all().build() else {
-        return 1;
-    };
-    let Some(device) = device(&runtime) else {
-        return 1;
+        Err(_) => return 1,
     };
     let warmup = Warmup::spawn_pausable(config, device, prewarm::flag());
     let registration = prewarm::register(&warmup);
