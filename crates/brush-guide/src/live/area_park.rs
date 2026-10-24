@@ -162,12 +162,12 @@ impl LiveModel {
 
     /// Moves the resident rows lying in the far parked tiles among `keys` (keys not parked are skipped) into their
     /// files: per tile, the file's rows take the pose corrections since the park (as a restore would), the drifted
-    /// rows join them, every slot records its current pose (so the merge resets the tile's pose baseline, spec D1),
-    /// and the file is written as the next version; the tile stays parked and gets no junction. A tile whose views
-    /// disagree (as on restore), whose file cannot be read or holds another SH degree is dropped
-    /// ([`Self::drop_parked`]) and the drifted rows stay resident; a failed write keeps them out too and turns parking
-    /// off. Rows kept out go back to the trainer. Logged per tile and as one park event. No-op when every resident row
-    /// would go.
+    /// rows join them, every slot records its current pose (so the merge resets the tile's pose baseline: the next
+    /// restore replays and checks only the corrections after it), and the file is written as the next version; the
+    /// tile stays parked and gets no junction. A tile whose views disagree (as on restore), whose file cannot be read
+    /// or holds another SH degree is dropped ([`Self::drop_parked`]) and the drifted rows stay resident; a failed
+    /// write keeps them out too and turns parking off. Rows kept out go back to the trainer. Logged per tile and as
+    /// one park event. No-op when every resident row would go.
     async fn merge_into_parked(&mut self, splats: Splats, keys: &[TileKey]) -> Splats {
         let (Some(area), Some(dir)) = (self.area.as_ref(), self.tiles_dir.clone()) else {
             return splats;

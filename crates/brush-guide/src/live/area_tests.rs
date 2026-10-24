@@ -125,7 +125,7 @@ async fn loaders_serve_only_area_views() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Without `enable_area` (or with radius 0) every view trains, as before.
+/// Without `enable_area` (or with radius 0) every view trains.
 #[tokio::test]
 async fn area_off_trains_every_view() {
     let dir = tmp("views-off");

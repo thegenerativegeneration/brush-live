@@ -49,8 +49,6 @@ struct LoadArgs {
     load: LoadDatasetConfig,
 }
 
-/// Splats trained incrementally as keyframes arrive. Splats are kept on the
-/// inner (non-autodiff) device between steps.
 /// One training step's mean learning rate and the scene size that scaled it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct StepLr {
@@ -59,6 +57,8 @@ pub struct StepLr {
     pub position_scale_m: f32,
 }
 
+/// Splats trained incrementally as keyframes arrive. Splats are kept on the
+/// inner (non-autodiff) device between steps.
 pub struct LiveModel {
     config: GuideConfig,
     device: Device,

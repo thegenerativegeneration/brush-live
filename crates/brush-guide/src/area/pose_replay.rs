@@ -13,7 +13,7 @@ use std::collections::HashMap;
 pub type CameraPose = (Vec3, Quat);
 
 /// The share of a tile's rows [`move_spread`] may leave out: its smallest view groups, together at most this share,
-/// do not decide (user decision D1).
+/// do not decide whether the tile is dropped.
 pub const MIN_SLOT_SHARE: f32 = 0.05;
 
 /// Per recorded slot with a current pose: the world transform taking the camera at park time onto the current
@@ -52,11 +52,11 @@ fn parts(moves: &[(u32, Affine3A)]) -> HashMap<u32, (Quat, Vec3)> {
         .collect()
 }
 
-/// How far apart the tile's views carry it (user decision D1): the tile's centroid moved by each view group (one per
-/// moved slot; rows without an origin or whose slot has no move form one unmoved group), the largest distance
-/// between two moved centroids, 0 with fewer than two groups. The smallest groups are left out while together they
-/// hold at most [`MIN_SLOT_SHARE`] of the rows, so a few stray rows do not decide but many small groups that
-/// disagree still do.
+/// How far apart the tile's views carry it; a tile beyond `area_restore_inconsistency_m` is dropped, since its views
+/// disagree about where it is. The spread is the tile's centroid moved by each view group (one per moved slot; rows
+/// without an origin or whose slot has no move form one unmoved group), the largest distance between two moved
+/// centroids, 0 with fewer than two groups. The smallest groups are left out while together they hold at most
+/// [`MIN_SLOT_SHARE`] of the rows, so a few stray rows do not decide but many small groups that disagree still do.
 pub fn move_spread(rows: &SplatRows, moves: &[(u32, Affine3A)]) -> f32 {
     let n = rows.len();
     if n == 0 {
@@ -112,7 +112,8 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 /// Moves every row whose origin slot has a move as `SplatOrigin::move_splats` does on the GPU: mean `q_Δ·μ + t_Δ`,
 /// rotation `q_Δ ⊗ q` (stored w x y z, its length kept). Scales, colours, opacities, the floor and the eviction
-/// state stay; SH bands above 0 are not rotated (design rulings R2, R3). Rows without an origin or a move stay.
+/// state stay; SH bands above 0 are not rotated (corrections turn by at most about 6° on the device; Brush has no SH
+/// rotation). Rows without an origin or a move stay.
 pub fn apply_moves(rows: &mut SplatRows, moves: &[(u32, Affine3A)]) {
     let parts = parts(moves);
     if parts.is_empty() {

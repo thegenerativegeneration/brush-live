@@ -1,6 +1,6 @@
 //! `train_radius_m`: splats farther than the radius from the training camera get no update in a step, neither their
 //! parameters nor their Adam moments nor position noise, and until a step trains them again refine neither decays
-//! their opacity nor densifies them; splats within it, and every splat with the radius off, step and refine as before.
+//! their opacity nor densifies them; splats within it, and every splat with the radius off, step and refine as usual.
 
 use super::*;
 use brush_dataset::scene::{SceneBatch, view_to_packed_data};

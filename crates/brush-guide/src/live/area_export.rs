@@ -1,7 +1,6 @@
 //! The final export: the whole walk in one `splat.ply`, the resident splats plus every parked tile (moved by the
 //! pose corrections made since it parked, floors baked), streamed tile by tile so a long walk never sits in memory
-//! at once. Without parked tiles the file is `brush_serde::splat_to_ply` of the trainer's splats, as before area
-//! training.
+//! at once. Without parked tiles the file is `brush_serde::splat_to_ply` of the trainer's splats.
 
 use super::LiveModel;
 use crate::area::{PlyStreamWriter, TileKey, group_rows};

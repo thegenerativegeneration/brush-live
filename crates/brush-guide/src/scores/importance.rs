@@ -1,35 +1,6 @@
-//! Per-Gaussian importance for eviction, from the score pass's 6×6 Fisher.
-//!
-//! `I = tr(D Rᵀ F_μμ R D + F_ss) / n`
-//!
-//! - `F_μμ`, `F_ss`: the position and log-scale blocks of the Gaussian's
-//!   Fisher summed over the round's views (each view weighted by its
-//!   sampling weight).
-//! - `R`, `D = diag(s)`: the Gaussian's rotation and scales. `D Rᵀ F_μμ R D`
-//!   is the position Fisher in the Gaussian's own axes, in units of its own
-//!   extent, so a shift by one standard deviation weighs like a log-scale
-//!   change of 1. Without it the position block (1/m²) would dwarf the
-//!   unitless log-scale block and favour tiny Gaussians.
-//! - `n`: the round's weighted count of views in which the Gaussian has a
-//!   non-zero Fisher trace (`PassOutput::weight`).
-//!
-//! `I` is the mean, over the views that observe the Gaussian, of how much the
-//! render changes when the Gaussian moves or resizes by its own extent: a
-//! per-observation PUP-style sensitivity. Summed Fisher (PUP's log det of
-//! `F`) grows with the number of views, so a well-trained old room would
-//! outrank a new room that only a few keyframes have seen, and eviction
-//! would take the new room's Gaussians first. Dividing by `n` removes that
-//! count: a Gaussian seen once that matters in that view outranks one seen in
-//! a hundred views that barely matters in any. The trace replaces PUP's log
-//! det because one Rademacher probe per view gives a rank-1 contribution, so a
-//! Gaussian seen in fewer than six views has det 0.
-//!
-//! Gaussians no sampled view observes this round get NaN, which the trainer
-//! reads as "keep the previous score" (0 if never scored). A round samples
-//! the newest views plus a stratified sample of all, so the score does not
-//! decay while a room is out of sight, and a Gaussian missed by one round's
-//! sample keeps its last value. The trainer's age and view-cone protection
-//! keep new Gaussians out of eviction until they have been scored.
+//! Per-Gaussian Fisher importance `I = tr(D Rᵀ F_μμ R D + F_ss) / n` from the score pass's 6×6 Fisher. The offline
+//! Fisher pass at finish writes it to `importance.json` next to the trainer's eviction importance, for comparison;
+//! the terms and the reasons for them are in the capture-guidance docs, "How it works" → "Splat importance".
 
 use super::pass::PassOutput;
 use glam::{Mat3, Quat};

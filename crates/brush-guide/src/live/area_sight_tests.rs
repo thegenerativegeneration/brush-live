@@ -34,7 +34,7 @@ async fn a_new_keyframe_joins_the_floor_cameras() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// With area training off every view's camera floors the splats and orients the score round, as before.
+/// With area training off every view's camera floors the splats and orients the score round.
 #[tokio::test]
 async fn area_off_takes_every_view() {
     let dir = tmp("sight-off");

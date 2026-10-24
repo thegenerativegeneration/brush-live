@@ -114,7 +114,7 @@ async fn the_mask_follows_the_active_set() {
 
 /// Keyframes 0 (faces the wall), 1 (same spot, turned around), 2 (8 m along, faces its own wall), 3 (14 m back,
 /// beyond the 8 m view) are followed by 4, which faces the wall again: the training views are 0 and 4. With
-/// `area_freeze` left or none the views within the 2 m radius train as before (0, 1 and 4) and nothing is active.
+/// `area_freeze` left or none the views within the 2 m radius train (0, 1 and 4) and nothing is active.
 #[tokio::test]
 async fn the_training_views_see_an_active_tile() {
     for freeze in [AreaFreeze::Inactive, AreaFreeze::Left, AreaFreeze::Off] {
@@ -243,7 +243,7 @@ async fn a_restored_tile_outside_the_active_set_is_held_at_once() {
     std::fs::remove_dir_all(dir).ok();
 }
 
-/// Parking and restoring work as before: the walker leaves the origin (it parks) and comes back (it is restored and,
+/// Parking and restoring work with active tiles: the walker leaves the origin (it parks) and comes back (it is restored and,
 /// near the camera, active again).
 #[tokio::test]
 async fn parked_tiles_come_back_and_become_active() {

@@ -12,11 +12,9 @@ pub(crate) const MAX_NORMALIZED_STEP: f32 = 32.0;
 ///
 /// Hand-rolled rather than built on burn's `Adam`, which has neither the
 /// per-component LR scaling nor the second-moment reduction below. The
-/// trainer also edits momentum tensors in place during refine (split/prune)
-/// and swaps the transforms LR scaling every step; burn's low-level
-/// `Optimizer` trait does now hand back live `Tensor` state rather than only
-/// serialized records, so that part is no longer a blocker — the two missing
-/// behaviours are what keep this separate.
+/// trainer's other needs, editing momentum tensors in place during refine
+/// (split/prune) and swapping the transforms LR scaling every step, burn's
+/// low-level `Optimizer` trait would meet: it hands back live `Tensor` state.
 #[derive(Clone)]
 pub(crate) struct AdamScaled {
     beta_1: f32,
@@ -295,10 +293,10 @@ mod tests {
         assert!(moved <= bound * 1.001, "moved {moved}, bound {bound}");
     }
 
-    /// Repro of a burn fusion bug (issue #78): tensors reshaped and then row-selected in one transaction, as the
-    /// trainer's row read first registered the moments, read the reduced second moment back shifted by one row, the
-    /// last value taken from another tensor. Fails as of 2026-10-16 (alone, in a fresh process); one reduce and select
-    /// on its own reads back correctly. The row read now selects before it reshapes.
+    /// Repro of a burn fusion bug (issue #78): tensors reshaped and then row-selected in one transaction read the
+    /// reduced second moment back shifted by one row, the last value taken from another tensor. Fails as of 2026-10-16
+    /// (alone, in a fresh process); one reduce and select on its own reads back correctly. The trainer's row read
+    /// selects before it reshapes, which avoids the bug.
     #[tokio::test]
     #[ignore = "fails: burn fusion row shift (repro)"]
     async fn a_reduced_second_moment_selects_its_own_rows() {

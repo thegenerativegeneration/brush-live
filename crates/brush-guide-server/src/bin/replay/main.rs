@@ -104,7 +104,7 @@ struct Args {
     #[arg(long, value_delimiter = ',', value_parser = order::parse_frame_range)]
     drop_frames: Vec<std::ops::RangeInclusive<usize>>,
     /// Lockstep: send the k-th keyframe (0-based, in send order) only once the server has trained round(k · K)
-    /// steps, K = this value, instead of on the --rate schedule. The steps per keyframe then no longer depend on
+    /// steps, K = this value, instead of on the --rate schedule. The steps per keyframe then do not depend on
     /// how fast the machine trains. The server must run with `status_every_step` (status after every step).
     #[arg(long, value_parser = positive_f32)]
     steps_per_keyframe: Option<f32>,

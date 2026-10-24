@@ -3,9 +3,8 @@ use rand::{RngExt as _, SeedableRng};
 
 /// A seeded scene: flat patches with jittered axes, round blobs, faint and
 /// broken Gaussians, a spread of information so the percentiles matter.
-/// Every Gaussian carries information: voxels without any are where the
-/// legacy round and the split path differ on purpose (they stay uninformed
-/// or keep earlier bytes instead of mapping to 255).
+/// Every Gaussian carries information, so every voxel it fills is scored
+/// (a voxel without any keeps its earlier bytes or stays uninformed).
 fn fixture(seed: u64, n: usize) -> Vec<GaussianScore> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
     (0..n)

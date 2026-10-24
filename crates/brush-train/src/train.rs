@@ -521,7 +521,7 @@ impl SplatTrainer {
     /// existing floor values are reused as-is and extended for the new
     /// splats via [`compute_min_scale`], so the filter stays live between
     /// refines instead of silently switching off until the next one.
-    /// Otherwise the (absent) floor is a no-op as before. `new`'s own floor,
+    /// Without a floor on `splats` none is added. `new`'s own floor,
     /// if any, is always baked into its raw params before concatenation.
     pub fn append_splats(&mut self, splats: Splats, new: Splats) -> Splats {
         self.append_tagged(splats, new, None)
@@ -681,7 +681,7 @@ impl SplatTrainer {
             // With the SH background on, the render must not bake in any flat
             // colour — the globe supplies it per pixel below instead — so the
             // render background is forced to zero. Off, this is exactly
-            // `background`, the existing path, unchanged.
+            // `background`.
             let render_bg = if self.sh_background.is_some() {
                 glam::Vec3::ZERO
             } else {
@@ -1050,9 +1050,9 @@ impl SplatTrainer {
         }
 
         // Force-split splats that are too big on screen (every refine). Rather
-        // than killing them (the old `kill_at_screen_size`), we split them and
-        // shrink the children down to `split_at_screen_size` on screen — see
-        // `refine_splats`. Capped by the remaining `max_splats` budget.
+        // than killing them, we split them and shrink the children down to
+        // `split_at_screen_size` on screen — see `refine_splats`. Capped by
+        // the remaining `max_splats` budget.
         let pre_oversized = split_inds.len();
         if self.config.split_at_screen_size > 0.0 {
             let oversized = refiner.above_screen_size(self.config.split_at_screen_size);

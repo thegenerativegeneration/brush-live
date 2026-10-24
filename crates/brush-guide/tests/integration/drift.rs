@@ -1,4 +1,4 @@
-//! Plan D's Mac check of engine pose updates: a wall captured by six keyframes, two of which report a pose off by a
+//! Mac check of engine pose updates: a wall captured by six keyframes, two of which report a pose off by a
 //! rigid drift (ORB-SLAM3 drift: 5° of yaw and 0.3 m) until a correction arrives. Measured at the true poses of those
 //! two views, and right after the correction on the splats themselves.
 

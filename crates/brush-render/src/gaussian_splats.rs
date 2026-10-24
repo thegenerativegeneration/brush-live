@@ -21,9 +21,8 @@ pub enum SplatRenderMode {
     Mip,
 }
 
-/// Forward/backward rasterizer mode. Replaces the old `bwd_info: bool` so the
-/// test-only smooth-cutoff variant rides along on the same enum that already
-/// switches in/out the backward bookkeeping.
+/// Forward/backward rasterizer mode: switches the backward bookkeeping in and
+/// out, and carries the test-only smooth-cutoff variant.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub enum RasterPass {
     /// Forward only — inference / eval. No backward bookkeeping, hard

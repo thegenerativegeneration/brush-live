@@ -114,7 +114,7 @@ pub fn seed_points(input: &SeedInput) -> Seeds {
                 // itself beyond FEATURE_BACKFILL_MIN_DEPTH_M: nearer
                 // masked pixels are usually reflective/dark surfaces
                 // LiDAR flagged, where a nearby feature carries the
-                // wrong depth, so those are still skipped.
+                // wrong depth, so those are skipped.
                 d.sample_uv(uv.x, uv.y)
                     .or_else(|| feature_depth(px).filter(|fd| *fd > FEATURE_BACKFILL_MIN_DEPTH_M))
             } else {
@@ -373,9 +373,8 @@ mod tests {
         let rgb = image::RgbImage::from_pixel(400, 400, image::Rgb([0, 0, 0]));
         // Projects to alpha-space pixel (0, 0); nearest grid center is
         // (1, 1), a distance of sqrt(2) alpha px — far past the ~0.24 px
-        // radius (24 rgb px scaled by 4/400). Previously this would have
-        // fallen through to the median-depth fallback and seeded every
-        // uncovered pixel anyway.
+        // radius (24 rgb px scaled by 4/400). There is no median-depth
+        // fallback, so no uncovered pixel is seeded.
         let pts = [Vec3::new(-3.0, -3.0, 3.0)];
         let seeds = seed_points(&input(&[0.0; 16], &rgb, None, &pts));
         assert!(

@@ -110,7 +110,7 @@ mod tests {
         (dirs.iter().map(|d| d.normalize()).sum(), dirs.len() as f32)
     }
 
-    /// Coverage formula table (spec: the phone's `CoverageScore` port must match): unseen is zero, many views from
+    /// Coverage formula table (the phone's `CoverageScore` port must match it): unseen is zero, many views from
     /// one direction stay low, a wide arc with enough views saturates, and few views scale down with a low-res
     /// penalty.
     #[test]
