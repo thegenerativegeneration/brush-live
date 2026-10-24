@@ -60,7 +60,15 @@ impl SplatTrainer {
         // Held rows no step ever trained (raw seeds on ground outside the active tiles) do not block the budget.
         let untrained_held = held.as_ref().map(|h| h.clone().bool_and(life.trained.clone().lower_elem(0.5)));
         let (held, untrained_held) = (held.as_ref(), untrained_held.as_ref());
-        let pick = Pick { life, splats, protect: ev.protect, config: &ev.config, means: &means, held, untrained_held };
+        let pick = Pick {
+            life,
+            splats,
+            protect: ev.protect,
+            config: &ev.config,
+            means: &means,
+            held,
+            untrained_held,
+        };
         let (mask, mut picked) = pick.victims(dead.clone(), budget, want, &[]).await;
         let (mask, fell_back) = pick.widen(&widening_tiers(budget), &dead, want, mask, &mut picked).await;
         picked.sort_unstable();
@@ -78,7 +86,11 @@ impl SplatTrainer {
     /// Adds to the `dead` prune mask, per group of `budget` over its `max_rows`, the least important rows not yet in
     /// it (by eviction importance) down to that count. Needs eviction state; without it nothing is added. Returns the
     /// mask and the rows added, ascending.
-    pub(super) async fn evict_over_cap(&self, dead: Tensor<1, Bool>, budget: &RowBudget) -> (Tensor<1, Bool>, Vec<usize>) {
+    pub(super) async fn evict_over_cap(
+        &self,
+        dead: Tensor<1, Bool>,
+        budget: &RowBudget,
+    ) -> (Tensor<1, Bool>, Vec<usize>) {
         let Some(life) = self.rows.life.as_ref().filter(|_| self.evict.is_some()) else {
             return (dead, Vec::new());
         };

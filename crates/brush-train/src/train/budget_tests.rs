@@ -37,7 +37,8 @@ fn without_a_limited_fallback_nothing_widens() {
 /// An `Unlimited` fallback widens once, to no limit.
 #[test]
 fn an_unlimited_fallback_widens_once() {
-    let tiers = super::refine_evict::widening_tiers(Some(&RowBudget { fallback: Some(EvictionRelax::Unlimited), ..limited() }));
+    let lifts = RowBudget { fallback: Some(EvictionRelax::Unlimited), ..limited() };
+    let tiers = super::refine_evict::widening_tiers(Some(&lifts));
     assert_eq!(tiers.len(), 1);
     assert_eq!(tiers[0].quota(), None);
     assert!(!tiers[0].evict_held);
@@ -46,12 +47,13 @@ fn an_unlimited_fallback_widens_once() {
 /// A `Groups` fallback opens its groups and held rows, then lifts the limit.
 #[test]
 fn a_groups_fallback_widens_then_lifts_the_limit() {
-    let tiers = super::refine_evict::widening_tiers(Some(&RowBudget { fallback: Some(EvictionRelax::Groups(vec![1])), ..limited() }));
+    let opens = RowBudget { fallback: Some(EvictionRelax::Groups(vec![1])), ..limited() };
+    let tiers = super::refine_evict::widening_tiers(Some(&opens));
     assert_eq!(tiers.len(), 2);
     assert_eq!(tiers[0].quota(), Some(vec![2, u32::MAX]));
     assert!(tiers[0].evict_held);
     assert_eq!(tiers[1].quota(), None);
-    assert!(tiers[1].evict_held);
+    assert!(!tiers[1].limit_eviction);
 }
 
 /// The importance of the splats left after a refine, in order.
@@ -268,7 +270,7 @@ async fn a_fallback_that_falls_short_ends_unlimited() {
     let flags: Vec<bool> = (0..N).map(|i| (2..6).contains(&i)).collect();
     trainer.set_frozen_rows(Some(Tensor::<1, Bool>::from_data(TensorData::new(flags, [N]), &s.device().inner())));
     trainer.note_seed_shortfall(1);
-    trainer.set_row_budget(Some(halves(group(u32::MAX, false, 2), group(u32::MAX, false, 0), true)));
+    trainer.set_row_budget(Some(limited()));
     trainer.set_eviction_fallback(EvictionRelax::Groups(vec![]));
     let (_, stats) = trainer.refine(1, s).await;
     let kept = kept_importance(&trainer).await;
