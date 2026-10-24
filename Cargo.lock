@@ -1090,6 +1090,7 @@ dependencies = [
  "brush-train",
  "brush-vfs",
  "burn",
+ "burn-wgpu",
  "clap",
  "fast-surface-nets",
  "glam 0.30.10",

@@ -8,8 +8,8 @@ use brush_guide::session::{GuideSession, Pushed, forward_frames};
 use brush_guide::warmup::Warmup;
 use burn::cubecl::config::autotune::AutotuneLevel;
 use burn::cubecl::config::{CubeClRuntimeConfig, RuntimeConfig};
-use burn_wgpu::graphics::Metal;
-use burn_wgpu::{MemoryConfiguration, RuntimeOptions, WgpuDevice};
+use brush_guide::gpu::{Metal, init_device};
+use burn_wgpu::WgpuDevice;
 use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,32 +69,24 @@ impl WarmupControl {
     }
 }
 
-/// Sets up wgpu with the Metal graphics API once per process, and returns
-/// the autodiff device. `AutoGraphicsApi` would ask for Vulkan on iOS, so a
-/// failed setup is retried, never skipped. `None` if there is no GPU adapter.
 /// Kernels per Metal command buffer. iOS aborts a foreground app's command
 /// buffers that hold up display rendering (kIOGPUCommandBufferCallbackError
 /// ImpactingInteractivity); short buffers let RealityKit's frames interleave.
 const GPU_TASKS_PER_SUBMIT: usize = 8;
 
+/// Sets up wgpu with the Metal graphics API once per process, and returns
+/// the autodiff device. `AutoGraphicsApi` would ask for Vulkan on iOS, so a
+/// failed setup is retried, never skipped. `None` if there is no GPU adapter.
 fn device(runtime: &tokio::runtime::Runtime) -> Option<burn::tensor::Device> {
     static READY: Mutex<bool> = Mutex::new(false);
     let mut ready = READY.lock().unwrap_or_else(PoisonError::into_inner);
-    if !*ready {
-        let init = async {
-            burn_wgpu::init_setup_async::<Metal>(
-                &WgpuDevice::default(),
-                RuntimeOptions {
-                    tasks_max: GPU_TASKS_PER_SUBMIT,
-                    memory_config: MemoryConfiguration::ExclusivePages,
-                },
-            )
-            .await;
-        };
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(init))).ok()?;
-        *ready = true;
+    if *ready {
+        return Some(burn::tensor::Device::from(WgpuDevice::default()).autodiff());
     }
-    Some(burn::tensor::Device::from(WgpuDevice::default()).autodiff())
+    let init = init_device::<Metal>(GPU_TASKS_PER_SUBMIT);
+    let device = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(init))).ok()?;
+    *ready = true;
+    Some(device)
 }
 
 /// Appends every panic's message and backtrace to `path` (on iOS, stderr is

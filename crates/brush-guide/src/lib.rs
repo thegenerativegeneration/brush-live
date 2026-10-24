@@ -3,6 +3,7 @@
 
 pub mod area;
 pub mod config;
+pub mod gpu;
 pub mod keyframe;
 pub mod live;
 pub mod mono;

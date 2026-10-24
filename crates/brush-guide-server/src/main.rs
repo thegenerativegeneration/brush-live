@@ -1,4 +1,5 @@
 use brush_guide::config::GuideConfig;
+use brush_guide::gpu::AutoGraphicsApi;
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -58,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     };
     args.apply_budget(&mut config);
     config.validate().map_err(|e| anyhow::anyhow!("config: {e}"))?;
-    let device = brush_process::burn_init_setup().await.autodiff();
+    let device = brush_guide::gpu::init_device::<AutoGraphicsApi>(64).await;
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await?;
     log::info!("listening on {}", listener.local_addr()?);
     let mdns_guard = if args.no_mdns {

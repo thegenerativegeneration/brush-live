@@ -14,6 +14,7 @@ brush-cube.path = "../brush-cube"
 brush-async.path = "../brush-async"
 lpips.path = "../lpips"
 clap.workspace = true
+burn-wgpu.workspace = true
 burn = { workspace = true, features = ["autodiff"] }
 glam.workspace = true
 image = { workspace = true, features = ["jpeg"] }
