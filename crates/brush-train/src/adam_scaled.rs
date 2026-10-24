@@ -11,10 +11,10 @@ pub(crate) const MAX_NORMALIZED_STEP: f32 = 32.0;
 /// and per-component learning-rate scaling (via [`AdamState::scaling`]).
 ///
 /// Hand-rolled rather than built on burn's `Adam`, which has neither the
-/// per-component LR scaling nor the second-moment reduction below. The
-/// trainer's other needs, editing momentum tensors in place during refine
-/// (split/prune) and swapping the transforms LR scaling every step, burn's
-/// low-level `Optimizer` trait would meet: it hands back live `Tensor` state.
+/// per-component LR scaling nor the second-moment reduction below. burn's
+/// low-level `Optimizer` trait would cover the trainer's other needs (editing
+/// momentum tensors in place during refine, swapping the transforms LR scaling
+/// every step), since it hands back live `Tensor` state.
 #[derive(Clone)]
 pub(crate) struct AdamScaled {
     beta_1: f32,

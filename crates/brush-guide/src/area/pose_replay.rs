@@ -112,8 +112,8 @@ fn quat_mul(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
 
 /// Moves every row whose origin slot has a move as `SplatOrigin::move_splats` does on the GPU: mean `q_Δ·μ + t_Δ`,
 /// rotation `q_Δ ⊗ q` (stored w x y z, its length kept). Scales, colours, opacities, the floor and the eviction
-/// state stay; SH bands above 0 are not rotated (corrections turn by at most about 6° on the device; Brush has no SH
-/// rotation). Rows without an origin or a move stay.
+/// state stay; SH bands above 0 are not rotated (corrections turned by at most about 6° in the 2026-10 device
+/// captures; Brush has no SH rotation). Rows without an origin or a move stay.
 pub fn apply_moves(rows: &mut SplatRows, moves: &[(u32, Affine3A)]) {
     let parts = parts(moves);
     if parts.is_empty() {

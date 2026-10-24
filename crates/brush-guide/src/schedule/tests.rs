@@ -1,6 +1,6 @@
 use super::*;
 
-/// Ruling 42.3: the interval counts start-to-start, and a budget-sized round stretches it.
+/// The interval counts start-to-start, and a budget-sized round stretches it.
 #[test]
 fn cadence_counts_start_to_start_and_budget_stretches_long_rounds() {
     let mut c = Cadence::new(0.25, 2.0);

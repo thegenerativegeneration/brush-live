@@ -61,9 +61,9 @@ mod tests {
         (0..6).map(|k| f[k * 6 + k]).sum()
     }
 
-    /// Ruling 37: per-observation normalisation. Summed over views, a weak but often-observed Gaussian can look
-    /// more important than a strongly observed one; per observation it does not, and the same per-view sensitivity
-    /// scores the same regardless of how many views contributed.
+    /// Per-observation normalisation. Summed over views, a weak but often-observed Gaussian can look more important
+    /// than a strongly observed one; per observation it does not, and the same per-view sensitivity scores the same
+    /// regardless of how many views contributed.
     #[test]
     fn importance_is_normalised_per_observation() {
         let scale = [0.05; 3];

@@ -85,8 +85,9 @@ impl SplatOrigin {
 
     /// Moves every splat seeded by a view in `moves` by that view's rigid correction: mean `Δ·μ`, rotation
     /// `q_Δ ⊗ q`. Scales, colours, opacities, the parameter ids and the Mip floor are kept; SH bands above 0 are
-    /// not rotated (corrections turn by at most about 6° on the device; Brush has no SH rotation) and optimizer
-    /// moments stay as they are (Adam's moments decay within tens of steps).
+    /// not rotated (corrections turned by at most about 6° in the 2026-10 device captures; Brush has no SH rotation)
+    /// and optimizer moments stay as they are (the first moment decays within tens of steps; the second holds
+    /// per-component magnitudes a small turn barely changes).
     pub(crate) fn move_splats(&self, mut splats: Splats, moves: &[(u32, Affine3A)]) -> Splats {
         assert_eq!(
             self.len(),
