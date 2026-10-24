@@ -1,5 +1,7 @@
 mod cells;
 #[cfg(test)]
+mod status_tests;
+#[cfg(test)]
 mod tests;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};

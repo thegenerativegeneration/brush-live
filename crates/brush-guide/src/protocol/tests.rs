@@ -511,3 +511,14 @@ fn wire_frame_number_takes_bin_files_only() {
     assert_eq!(super::wire_frame_number(Path::new("wire/42.farmono")), None);
     assert_eq!(super::wire_frame_number(Path::new("wire/x.bin")), None);
 }
+
+#[test]
+fn confidence_without_depth_is_rejected() {
+    let mut h = kf_header();
+    h.depth_confidence = true;
+    h.depth_size = None;
+    assert!(matches!(
+        split_keyframe_payload(&h, b"abc"),
+        Err(ProtocolError::ConfidenceWithoutDepth)
+    ));
+}
