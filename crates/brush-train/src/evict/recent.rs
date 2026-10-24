@@ -1,4 +1,4 @@
-use super::*;
+use super::{MIN_CELL_SEEDS, cell_of};
 
 /// Cells newly observed by recent keyframes (see the module docs).
 #[derive(Default)]

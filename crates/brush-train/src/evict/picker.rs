@@ -146,7 +146,7 @@ pub(crate) async fn read_bool(t: Tensor<1, Bool>) -> Vec<bool> {
 }
 
 /// Up to `count` indices in ascending `scores` order, skipping infinite
-/// (ineligible) ones and those whose [`EVICT_CELL_M`] cell (by the flat xyz
+/// (ineligible) ones and those whose [`super::EVICT_CELL_M`] cell (by the flat xyz
 /// `means`) already gave `max_cell_fraction` of its splats, rounded down.
 #[cfg(test)]
 pub(crate) fn pick_evictions(

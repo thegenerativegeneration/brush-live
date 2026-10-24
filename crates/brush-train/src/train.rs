@@ -1430,7 +1430,7 @@ fn sample_background_color<R: rand::Rng + ?Sized>(
 mod append_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
-mod evict_tests;
+mod refine_evict_tests;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod divergence_tests;

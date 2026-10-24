@@ -2,7 +2,7 @@
 //! shrinks to it, a limited eviction keeps each group's quota, held rows no step ever trained are eviction candidates,
 //! and the budget follows take and append and is dropped by refine.
 
-use super::evict_tests::{N, batch, importance, record_importance, rows, splats, trainer_at_budget};
+use super::refine_evict_tests::{N, batch, importance, record_importance, rows, splats, trainer_at_budget};
 use super::radius_tests::{FAR, NEAR, bits, floats};
 use super::*;
 use crate::budget::{EvictionRelax, GroupBudget, NO_GROUP, RowBudget};
@@ -25,7 +25,7 @@ fn limited() -> RowBudget {
     halves(group(u32::MAX, false, 2), group(u32::MAX, false, 0), true)
 }
 
-/// No budget, one without a fallback or one that does not limit eviction widens to nothing.
+/// Widens to nothing without a budget, without a fallback, or when eviction is not limited.
 #[test]
 fn without_a_limited_fallback_nothing_widens() {
     assert!(super::refine_evict::widening_tiers(None).is_empty());
