@@ -446,3 +446,28 @@ fn the_default_config_has_no_per_tile_cap() {
     let parsed: GuideConfig = serde_json::from_str("{}").expect("parses");
     assert_eq!(parsed.area_tile_cap(), 0);
 }
+
+#[test]
+fn the_default_config_is_valid() {
+    assert_eq!(GuideConfig::default().validate(), Ok(()));
+}
+
+#[test]
+fn validate_rejects_bad_values() {
+    let cases: [(&str, fn(&mut GuideConfig, f32), &[f32]); 3] = [
+        ("voxel_size", |c, v| c.voxel_size = v, &[0.0, f32::NAN]),
+        ("min_cell_opacity", |c, v| c.min_cell_opacity = v, &[0.0, -0.1, f32::NAN]),
+        ("score_budget", |c, v| c.score_budget = v, &[0.0, f32::NAN]),
+    ];
+    for (key, set, values) in cases {
+        for &v in values {
+            let mut config = GuideConfig::default();
+            set(&mut config, v);
+            let err = config.validate().expect_err(&format!("{key} = {v} must be rejected"));
+            assert!(err.starts_with(key), "{err}");
+        }
+    }
+    let mut config = GuideConfig::default();
+    config.min_cell_opacity = 0.0;
+    assert_eq!(config.validate().unwrap_err(), "min_cell_opacity must be finite and above 0, got 0");
+}

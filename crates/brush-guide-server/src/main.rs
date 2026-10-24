@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         None => GuideConfig::default(),
     };
     args.apply_budget(&mut config);
+    config.validate().map_err(|e| anyhow::anyhow!("config: {e}"))?;
     let device = brush_process::burn_init_setup().await.autodiff();
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", args.port)).await?;
     log::info!("listening on {}", listener.local_addr()?);

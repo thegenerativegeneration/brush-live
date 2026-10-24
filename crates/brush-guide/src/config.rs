@@ -400,6 +400,21 @@ impl Default for GuideConfig {
 }
 
 impl GuideConfig {
+    /// Rejects values that would stall or poison a session: a non-finite or non-positive `voxel_size`,
+    /// `min_cell_opacity` or `score_budget`. Reports the first bad field by its JSON key.
+    pub fn validate(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("voxel_size", self.voxel_size),
+            ("min_cell_opacity", self.min_cell_opacity),
+            ("score_budget", self.score_budget),
+        ] {
+            if !(value.is_finite() && value > 0.0) {
+                return Err(format!("{key} must be finite and above 0, got {value}"));
+            }
+        }
+        Ok(())
+    }
+
     /// Most splats one tile holds: `area_tile_max_fraction` of `max_splats`, rounded; 0 for no per-tile cap.
     pub fn area_tile_cap(&self) -> u32 {
         if self.area.tile_max_fraction > 0.0 {

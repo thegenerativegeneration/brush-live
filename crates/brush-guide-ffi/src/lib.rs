@@ -160,12 +160,15 @@ fn set_autotune(json: &str) {
     }
 }
 
-fn parse_config(json: &str) -> Result<GuideConfig, serde_json::Error> {
-    if json.trim().is_empty() {
-        Ok(GuideConfig::default())
+/// Parses the `GuideConfig` overrides in `json` (empty for the defaults) and validates the result.
+fn parse_config(json: &str) -> Result<GuideConfig, String> {
+    let config = if json.trim().is_empty() {
+        GuideConfig::default()
     } else {
-        serde_json::from_str(json)
-    }
+        serde_json::from_str(json).map_err(|e| e.to_string())?
+    };
+    config.validate()?;
+    Ok(config)
 }
 
 unsafe fn str_arg<'a>(p: *const c_char) -> Option<&'a str> {
