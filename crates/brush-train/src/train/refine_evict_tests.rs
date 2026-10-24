@@ -448,3 +448,31 @@ async fn held_rows_are_never_evicted() {
     assert_eq!(s.num_splats() as usize, N - 6);
     assert!(trainer.rows.held.is_none());
 }
+
+/// Pruning refuses to empty the model. When the dead rows plus the evictions would cover every row, nothing is
+/// removed, so nothing counts as evicted and no growth room is granted for it.
+#[tokio::test]
+async fn evictions_count_nothing_when_every_row_would_go() {
+    let (mut trainer, s) = trainer_at_budget(0).await;
+    // 54 splats are below the opacity threshold; the 6 evictions wanted are all the live ones.
+    let opac: Vec<f32> = (0..N)
+        .map(|i| if i < N - 6 { inverse_sigmoid(1e-4) } else { inverse_sigmoid(0.5) })
+        .collect();
+    let device = s.device();
+    let base = Splats::from_raw(
+        (0..N).flat_map(|i| [i as f32 * 0.01, 0.0, 2.0]).collect(),
+        [1.0, 0.0, 0.0, 0.0].repeat(N),
+        vec![-3.0; N * 3],
+        vec![0.5; N * 3],
+        opac,
+        SplatRenderMode::Default,
+        &device,
+    );
+    record_importance(&mut trainer, &importance());
+    trainer.note_seed_shortfall(1);
+    let (s, stats) = trainer.refine(1, base).await;
+    assert_eq!(stats.num_pruned, 0);
+    assert_eq!(stats.num_evicted, 0);
+    assert_eq!(stats.evicted_for_total, 0);
+    assert_eq!(s.num_splats() as usize, N);
+}

@@ -1025,6 +1025,9 @@ impl SplatTrainer {
             self.evict_for_refine(iter, &splats, &refiner, prune_mask, held).await;
         let (mut splats, refiner, pruned_count, full) =
             prune_points(splats, &mut optim, refiner, &mut self.rows, prune_mask, full).await;
+        // A prune that would empty the model removes nothing, and neither did the evictions.
+        let num_evicted = num_evicted.min(pruned_count);
+        let evicted_for_total = evicted_for_total.min(num_evicted as usize);
         let num_dead = pruned_count.saturating_sub(num_evicted);
         // With the training radius on or rows held, splats no step trained since the last refine neither densify nor
         // decay; rows of a full group (`full`) do not densify either.
