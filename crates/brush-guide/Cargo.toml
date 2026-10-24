@@ -31,6 +31,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "fs", "macros"] }
 web-time.workspace = true
 
 [dev-dependencies]
+brush-train = { path = "../brush-train", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 # `cargo test` compiles every example by default (to catch bit-rot) even

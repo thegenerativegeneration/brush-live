@@ -7,6 +7,8 @@ license.workspace = true
 
 [features]
 debug-validation = ["brush-render/debug-validation"]
+# Test-only accessors that brush-guide's tests use.
+test-support = []
 
 [dependencies]
 brush-render.path = "../brush-render"

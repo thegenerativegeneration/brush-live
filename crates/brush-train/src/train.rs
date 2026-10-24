@@ -373,8 +373,7 @@ impl SplatTrainer {
         self.config.max_splats = max_splats;
     }
 
-    /// Diagnostic: the row budget the next refine applies ([`Self::set_row_budget`]); `None` when there is none.
-    #[doc(hidden)]
+    /// The row budget the next refine applies ([`Self::set_row_budget`]); `None` when there is none.
     pub fn row_budget(&self) -> Option<&RowBudget> {
         self.rows.budget.as_ref()
     }
@@ -385,16 +384,15 @@ impl SplatTrainer {
         &self.tally.budget_evicted
     }
 
-    /// Diagnostic: the rows held by [`Self::set_frozen_rows`], row-aligned with the current splats; `None` when none
-    /// are held.
-    #[doc(hidden)]
+    /// The rows held by [`Self::set_frozen_rows`], row-aligned with the current splats; `None` when none are held.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn frozen_rows(&self) -> Option<&Tensor<1, Bool>> {
         self.rows.held.as_ref()
     }
 
-    /// Diagnostic: the splats the next refine evicts for, from seeds and restores the budget turned away since the
-    /// last refine ([`Self::note_seed_shortfall`]); 0 without eviction.
-    #[doc(hidden)]
+    /// The splats the next refine evicts for, from seeds and restores the budget turned away since the last refine
+    /// ([`Self::note_seed_shortfall`]); 0 without eviction.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn pending_seed_shortfall(&self) -> u32 {
         self.evict.as_ref().map_or(0, |e| e.seed_shortfall)
     }

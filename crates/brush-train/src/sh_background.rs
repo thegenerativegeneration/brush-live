@@ -11,7 +11,9 @@ use brush_render::kernels::camera_model::CameraModel;
 use burn::tensor::module::{adaptive_avg_pool2d, interpolate};
 use burn::tensor::ops::{InterpolateMode, InterpolateOptions};
 use burn::tensor::{Device, Gradients, Int, Tensor, s};
-use glam::{UVec2, Vec3};
+use glam::UVec2;
+#[cfg(any(test, feature = "test-support"))]
+use glam::Vec3;
 
 /// Band-0 constant, matching `brush_render::kernels::sh::SH_C0`.
 const SH_C0: f32 = 0.282_094_8;
@@ -75,6 +77,7 @@ pub fn sh_basis(dirs: Tensor<2>) -> Tensor<2> {
 /// direction for every pixel but the centre. `brush-guide` keyframes are
 /// always pinhole; a non-pinhole caller needs its own unprojection, not a
 /// silently-wrong one.
+#[cfg(test)]
 pub fn pixel_dirs(camera: &Camera, size: UVec2) -> Vec<f32> {
     assert!(
         matches!(camera.camera_model, CameraModel::Pinhole),
@@ -294,12 +297,14 @@ impl ShBackground {
     /// coefficients of zero decode to mid-grey, not black. No upper clamp:
     /// it would zero the gradient wherever the globe reaches white, which
     /// overexposed sky does all the time.
+    #[cfg(test)]
     pub fn image(&self, basis: Tensor<2>) -> Tensor<2> {
         globe_colour(self.coeffs.clone(), basis)
     }
 
     /// A globe of one colour in every direction (band 0 only), with fresh
     /// Adam state.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn constant(device: &Device, colour: Vec3) -> Self {
         let mut bg = Self::new(device, 1.0);
         let mut coeffs = [0.0f32; 27];
