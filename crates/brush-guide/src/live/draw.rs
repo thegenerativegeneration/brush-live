@@ -105,48 +105,45 @@ mod tests {
         assert!((0..1000).all(|_| pick_pending(&mut rng, 20, &[]).is_none()));
     }
 
-    /// `pick_pending` as it was when pending views were always a contiguous range.
-    fn pick_pending_from_range(
-        rng: &mut rand::rngs::StdRng,
-        loader_len: usize,
-        pending: std::ops::Range<usize>,
-    ) -> Option<usize> {
-        if pending.is_empty() {
-            return None;
-        }
-        let r = rng.random_range(0..loader_len + pending.len());
-        (r >= loader_len).then(|| pending.start + r - loader_len)
-    }
-
-    /// The draw `train_step` made before area training: recent with `recent_fraction`, else the all loader.
-    fn draw_before_area(
-        rng: &mut rand::rngs::StdRng,
-        recent_len: usize,
-        pending: std::ops::Range<usize>,
-    ) -> Draw {
-        let use_recent = rng.random::<f32>() < 0.7;
-        match use_recent
-            .then(|| pick_pending_from_range(rng, recent_len, pending))
-            .flatten()
-        {
-            Some(i) => Draw::Pending(i),
-            None if use_recent => Draw::RecentLoader,
-            None => Draw::AllLoader,
-        }
-    }
-
-    /// With area training off the pending views are the views after the recent loader's, as before, and the draws
-    /// consume the same random numbers.
+    /// With area training off the pending views are the two after the recent loader's; the draws and the random
+    /// numbers they consume are pinned.
     #[test]
-    fn area_off_draws_the_same_sequence_as_before() {
-        let mut old = rand::rngs::StdRng::seed_from_u64(11);
-        let mut new = rand::rngs::StdRng::seed_from_u64(11);
+    fn area_off_draws_are_pinned() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(11);
+        let mut counts = [0usize; 4];
+        let mut first = Vec::new();
         for step in 0..5000 {
-            let pending = if step % 3 == 0 { 20..20 } else { 20..22 };
-            let want = draw_before_area(&mut old, 20, pending.clone());
-            let pending: Vec<usize> = pending.collect();
-            assert_eq!(choose_draw(&mut new, 0.7, 20, &pending), want, "step {step}");
+            let pending: &[usize] = if step % 3 == 0 { &[] } else { &[20, 21] };
+            let draw = choose_draw(&mut rng, 0.7, 20, pending);
+            match draw {
+                Draw::Pending(20) => counts[0] += 1,
+                Draw::Pending(21) => counts[1] += 1,
+                Draw::RecentLoader => counts[2] += 1,
+                Draw::AllLoader => counts[3] += 1,
+                Draw::Pending(i) => panic!("unexpected pending view {i}"),
+            }
+            if step < 12 {
+                first.push(draw);
+            }
         }
+        assert_eq!(counts, [122, 89, 3308, 1481]);
+        assert_eq!(
+            first,
+            vec![
+                Draw::RecentLoader,
+                Draw::RecentLoader,
+                Draw::AllLoader,
+                Draw::AllLoader,
+                Draw::AllLoader,
+                Draw::RecentLoader,
+                Draw::RecentLoader,
+                Draw::RecentLoader,
+                Draw::AllLoader,
+                Draw::RecentLoader,
+                Draw::AllLoader,
+                Draw::Pending(20),
+            ]
+        );
     }
 
     /// Pending views need not be contiguous: area training leaves out those outside the area.

@@ -151,7 +151,7 @@ async fn resident_rows_in_a_near_parked_tile_restore_it_once() {
     let r = live.area_report().unwrap();
     assert!(r.counters.restores >= 1, "{r:?}");
     assert!(!live.area.as_ref().unwrap().registry.parked_keys().contains(&key));
-    assert!(!crate::area::park_file::tile_path(&dir.join("tiles"), key).exists());
+    assert!(!crate::area::tile_path(&dir.join("tiles"), key).exists());
     // The tile came back once: it holds its parked rows and the drifted ones (which no view sees, so the refine
     // neither grew nor moved them), not a second copy.
     let means: Vec<f32> = live.splats().unwrap().means().into_data_async().await.unwrap().try_to_vec().unwrap();
@@ -164,7 +164,7 @@ async fn resident_rows_in_a_near_parked_tile_restore_it_once() {
 async fn a_pose_correction_while_parked_moves_the_restored_splats() {
     let (mut live, dir) = parked_origin("restore-pose").await;
     let key = live.area.as_ref().unwrap().registry.parked_keys()[0];
-    let parked = crate::area::park_file::read_tile(&dir.join("tiles"), key).unwrap().rows;
+    let parked = crate::area::read_tile(&dir.join("tiles"), key).unwrap().rows;
     live.update_poses(&[correction(0, Vec3::new(0.1, 0.0, 2.0), Vec3::new(0.1, 0.0, 0.0))]);
     let moved = live.load_parked(key).unwrap();
     for i in 0..parked.len() {
@@ -183,7 +183,7 @@ async fn a_large_consistent_correction_is_applied_on_restore() {
     let tiles = dir.join("tiles");
     let mut parked: Vec<Vec3> = Vec::new();
     for key in live.area.as_ref().unwrap().registry.parked_keys() {
-        let rows = crate::area::park_file::read_tile(&tiles, key).unwrap().rows;
+        let rows = crate::area::read_tile(&tiles, key).unwrap().rows;
         parked.extend((0..rows.len()).filter(|&i| rows.origin[i] == Some(0)).map(|i| rows.mean(i)));
     }
     live.update_poses(&[correction(0, Vec3::new(2.0, 0.0, 2.0), Vec3::new(2.0, 0.0, 0.0))]);
@@ -205,7 +205,7 @@ async fn a_large_consistent_correction_is_applied_on_restore() {
 /// Views that disagree by more than the limit about where the tile is drop it.
 #[tokio::test]
 async fn views_disagreeing_about_a_parked_tile_drop_it() {
-    use crate::area::park_file::{SlotPose, read_tile, write_tile};
+    use crate::area::{SlotPose, read_tile, write_tile};
     let (mut live, dir) = parked_origin("restore-inconsistent").await;
     let tiles = dir.join("tiles");
     let centre = Vec3::new(0.3, 0.0, 2.0);
@@ -234,7 +234,7 @@ async fn views_disagreeing_about_a_parked_tile_drop_it() {
     let r = live.area_report().unwrap();
     assert!(r.counters.drops >= 1, "{r:?}");
     assert!(!live.area.as_ref().unwrap().registry.parked_keys().contains(&key));
-    assert!(!crate::area::park_file::tile_path(&tiles, key).exists());
+    assert!(!crate::area::tile_path(&tiles, key).exists());
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -362,7 +362,7 @@ async fn a_long_park_resets_the_importance() {
 /// A tile file with another SH degree than the model's is dropped (and retrains from its keyframes), not restored.
 #[tokio::test]
 async fn a_tile_of_another_sh_degree_is_dropped() {
-    use crate::area::park_file::{read_tile, tile_path, write_tile};
+    use crate::area::{read_tile, tile_path, write_tile};
     let (mut live, dir) = parked_origin("restore-sh").await;
     let tiles = dir.join("tiles");
     let keys = live.area.as_ref().unwrap().registry.parked_keys();
@@ -390,7 +390,7 @@ async fn a_tile_of_another_sh_degree_is_dropped() {
 /// A tile file that cannot be read is dropped (and retrains from its keyframes), not restored.
 #[tokio::test]
 async fn an_unreadable_tile_is_dropped_on_restore() {
-    use crate::area::park_file::tile_path;
+    use crate::area::tile_path;
     let (mut live, dir) = parked_origin("restore-unreadable").await;
     let tiles = dir.join("tiles");
     let key = live.area.as_ref().unwrap().registry.parked_keys()[0];

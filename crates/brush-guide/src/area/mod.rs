@@ -1,20 +1,21 @@
 //! Area training: only the tiles around the newest keyframe train; tiles the capture has left are parked on disk
 //! and restored when it comes back (spec `docs/superpowers/specs/2026-10-14-area-training-design.md`).
 
-pub mod active;
-pub mod buckets;
-pub mod budget;
-pub mod park_file;
-pub mod ply_stream;
-pub mod pose_replay;
-pub mod tiles;
-pub mod views;
+mod active;
+mod buckets;
+mod budget;
+mod park_file;
+mod ply_stream;
+mod pose_replay;
+mod tiles;
+mod views;
 
 pub use active::{
     ActiveRule, Candidate, Heights, SeedSort, candidate_boxes, keep_active_seeds, near_radius, resident_boxes, near_tiles, rank_active,
     tile_heights,
     views_seeing, widen_all,
 };
+pub use buckets::representatives;
 pub use budget::{FairShare, far_inactive_to_park, keep_under_tile_cap, row_budget, tile_counts, tile_splats};
 pub use ply_stream::PlyStreamWriter;
 pub use park_file::{

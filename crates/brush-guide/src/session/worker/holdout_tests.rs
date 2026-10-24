@@ -23,7 +23,7 @@ fn view(dir: &Path, id: u64) -> SceneView {
 fn every_nth_new_keyframe_is_held_out_with_non_sequential_ids() {
     let dir = std::env::temp_dir().join(format!("holdout-unit-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let mut h = Holdout::new(3, 30.0);
+    let mut h = Holdout::new(3);
     let mut held = Vec::new();
     for id in [10u64, 11, 40, 41, 77, 90, 91, 92, 99] {
         if h.next_is_held() {
@@ -42,7 +42,7 @@ fn every_nth_new_keyframe_is_held_out_with_non_sequential_ids() {
 
 #[test]
 fn next_is_held_changes_no_state() {
-    let h = Holdout::new(2, 30.0);
+    let h = Holdout::new(2);
     assert!(!h.next_is_held() && !h.next_is_held());
     let mut h = h;
     h.note_trained();
@@ -94,7 +94,7 @@ fn extras_follow_the_config_and_the_seam_waits_for_its_count_or_finish() {
 
 #[test]
 fn zero_holds_nothing_out() {
-    let mut h = Holdout::new(0, 30.0);
+    let mut h = Holdout::new(0);
     for _ in 0..20 {
         assert!(!h.next_is_held());
         h.note_trained();
@@ -103,7 +103,7 @@ fn zero_holds_nothing_out() {
 
 #[test]
 fn one_is_treated_as_off() {
-    let h = Holdout::new(1, 30.0);
+    let h = Holdout::new(1);
     assert!(!h.next_is_held());
 }
 
@@ -119,7 +119,7 @@ fn corrected_poses_move_held_out_views() {
         glam::vec2(0.5, 0.5),
         brush_render::kernels::camera_model::CameraModel::Pinhole,
     );
-    let mut h = Holdout::new(2, 30.0);
+    let mut h = Holdout::new(2);
     h.add_held(4, camera, view(&dir, 4), &dir);
     let p = crate::live::ViewPose {
         id: 4,
@@ -147,7 +147,7 @@ async fn eval_scores_views_that_load_and_skips_the_missing_one() {
         glam::vec2(0.5, 0.5),
         brush_render::kernels::camera_model::CameraModel::Pinhole,
     );
-    let mut h = Holdout::new(2, 30.0);
+    let mut h = Holdout::new(2);
     h.add_held(1, camera.clone(), view(&dir, 1), &dir);
     h.add_held(2, camera, view(&dir, 2), &dir);
     std::fs::remove_file(dir.join("2.jpg")).unwrap();
@@ -163,7 +163,7 @@ async fn eval_scores_views_that_load_and_skips_the_missing_one() {
         SplatRenderMode::Default,
         &device,
     );
-    let result = h.eval(&splats, 0.0, &EvalExtras::none(), None).await.expect("one view scores");
+    let result = h.eval(&splats, &EvalExtras::none(), None).await.expect("one view scores");
     assert_eq!(result.views, 1);
     assert_eq!((result.lpips_ms, result.seam_ms), (0.0, 0.0));
     assert!(result.psnr.is_finite(), "psnr {}", result.psnr);
@@ -183,7 +183,7 @@ async fn extras_add_lpips_and_save_renders() {
     let view = SceneView { image: LoadImage::new(vfs, rel, None, 64, None, false), camera: Camera::default() };
     let camera = Camera::new(glam::Vec3::ZERO, glam::Quat::IDENTITY, 1.0, 1.0, glam::vec2(0.5, 0.5),
         brush_render::kernels::camera_model::CameraModel::Pinhole);
-    let mut h = Holdout::new(2, 30.0);
+    let mut h = Holdout::new(2);
     h.add_held(5, camera, view, &dir);
     let device = brush_cube::test_helpers::test_device().await.into();
     // An opaque splat 1 m wide, 2 m ahead on the tile border x = 0: its surface spans the 0.5 m band and the
@@ -192,7 +192,7 @@ async fn extras_add_lpips_and_save_renders() {
         vec![inverse_sigmoid(0.99)], SplatRenderMode::Default, &device);
     let extras = EvalExtras { lpips: true, lpips_ids: Vec::new(), seam_band_m: 0.5, tile_size_m: 10.0,
         save_dir: Some(dir.join("eval_renders")), save_ids: vec![5], iter: 7 };
-    let r = h.eval(&splats, 0.0, &extras, None).await.expect("scores");
+    let r = h.eval(&splats, &extras, None).await.expect("scores");
     assert!(r.lpips_ms > 0.0 && r.seam_ms > 0.0, "{} {}", r.lpips_ms, r.seam_ms);
     assert!(r.per_view[0].lpips.is_some_and(f32::is_finite));
     assert!(r.per_view[0].psnr_band.is_some_and(f32::is_finite), "{:?}", r.per_view[0]);
@@ -213,7 +213,7 @@ fn solid_holdout(dir: &Path) -> Holdout {
     let view = SceneView { image: LoadImage::new(vfs, rel, None, 64, None, false), camera: Camera::default() };
     let camera = Camera::new(glam::Vec3::ZERO, glam::Quat::IDENTITY, 1.0, 1.0, glam::vec2(0.5, 0.5),
         brush_render::kernels::camera_model::CameraModel::Pinhole);
-    let mut h = Holdout::new(2, 30.0);
+    let mut h = Holdout::new(2);
     h.add_held(5, camera, view, dir);
     h
 }
@@ -239,8 +239,8 @@ async fn saved_renders_show_the_sh_background() {
     let globe = gt_globe(&device);
     let save = |iter| EvalExtras { save_dir: Some(dir.join("eval_renders")), save_ids: vec![5], iter,
         ..EvalExtras::none() };
-    let black = h.eval(&splats, 0.0, &save(1), None).await.expect("scores");
-    let over = h.eval(&splats, 0.0, &save(2), Some(&globe)).await.expect("scores");
+    let black = h.eval(&splats, &save(1), None).await.expect("scores");
+    let over = h.eval(&splats, &save(2), Some(&globe)).await.expect("scores");
     assert!(black.psnr < 15.0 && over.psnr > 40.0, "black {} dB, over the globe {} dB", black.psnr, over.psnr);
     let pixel = |iter: u32| image::open(dir.join(format!("eval_renders/5_{iter}.png"))).unwrap().to_rgb8()[(32, 32)].0;
     assert_eq!(pixel(1), [0, 0, 0]);
@@ -261,8 +261,8 @@ async fn seam_split_keeps_its_pixels_over_the_sh_background() {
         vec![inverse_sigmoid(0.99)], SplatRenderMode::Default, &device);
     let globe = gt_globe(&device);
     let seam = EvalExtras { seam_band_m: 0.5, ..EvalExtras::none() };
-    let black = h.eval(&splats, 0.0, &seam, None).await.expect("scores").per_view.remove(0);
-    let over = h.eval(&splats, 0.0, &seam, Some(&globe)).await.expect("scores").per_view.remove(0);
+    let black = h.eval(&splats, &seam, None).await.expect("scores").per_view.remove(0);
+    let over = h.eval(&splats, &seam, Some(&globe)).await.expect("scores").per_view.remove(0);
     let (Some(band_black), Some(interior_black), Some(band), Some(interior)) =
         (black.psnr_band, black.psnr_interior, over.psnr_band, over.psnr_interior)
     else {

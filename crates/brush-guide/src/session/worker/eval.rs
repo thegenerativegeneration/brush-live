@@ -31,7 +31,7 @@ impl Worker {
         self.rate_window.0 += load_ms / 1e3;
         let background = self.live.sh_background();
         let composited = if background.is_some() { eval_log::EvalBackground::Sh } else { eval_log::EvalBackground::Black };
-        let Some(r) = self.holdout.eval(&splats, now, &eval_extras, background).await else {
+        let Some(r) = self.holdout.eval(&splats, &eval_extras, background).await else {
             return false;
         };
         // Nor does the eval itself.

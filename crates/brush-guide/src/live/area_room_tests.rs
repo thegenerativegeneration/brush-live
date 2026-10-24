@@ -116,7 +116,7 @@ async fn a_deferred_restore_comes_back_once_room_is_made() {
     let smallest = near.iter().map(|&k| registry.get(k).unwrap().splats).min().unwrap();
     assert!(smallest >= 4, "room for seeds but for no tile: {smallest}");
     // A deferral that read this file would drop the tile.
-    std::fs::write(crate::area::park_file::tile_path(&tiles, near[0]), b"not a tile").unwrap();
+    std::fs::write(crate::area::tile_path(&tiles, near[0]), b"not a tile").unwrap();
     live.config.max_splats = live.splats().unwrap().num_splats() + smallest - 1;
     // The keyframe looks past the parked tiles, so its seeds (3 m beyond them) stay resident.
     add_seeing(&mut live, &dir, 2, pos, away, &[away]).await;
@@ -145,7 +145,7 @@ async fn seeds_land_where_a_seeds_pass_restore_dropped_the_tile() {
     let tiles = dir.join("tiles");
     let parked = live.area.as_ref().unwrap().registry.parked_keys();
     for &key in &parked {
-        std::fs::write(crate::area::park_file::tile_path(&tiles, key), b"not a tile").unwrap();
+        std::fs::write(crate::area::tile_path(&tiles, key), b"not a tile").unwrap();
     }
     // 6 m away: beyond the radius, so the seeds pass tries them.
     add(&mut live, &dir, 2, Vec3::new(0.0, 0.0, 6.0), Vec3::ZERO).await;

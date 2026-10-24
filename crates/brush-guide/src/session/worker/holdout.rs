@@ -102,9 +102,8 @@ pub(super) struct EvalResult {
 }
 
 impl Holdout {
-    /// `every` 0 holds nothing out; 1 would hold out everything and counts as 0. The eval interval belongs to
-    /// the `EvalSchedule`.
-    pub(super) fn new(every: u32, _interval_s: f32) -> Self {
+    /// `every` 0 holds nothing out; 1 would hold out everything and counts as 0.
+    pub(super) fn new(every: u32) -> Self {
         let every = if every == 1 {
             log::warn!("holdout_every 1 would hold out every keyframe; holdout off");
             0
@@ -126,7 +125,7 @@ impl Holdout {
     pub(super) fn from_config(config: &GuideConfig) -> Self {
         Self {
             max_received: config.holdout.max_received,
-            ..Self::new(config.holdout.every, config.eval.interval_s)
+            ..Self::new(config.holdout.every)
         }
     }
 
@@ -197,7 +196,6 @@ impl Holdout {
     pub(super) async fn eval(
         &mut self,
         splats: &Splats,
-        _now_s: f64,
         extras: &EvalExtras,
         background: Option<&ShBackground>,
     ) -> Option<EvalResult> {

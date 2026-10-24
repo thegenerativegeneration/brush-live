@@ -89,6 +89,7 @@ pub struct LiveModel {
     /// Views in the all-views loader.
     all_members: Vec<usize>,
     /// How often the all-views loader was built.
+    #[cfg(test)]
     all_loader_builds: u32,
     iter: u32,
     /// Splats evicted to stay within the budget, in total.
@@ -145,6 +146,7 @@ impl LiveModel {
             recent_members: Vec::new(),
             views_in_recent: 0,
             all_members: Vec::new(),
+            #[cfg(test)]
             all_loader_builds: 0,
             iter: 0,
             num_evicted: 0,

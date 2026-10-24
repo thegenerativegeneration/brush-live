@@ -231,7 +231,7 @@ async fn an_unreadable_far_tile_is_dropped_when_rows_drift_into_it() {
     let (mut live, dir) = parked_origin("merge-unreadable").await;
     let tiles = dir.join("tiles");
     let key = live.area.as_ref().unwrap().registry.parked_keys()[0];
-    std::fs::write(crate::area::park_file::tile_path(&tiles, key), b"not a tile").unwrap();
+    std::fs::write(crate::area::tile_path(&tiles, key), b"not a tile").unwrap();
     let corner = key.min_xz(1.0);
     drift_rows(&mut live, (0..3).flat_map(|i| [corner.x + 0.2 + 0.1 * i as f32, 0.0, corner.y + 0.5]).collect()).await;
     let drops_before = live.area_report().unwrap().counters.drops;
@@ -239,7 +239,7 @@ async fn an_unreadable_far_tile_is_dropped_when_rows_drift_into_it() {
     let r = live.area_report().unwrap();
     assert_eq!(r.counters.drops, drops_before + 1, "{r:?}");
     assert!(live.area.as_ref().unwrap().registry.get(key).is_none_or(|t| t.resident), "the tile is still parked");
-    assert!(!crate::area::park_file::tile_path(&tiles, key).exists());
+    assert!(!crate::area::tile_path(&tiles, key).exists());
     let means: Vec<f32> = live.splats().unwrap().means().into_data_async().await.unwrap().try_to_vec().unwrap();
     let here = means.chunks(3).filter(|p| TileKey::of(Vec3::new(p[0], p[1], p[2]), 1.0) == key).count();
     assert_eq!(here, 3, "the drifted rows stay resident");
@@ -250,7 +250,7 @@ async fn an_unreadable_far_tile_is_dropped_when_rows_drift_into_it() {
 /// tile is dropped.
 #[tokio::test]
 async fn a_far_tile_whose_views_disagree_is_dropped_when_rows_drift_into_it() {
-    use crate::area::park_file::{SlotPose, write_tile};
+    use crate::area::{SlotPose, write_tile};
     use crate::live::area_restore::tests::{correction, drift_rows, parked_origin};
     let (mut live, dir) = parked_origin("merge-inconsistent").await;
     let tiles = dir.join("tiles");
@@ -273,7 +273,7 @@ async fn a_far_tile_whose_views_disagree_is_dropped_when_rows_drift_into_it() {
     let r = live.area_report().unwrap();
     assert!(r.counters.drops >= 1, "{r:?}");
     assert!(live.area.as_ref().unwrap().registry.get(key).is_none_or(|t| t.resident), "the tile is still parked");
-    assert!(!crate::area::park_file::tile_path(&tiles, key).exists());
+    assert!(!crate::area::tile_path(&tiles, key).exists());
     let means: Vec<f32> = live.splats().unwrap().means().into_data_async().await.unwrap().try_to_vec().unwrap();
     let here = means.chunks(3).filter(|p| TileKey::of(Vec3::new(p[0], p[1], p[2]), 1.0) == key).count();
     assert_eq!(here, 3, "the drifted rows stay resident");
