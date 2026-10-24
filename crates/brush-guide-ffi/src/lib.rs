@@ -13,7 +13,7 @@ use burn_wgpu::WgpuDevice;
 use std::ffi::{CStr, c_char, c_void};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, Once, PoisonError};
 use tokio::sync::watch;
 
 mod prewarm;
@@ -89,28 +89,36 @@ fn device(runtime: &tokio::runtime::Runtime) -> Option<burn::tensor::Device> {
     Some(device)
 }
 
-/// Appends every panic's message and backtrace to `path` (on iOS, stderr is
-/// lost), then runs the previous hook. Installed once per process.
-fn record_panics(path: PathBuf) {
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
-    if INSTALLED.swap(true, Ordering::SeqCst) {
-        return;
+/// Appends every panic's message and backtrace to the file last given as
+/// `path` (on iOS, stderr is lost), then runs the previous hook. `None` keeps
+/// the current file. The hook is installed once per process; a later engine
+/// redirects it.
+fn record_panics(path: Option<PathBuf>) {
+    static PANIC_LOG: Mutex<Option<PathBuf>> = Mutex::new(None);
+    static INSTALL: Once = Once::new();
+    if let Some(path) = path {
+        *PANIC_LOG.lock().unwrap_or_else(PoisonError::into_inner) = Some(path);
     }
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        use std::io::Write;
-        let thread = std::thread::current();
-        let text = format!(
-            "--- panic on thread {:?} at {:?}\n{info}\n{}\n",
-            thread.name().unwrap_or("?"),
-            std::time::SystemTime::now(),
-            std::backtrace::Backtrace::force_capture()
-        );
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = f.write_all(text.as_bytes());
-        }
-        previous(info);
-    }));
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            use std::io::Write;
+            let thread = std::thread::current();
+            let text = format!(
+                "--- panic on thread {:?} at {:?}\n{info}\n{}\n",
+                thread.name().unwrap_or("?"),
+                std::time::SystemTime::now(),
+                std::backtrace::Backtrace::force_capture()
+            );
+            let path = PANIC_LOG.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            if let Some(path) = path
+                && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+            {
+                let _ = f.write_all(text.as_bytes());
+            }
+            previous(info);
+        }));
+    });
 }
 
 /// Applies the optional `"gpu_autotune_level"` (`minimal`, `balanced`,
@@ -219,7 +227,7 @@ pub unsafe extern "C" fn bge_new(
         out.error("engine: session directory missing");
         return std::ptr::null_mut();
     };
-    record_panics(PathBuf::from(dir).join("engine-panic.txt"));
+    record_panics(Some(PathBuf::from(dir).join("engine-panic.txt")));
     let (config, runtime, device) = match init(json) {
         Ok(parts) => parts,
         Err(e) => {
@@ -356,7 +364,8 @@ pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
 }
 
 /// Runs the session warm-up to completion. `config_json` is read as in
-/// `bge_new`. Returns 0 on success, 1 on a config error, no GPU adapter or a
+/// `bge_new`. A panic is logged to the newest engine's `engine-panic.txt`, if
+/// any. Returns 0 on success, 1 on a config error, no GPU adapter or a
 /// panic in the warm-up. It compiles the kernels of every warm-up size (and
 /// tunes them where autotune is enabled) on the process-wide device, so later
 /// sessions reuse them. While any engine is paused, the warm-up waits between
@@ -366,6 +375,7 @@ pub unsafe extern "C" fn bge_resume(e: *mut BgeEngine) {
 /// `config_json` is NUL-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bge_warm_up(config_json: *const c_char) -> i32 {
+    record_panics(None);
     let json = unsafe { str_arg(config_json) }.unwrap_or("");
     let (config, runtime, device) = match init(json) {
         Ok(parts) => parts,
